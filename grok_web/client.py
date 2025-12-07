@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import requests
+from curl_cffi import requests
 
 from .auth import load_cookies
 from .exceptions import GrokAPIError, GrokAuthError, GrokNotFoundError
@@ -38,18 +38,22 @@ class GrokClient:
     BASE_URL = "https://grok.com"
     ASSETS_URL = "https://assets.grok.com"
 
-    # Headers for API requests
+    # Headers for API requests (matching Chrome 142)
     API_HEADERS = {
         "accept": "*/*",
         "accept-language": "en-US,en;q=0.9",
         "content-type": "application/json",
         "origin": "https://grok.com",
+        "referer": "https://grok.com/",
+        "sec-ch-ua": '"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"macOS"',
         "sec-fetch-dest": "empty",
         "sec-fetch-mode": "cors",
         "sec-fetch-site": "same-origin",
         "user-agent": (
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
         ),
     }
 
@@ -57,7 +61,7 @@ class GrokClient:
     ASSET_HEADERS = {
         "user-agent": (
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
         ),
         "referer": "https://grok.com/",
         "origin": "https://grok.com",
@@ -80,7 +84,9 @@ class GrokClient:
             cookies = load_cookies(config_path)
 
         self.cookies = cookies
-        self._session = requests.Session()
+        # Use curl_cffi with Chrome 136 impersonation to bypass Cloudflare bot detection
+        # This mimics Chrome's TLS fingerprint for anti-bot bypass
+        self._session = requests.Session(impersonate="chrome136")
         self._session.headers.update(self.API_HEADERS)
         self._session.cookies.update(cookies.to_dict())
 
@@ -116,8 +122,11 @@ class GrokClient:
             ...     print(f"{p.id}: {p.mode.value} ({p.video_count} videos)")
         """
         json_data: dict[str, Any] = {"limit": limit}
+        # API requires filter to be present (even if empty)
         if source:
             json_data["filter"] = {"source": source}
+        else:
+            json_data["filter"] = {}
 
         data = self._api_request("POST", "/rest/media/post/list", json_data)
 
@@ -211,8 +220,9 @@ class GrokClient:
                 headers=self.ASSET_HEADERS,
                 cookies=self.cookies.to_dict(),
                 timeout=15,
+                impersonate="chrome136",
             )
-        except requests.RequestException as e:
+        except Exception as e:
             raise GrokAPIError(f"Asset request failed: {e}")
 
         if response.status_code == 403:
@@ -251,7 +261,7 @@ class GrokClient:
             self._api_request(
                 "POST",
                 "/rest/media/post/list",
-                {"limit": 1},
+                {"limit": 1, "filter": {}},
             )
             return True
         except GrokAuthError:
