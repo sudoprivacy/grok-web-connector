@@ -317,7 +317,7 @@ class GrokClient:
 
         try:
             response = self._session.request(method, url, json=json_data)
-        except requests.RequestException as e:
+        except Exception as e:
             raise GrokAPIError(f"Request failed: {e}")
 
         if response.status_code in (401, 403):
