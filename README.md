@@ -5,6 +5,7 @@ Python client library for interacting with Grok Imagine web API.
 ## Features
 
 - **4 Core APIs** for comprehensive Grok Imagine interaction
+- **Cloudflare bypass** via curl_cffi TLS fingerprint impersonation
 - Cookie-based authentication (no password required)
 - Automatic generation mode detection (img2vid, txt2vid, upload2vid)
 - Type-safe with Pydantic models
@@ -294,7 +295,8 @@ client = GrokClient()
 try:
     details = client.get_post_details("invalid-uuid")
 except GrokAuthError:
-    print("Cookies expired. Update ~/.grok-config.json")
+    # See "Troubleshooting 403 Errors" section below!
+    print("Request blocked - check TLS impersonation first, then cookies")
 except GrokNotFoundError:
     print("Post not found")
 except GrokAPIError as e:
@@ -303,13 +305,45 @@ except GrokAPIError as e:
 
 ---
 
-## Cookie Expiration
+## Troubleshooting 403 Errors
 
-Cookies typically last several weeks. When they expire:
+**IMPORTANT**: 403 errors are usually caused by **Cloudflare bot detection**, NOT cookie expiration!
 
-1. Re-extract from browser (DevTools → Application → Cookies)
-2. Update `~/.grok-config.json`
-3. Verify with `client.validate_auth()`
+### How Cloudflare Bot Detection Works
+
+Cloudflare fingerprints the TLS handshake - the way a client negotiates encryption reveals whether it's a real browser or a Python script. Standard `requests` library has a distinctive TLS fingerprint that Cloudflare blocks.
+
+### Solution: curl_cffi
+
+This library uses `curl_cffi` which impersonates Chrome's TLS fingerprint:
+
+```python
+from curl_cffi import requests
+session = requests.Session(impersonate="chrome136")
+```
+
+### Troubleshooting Steps (in order!)
+
+1. **Update impersonation version** (most common fix)
+   - Edit `client.py`: change `impersonate="chrome136"` to newer version
+   - Available versions: `chrome131`, `chrome133a`, `chrome136`, etc.
+   - Check curl_cffi releases for latest Chrome versions
+
+2. **Update headers to match Chrome version**
+   - Update `sec-ch-ua` header to match your impersonation version
+   - Update `user-agent` Chrome version number
+
+3. **Cookie expiration** (RARE - try steps 1-2 first!)
+   - Cookies typically last weeks/months
+   - Only refresh cookies after steps 1-2 fail
+
+### Why Cookie Expiration is Rare
+
+- `sso` and `sso-rw`: Session tokens, last weeks
+- `x-userid`: User identifier, doesn't expire
+- `cf_clearance`: Cloudflare token, tied to browser fingerprint
+
+The `cf_clearance` cookie is tied to the browser's TLS fingerprint. If curl_cffi's impersonation matches closely enough, the same cookie works indefinitely.
 
 ---
 

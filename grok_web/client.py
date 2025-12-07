@@ -6,6 +6,23 @@ Provides 4 core APIs for interacting with Grok Imagine:
 2. get_post_details() - Get full details for a specific post
 3. get_asset_file_size() - Get file size from assets.grok.com URL
 4. validate_auth() - Check if authentication is valid
+
+IMPORTANT - Cloudflare Bot Detection:
+    This client uses curl_cffi (not standard requests) to bypass Cloudflare's
+    bot detection. Cloudflare detects bots via TLS fingerprinting - the way
+    a client negotiates TLS (cipher suites, extensions, etc.) reveals whether
+    it's a real browser or a Python script.
+
+    curl_cffi impersonates Chrome's TLS fingerprint, making requests appear
+    to come from a real browser. Without this, you'll get 403 errors even
+    with valid cookies.
+
+    If you encounter 403 errors:
+    1. First check if curl_cffi impersonation version needs updating
+       (we use chrome136, but newer versions may be needed as Chrome updates)
+    2. Cookie expiration is RARE - cookies typically last weeks/months
+    3. Try updating the impersonate parameter to a newer Chrome version
+       Available: chrome131, chrome133a, chrome136, etc.
 """
 
 from datetime import datetime
@@ -28,6 +45,14 @@ from .models import (
 class GrokClient:
     """
     Client for Grok Imagine web API.
+
+    Uses curl_cffi with Chrome TLS impersonation to bypass Cloudflare bot detection.
+    This is essential - standard Python requests will be blocked with 403 errors.
+
+    Troubleshooting 403 errors:
+        1. Update impersonation: Try newer Chrome version (chrome136 -> chrome140, etc.)
+        2. Update headers: Match sec-ch-ua to current Chrome version
+        3. Cookie expiration: RARE, but check cf_clearance if all else fails
 
     Example:
         >>> client = GrokClient()
@@ -227,7 +252,10 @@ class GrokClient:
 
         if response.status_code == 403:
             raise GrokAuthError(
-                "Asset access denied (403). Cookies may have expired."
+                "Asset access denied (403). Check:\n"
+                "1. TLS impersonation version (try newer chrome version)\n"
+                "2. Required headers: Referer and Origin must be https://grok.com\n"
+                "3. Cookie expiration (RARE) - cf_clearance may need refresh"
             )
 
         if response.status_code != 200:
@@ -247,14 +275,19 @@ class GrokClient:
 
     def validate_auth(self) -> bool:
         """
-        Check if current authentication cookies are valid.
+        Check if current authentication and TLS bypass are working.
 
         Returns:
-            True if authentication is valid, False otherwise
+            True if requests succeed, False otherwise
+
+        Note:
+            False does NOT necessarily mean cookies expired!
+            Most common cause is TLS fingerprint mismatch (Cloudflare bot detection).
+            Try updating the impersonate version before refreshing cookies.
 
         Example:
             >>> if not client.validate_auth():
-            ...     print("Please update your cookies!")
+            ...     print("Check TLS impersonation version first, then cookies")
         """
         try:
             # Try to list posts with minimal limit
@@ -289,8 +322,12 @@ class GrokClient:
 
         if response.status_code in (401, 403):
             raise GrokAuthError(
-                "Authentication failed. Cookies may have expired.\n"
-                "Please update ~/.grok-config.json with fresh cookies."
+                "Request blocked (401/403). Most likely causes:\n"
+                "1. TLS fingerprint mismatch - try updating impersonate version "
+                "(chrome136 -> newer)\n"
+                "2. Headers outdated - update sec-ch-ua to match current Chrome\n"
+                "3. Cookie expiration (RARE) - update ~/.grok-config.json\n"
+                "Note: Cloudflare blocks by TLS fingerprint, not just cookies!"
             )
 
         if response.status_code == 404:
