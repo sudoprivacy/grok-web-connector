@@ -138,3 +138,28 @@ class GrokCookies(BaseModel):
 
     class Config:
         populate_by_name = True
+
+
+class VideoMatchResult(BaseModel):
+    """Result of matching a local video file to its web counterpart."""
+
+    # Identifiers
+    parent_id: str = Field(..., description="Parent post UUID")
+    video_id: str = Field(..., description="Video UUID (child or parent for txt2vid)")
+    is_parent_video: bool = Field(
+        False, description="True if this is a txt2vid parent video (not a child)"
+    )
+
+    # Metadata
+    mode: GenerationMode = Field(..., description="Generation mode")
+    original_prompt: str | None = Field(None, description="Video generation prompt")
+    file_size: int = Field(..., description="File size in bytes")
+
+    # Generated filename
+    new_filename: str = Field(..., description="New filename following naming convention")
+
+    @computed_field
+    @property
+    def web_url(self) -> str:
+        """Web URL for this video's parent post."""
+        return f"https://grok.com/imagine/post/{self.parent_id}"

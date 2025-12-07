@@ -33,12 +33,16 @@ from curl_cffi import requests
 
 from .auth import load_cookies
 from .exceptions import GrokAPIError, GrokAuthError, GrokNotFoundError
+import os
+import re
+
 from .models import (
     ChildVideo,
     GenerationMode,
     GrokCookies,
     PostDetails,
     PostSummary,
+    VideoMatchResult,
 )
 
 
@@ -314,6 +318,111 @@ class GrokClient:
             return False
         except Exception:
             return False
+
+    # =========================================================================
+    # API 5: match_local_video() - Match local file to web video
+    # =========================================================================
+
+    def match_local_video(self, local_path: str | Path) -> VideoMatchResult:
+        """
+        Match a local grok video to its web counterpart and generate new filename.
+
+        Takes a local file with old naming (grok-video-{parent_uuid}.mp4) and:
+        1. Extracts parent_id from filename
+        2. Gets local file size
+        3. Fetches post details from web API
+        4. Matches by file size to find exact video_id
+        5. Generates new filename: grok-video_{parent_id}_{video_id}.mp4
+
+        Args:
+            local_path: Path to local video file
+                       (e.g., "/path/to/grok-video-0c5c5864-fadb-440b-a52b-e441dab973d3.mp4")
+
+        Returns:
+            VideoMatchResult with parent_id, video_id, mode, new_filename, etc.
+
+        Raises:
+            GrokAPIError: If file not found, invalid filename, or no match found
+
+        Example:
+            >>> result = client.match_local_video("/path/to/grok-video-xxx.mp4")
+            >>> print(f"Rename to: {result.new_filename}")
+            >>> print(f"Mode: {result.mode.value}")
+            >>> print(f"Is parent video: {result.is_parent_video}")
+        """
+        local_path = Path(local_path)
+
+        # Validate file exists
+        if not local_path.exists():
+            raise GrokAPIError(f"File not found: {local_path}")
+
+        # Extract parent_id from filename
+        # Pattern: grok-video-{UUID}.mp4 or grok-video-{UUID} (1).mp4
+        filename = local_path.name
+        match = re.match(
+            r"grok-video-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
+            filename,
+        )
+        if not match:
+            raise GrokAPIError(
+                f"Invalid filename format. Expected 'grok-video-{{uuid}}.mp4', got: {filename}"
+            )
+
+        parent_id = match.group(1)
+        local_size = local_path.stat().st_size
+
+        # Fetch post details
+        details = self.get_post_details(parent_id)
+
+        # Build list of all videos to check
+        videos_to_check = []
+
+        # For txt2vid: parent itself is a video
+        if details.mode == GenerationMode.TEXT_TO_VIDEO and details.hd_media_url:
+            videos_to_check.append({
+                "video_id": details.id,
+                "url": details.hd_media_url,
+                "is_parent": True,
+                "prompt": details.original_prompt,
+            })
+
+        # Add all children
+        for child in details.children:
+            url = child.hd_media_url or child.media_url
+            if url:
+                videos_to_check.append({
+                    "video_id": child.id,
+                    "url": url,
+                    "is_parent": False,
+                    "prompt": child.original_prompt,
+                })
+
+        # Match by file size
+        for video in videos_to_check:
+            try:
+                web_size = self.get_asset_file_size(video["url"])
+                if web_size == local_size:
+                    # Found match!
+                    new_filename = f"grok-video_{parent_id}_{video['video_id']}.mp4"
+                    return VideoMatchResult(
+                        parent_id=parent_id,
+                        video_id=video["video_id"],
+                        is_parent_video=video["is_parent"],
+                        mode=details.mode,
+                        original_prompt=video["prompt"],
+                        file_size=local_size,
+                        new_filename=new_filename,
+                    )
+            except Exception:
+                continue  # Try next video if size fetch fails
+
+        # No match found
+        raise GrokAPIError(
+            f"No matching video found on web for local file: {filename}\n"
+            f"Local size: {local_size} bytes\n"
+            f"Parent ID: {parent_id}\n"
+            f"Videos checked: {len(videos_to_check)}"
+        )
 
     # =========================================================================
     # Internal methods
