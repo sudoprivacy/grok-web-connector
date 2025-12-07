@@ -1,4 +1,4 @@
-"""Authentication and configuration management."""
+"""Authentication and configuration management for Grok Web Connector."""
 
 import json
 from pathlib import Path
@@ -32,7 +32,7 @@ def load_cookies(config_path: Path | str | None = None) -> GrokCookies:
         raise GrokConfigError(
             f"Config file not found: {config_path}\n\n"
             f"Please create {config_path} with your Grok cookies.\n"
-            f"See README.md for instructions on how to extract cookies from your browser."
+            f"See README.md for instructions."
         )
 
     try:
@@ -43,10 +43,10 @@ def load_cookies(config_path: Path | str | None = None) -> GrokCookies:
 
     if "cookies" not in config:
         raise GrokConfigError(
-            f"Config file missing 'cookies' key.\n"
-            f"Expected format:\n"
-            f'{{\n  "cookies": {{\n    "sso": "...",\n    "sso-rw": "...",\n'
-            f'    "x-userid": "...",\n    "cf_clearance": "..."\n  }}\n}}'
+            "Config file missing 'cookies' key.\n"
+            "Expected format:\n"
+            '{\n  "cookies": {\n    "sso": "...",\n    "sso-rw": "...",\n'
+            '    "x-userid": "...",\n    "cf_clearance": "..."\n  }\n}'
         )
 
     try:

@@ -1,70 +1,122 @@
-"""Pydantic models for Grok API responses."""
+"""Data models for Grok Web Connector."""
 
 from datetime import datetime
+from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, Field, computed_field
 
 
-class GrokVideo(BaseModel):
-    """Represents a video generated from a Grok Imagine post (childPost)."""
+class GenerationMode(str, Enum):
+    """Grok Imagine video generation modes."""
 
-    id: str = Field(..., description="Video UUID")
-    original_post_id: str = Field(..., description="Parent image post UUID")
-    prompt: str | None = Field(None, description="Video generation prompt")
-    media_url: str | None = Field(None, description="Standard video URL")
+    GROK_IMAGE_TO_VIDEO = "img2vid"      # Text→Image→Video (Grok generates image first)
+    TEXT_TO_VIDEO = "txt2vid"             # Text→Video directly
+    UPLOAD_IMAGE_TO_VIDEO = "upload2vid"  # Upload external image→Video
+    UNKNOWN = "unknown"
+
+
+class ChildVideo(BaseModel):
+    """A video generated from a parent post (appears in childPosts array)."""
+
+    id: str = Field(..., description="Child video UUID")
+    parent_id: str = Field(..., description="Parent post UUID")
+
+    # Prompts
+    original_prompt: str | None = Field(None, description="Video generation/edit prompt")
+
+    # URLs
+    media_url: str | None = Field(None, description="Standard quality video URL")
     hd_media_url: str | None = Field(None, description="HD video URL")
     thumbnail_url: str | None = Field(None, description="Thumbnail image URL")
-    created_at: datetime | None = Field(None, description="Creation timestamp")
-    duration: int | None = Field(None, description="Video duration in seconds")
-    model_name: str | None = Field(None, description="Model used for generation")
-    resolution: dict[str, int] | None = Field(None, description="Video resolution")
+
+    # Metadata
+    created_at: datetime | None = Field(None, description="Creation timestamp (UTC)")
+    resolution: dict[str, int] | None = Field(None, description="Video resolution {width, height}")
+    duration: int | None = Field(None, description="Video duration in milliseconds")
+    model_name: str | None = Field(None, description="Model used (e.g., imagine_h_1)")
+    mode: str | None = Field(None, description="Generation mode: 'custom' or 'text'")
 
     @computed_field
     @property
-    def url(self) -> str:
-        """Web URL for the parent post (videos share parent's URL)."""
-        return f"https://grok.com/imagine/post/{self.original_post_id}"
+    def web_url(self) -> str:
+        """Web URL (videos share parent's URL)."""
+        return f"https://grok.com/imagine/post/{self.parent_id}"
+
+    @computed_field
+    @property
+    def best_video_url(self) -> str | None:
+        """Best available video URL (HD preferred)."""
+        return self.hd_media_url or self.media_url
 
 
-class GrokPost(BaseModel):
-    """Represents a Grok Imagine post (image with optional video children)."""
+class PostSummary(BaseModel):
+    """Summary of a post for list_posts() response."""
 
     id: str = Field(..., description="Post UUID")
-    user_id: str | None = Field(None, description="User UUID")
-    prompt: str | None = Field(None, description="Original generation prompt")
+    mode: GenerationMode = Field(..., description="Generation mode")
+
+    # Preview info
+    prompt_preview: str | None = Field(None, description="First 100 chars of prompt")
+    video_count: int = Field(0, description="Number of child videos")
+
+    # Timestamps
+    created_at: datetime | None = Field(None, description="Creation timestamp (UTC)")
+
+    # Media type
     media_type: str | None = Field(None, description="MEDIA_POST_TYPE_IMAGE or MEDIA_POST_TYPE_VIDEO")
-    media_url: str | None = Field(None, description="Image/video URL")
+
+    @computed_field
+    @property
+    def web_url(self) -> str:
+        """Web URL for this post."""
+        return f"https://grok.com/imagine/post/{self.id}"
+
+
+class PostDetails(BaseModel):
+    """Full details of a post for get_post_details() response."""
+
+    id: str = Field(..., description="Post UUID")
+    user_id: str | None = Field(None, description="Owner's user UUID")
+    mode: GenerationMode = Field(..., description="Detected generation mode")
+
+    # Parent post info
+    media_type: str | None = Field(None, description="MEDIA_POST_TYPE_IMAGE or MEDIA_POST_TYPE_VIDEO")
+    prompt: str | None = Field(None, description="Image generation prompt (for img2vid mode)")
+    original_prompt: str | None = Field(None, description="Video prompt (for txt2vid mode)")
+
+    # URLs
+    media_url: str | None = Field(None, description="Parent media URL (image or video)")
+    hd_media_url: str | None = Field(None, description="HD media URL")
     thumbnail_url: str | None = Field(None, description="Thumbnail URL")
-    created_at: datetime | None = Field(None, description="Creation timestamp")
-    model_name: str | None = Field(None, description="Model used for generation")
+
+    # Metadata
+    created_at: datetime | None = Field(None, description="Creation timestamp (UTC)")
     resolution: dict[str, int] | None = Field(None, description="Media resolution")
-    videos: list[GrokVideo] = Field(default_factory=list, description="Child video posts")
+    model_name: str | None = Field(None, description="Model used (e.g., imagine_x_1)")
+
+    # Child videos
+    children: list[ChildVideo] = Field(default_factory=list, description="Child video posts")
+
+    # Raw data for debugging
     raw_data: dict[str, Any] | None = Field(None, description="Raw API response")
 
     @computed_field
     @property
-    def url(self) -> str:
+    def web_url(self) -> str:
         """Web URL for this post."""
         return f"https://grok.com/imagine/post/{self.id}"
 
     @computed_field
     @property
-    def video_filename(self) -> str:
-        """Expected local filename pattern for videos from this post."""
-        return f"grok-video-{self.id}.mp4"
+    def video_count(self) -> int:
+        """Number of child videos."""
+        return len(self.children)
 
     @property
-    def has_videos(self) -> bool:
-        """Check if this post has any video children."""
-        return len(self.videos) > 0
-
-    @property
-    def latest_video(self) -> GrokVideo | None:
-        """Get the most recently created video, if any."""
-        if not self.videos:
-            return None
-        return max(self.videos, key=lambda v: v.created_at or datetime.min)
+    def has_children(self) -> bool:
+        """Check if this post has any child videos."""
+        return len(self.children) > 0
 
 
 class GrokCookies(BaseModel):
@@ -75,8 +127,8 @@ class GrokCookies(BaseModel):
     x_userid: str = Field(..., alias="x-userid", description="User ID")
     cf_clearance: str = Field(..., description="Cloudflare clearance token")
 
-    def to_cookie_dict(self) -> dict[str, str]:
-        """Convert to dictionary suitable for requests library."""
+    def to_dict(self) -> dict[str, str]:
+        """Convert to dictionary for requests library."""
         return {
             "sso": self.sso,
             "sso-rw": self.sso_rw,
@@ -85,4 +137,4 @@ class GrokCookies(BaseModel):
         }
 
     class Config:
-        populate_by_name = True  # Allow both 'sso_rw' and 'sso-rw'
+        populate_by_name = True

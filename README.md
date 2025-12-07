@@ -4,37 +4,53 @@ Python client library for interacting with Grok Imagine web API.
 
 ## Features
 
+- **4 Core APIs** for comprehensive Grok Imagine interaction
 - Cookie-based authentication (no password required)
-- Fetch post details by UUID
-- List user's posts
+- Automatic generation mode detection (img2vid, txt2vid, upload2vid)
 - Type-safe with Pydantic models
-- Shared library for multiple projects
 
 ## Installation
 
-### Development Mode (Editable Install)
-
 ```bash
-cd /Users/songym/cursor-projects/grok-web-connector
+# From GitHub
+pip install git+https://github.com/elfenlieds7/grok-web-connector.git
+
+# Development mode
+cd /path/to/grok-web-connector
 pip install -e .
 ```
 
-This allows you to edit the code and see changes immediately in all projects using it.
+## Quick Start
 
-### From Another Project
+```python
+from grok_web import GrokClient, GenerationMode
 
-```bash
-pip install -e /Users/songym/cursor-projects/grok-web-connector
+client = GrokClient()
+
+# 1. List all posts
+posts = client.list_posts(limit=10)
+for p in posts:
+    print(f"{p.id}: {p.mode.value} ({p.video_count} videos)")
+
+# 2. Get details for a specific post
+details = client.get_post_details("0c5c5864-fadb-440b-a52b-e441dab973d3")
+print(f"Mode: {details.mode.value}")
+print(f"Children: {details.video_count}")
+
+# 3. Get video file size
+for child in details.children:
+    if child.hd_media_url:
+        size = client.get_asset_file_size(child.hd_media_url)
+        print(f"{child.id}: {size} bytes")
 ```
 
-## Usage
+## Authentication Setup
 
 ### 1. Extract Cookies from Browser
 
-1. Open https://grok.com in your browser
-2. Open Developer Tools (F12)
-3. Go to Application → Cookies → https://grok.com
-4. Copy the following cookie values:
+1. Open https://grok.com in Chrome
+2. Open DevTools (F12) → Application → Cookies → https://grok.com
+3. Copy these 4 cookie values:
    - `sso`
    - `sso-rw`
    - `x-userid`
@@ -55,224 +71,263 @@ Create `~/.grok-config.json`:
 }
 ```
 
-**Important**: Add `~/.grok-config.json` to your `.gitignore`!
+**Important**: Add `~/.grok-config.json` to your global `.gitignore`!
 
-### 3. Use the Client
-
-```python
-from grok_web import GrokClient
-
-# Initialize client (automatically loads from ~/.grok-config.json)
-client = GrokClient()
-
-# Get post by UUID
-post = client.get_post("0c5c5864-fadb-440b-a52b-e441dab973d3")
-print(f"Post URL: {post.url}")
-print(f"Video URL: {post.video_url}")
-
-# List your posts
-posts = client.list_posts(limit=10)
-for post in posts:
-    print(f"{post.id}: {post.prompt}")
-```
+---
 
 ## API Reference
 
-### `GrokClient`
+### 1. `list_posts()` - Scan and Get Overview
 
-#### Methods
+```python
+posts = client.list_posts(limit=40, source=None)
+```
 
-- `get_post(post_id: str) -> GrokPost` - Get post details by UUID
-- `list_posts(limit: int = 40) -> list[GrokPost]` - List user's posts
-- `get_video_url_from_filename(filename: str) -> str` - Construct Grok URL from video filename
+**Parameters:**
+- `limit`: Maximum posts to return (default: 40)
+- `source`: Filter type (`None` for all, `"MEDIA_POST_SOURCE_LIKED"` for liked)
 
-### `GrokPost` (Pydantic Model)
+**Returns:** `list[PostSummary]`
+- `id`: Post UUID
+- `mode`: Generation mode (see below)
+- `prompt_preview`: First 100 chars of prompt
+- `video_count`: Number of child videos
+- `created_at`: Creation timestamp
+- `web_url`: Computed web URL
 
-- `id: str` - Post UUID
-- `url: str` - Web URL (https://grok.com/imagine/post/{id})
-- `prompt: str | None` - Generation prompt
-- `video_url: str | None` - Direct video download URL
-- `created_at: datetime | None` - Creation timestamp
+### 2. `get_post_details()` - Explore Single Post
 
-## Grok Imagine Generation Modes
+```python
+details = client.get_post_details("0c5c5864-fadb-440b-a52b-e441dab973d3")
+```
 
-Grok Imagine supports three distinct video generation modes, each with different metadata structures.
+**Returns:** `PostDetails`
+- All parent post metadata
+- `children`: List of `ChildVideo` objects with full metadata
+- `mode`: Detected generation mode
+- `raw_data`: Original API response (for debugging)
 
-### Mode Comparison Table
+### 3. `get_asset_file_size()` - Get Asset File Size
 
-| Field | Grok-Image→Video | Text-to-Video | Upload-Image→Video |
-|-------|------------------|---------------|---------------------|
-| **Parent Post** |
-| `mediaType` | `MEDIA_POST_TYPE_IMAGE` | `MEDIA_POST_TYPE_VIDEO` | `MEDIA_POST_TYPE_IMAGE` |
-| `prompt` | ✅ (generation prompt) | ❌ | ❌ |
-| `originalPrompt` | ❌ | ✅ (video prompt) | ❌ |
-| `modelName` | `imagine_x_1` | `imagine_h_1` | `imagine_h_1` |
-| `mediaUrl` | ✅ (generated image) | ✅ (video) | ✅ (uploaded image) |
-| `hdMediaUrl` | ✅ | ✅ | ✅ |
-| `thumbnailUrl` | ✅ | ✅ | ✅ |
-| `hasChildPosts` | `true` | `true` | `true` |
-| **Child Posts (Videos)** |
-| `mode` | `custom` | `text` | `custom` |
-| `mediaType` | `MEDIA_POST_TYPE_VIDEO` | `MEDIA_POST_TYPE_VIDEO` | `MEDIA_POST_TYPE_VIDEO` |
-| `originalPrompt` | ✅ (video edit prompt) | ✅ (same as parent) | ✅ (video prompt) |
-| `resolution` | `{width, height}` | `{width, height}` | `{width, height}` |
-| `duration` | ✅ (milliseconds) | ✅ (milliseconds) | ✅ (milliseconds) |
+```python
+size = client.get_asset_file_size(child.hd_media_url)
+```
 
-### Mode 1: Grok-Image→Video
+Get file size in bytes from `assets.grok.com` URL via HEAD request.
 
-Workflow: Text prompt → Generated image → Animate to video
+**Important**: This method handles the special headers required:
+- `Referer: https://grok.com/`
+- `Origin: https://grok.com`
 
-**Example URL**: `https://grok.com/imagine/post/0c5c5864-fadb-440b-a52b-e441dab973d3`
+Without these headers, requests return 403 Forbidden.
 
-**Parent Post Fields**:
+### 4. `validate_auth()` - Check Authentication
+
+```python
+if not client.validate_auth():
+    print("Cookies expired! Please update ~/.grok-config.json")
+```
+
+---
+
+## Generation Modes
+
+Grok Imagine supports 3 video generation modes:
+
+| Mode | Enum Value | Workflow |
+|------|------------|----------|
+| **Grok-Image→Video** | `img2vid` | Text prompt → Grok generates image → Animate to video |
+| **Text-to-Video** | `txt2vid` | Text prompt → Video directly |
+| **Upload-Image→Video** | `upload2vid` | Upload external image → Animate to video |
+
+### Mode Detection Logic
+
+```python
+from grok_web import GenerationMode
+
+# Detection is automatic based on metadata:
+# - MEDIA_POST_TYPE_VIDEO + mode=text       → TEXT_TO_VIDEO
+# - MEDIA_POST_TYPE_IMAGE + prompt exists   → GROK_IMAGE_TO_VIDEO
+# - MEDIA_POST_TYPE_IMAGE + no prompt       → UPLOAD_IMAGE_TO_VIDEO
+```
+
+---
+
+## API Endpoints (Internal)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/rest/media/post/list` | POST | List user's posts |
+| `/rest/media/post/get` | POST | Get single post details |
+
+### Request Format
+
+```json
+// list
+{"limit": 40, "filter": {"source": "MEDIA_POST_SOURCE_LIKED"}}
+
+// get
+{"id": "uuid-here"}
+```
+
+### Response Structure
+
 ```json
 {
-  "mediaType": "MEDIA_POST_TYPE_IMAGE",
-  "prompt": "A woman with long flowing hair...",
-  "modelName": "imagine_x_1",
-  "mediaUrl": "https://assets.grok.com/users/.../image.png",
-  "hdMediaUrl": "https://assets.grok.com/users/.../image_hd.png",
-  "thumbnailUrl": "https://assets.grok.com/users/.../thumbnail.webp",
-  "hasChildPosts": true,
-  "childPosts": [...]
+  "post": {
+    "id": "parent-uuid",
+    "mediaType": "MEDIA_POST_TYPE_IMAGE",
+    "prompt": "A woman with flowing hair...",
+    "modelName": "imagine_x_1",
+    "childPosts": [
+      {
+        "id": "child-uuid",
+        "mediaType": "MEDIA_POST_TYPE_VIDEO",
+        "originalPrompt": "Gentle wind blowing...",
+        "hdMediaUrl": "https://assets.grok.com/...",
+        "resolution": {"width": 848, "height": 480}
+      }
+    ]
+  }
 }
 ```
 
-**Child Post (Video) Fields**:
-```json
-{
-  "mediaType": "MEDIA_POST_TYPE_VIDEO",
-  "mode": "custom",
-  "originalPrompt": "Gentle wind blowing through hair...",
-  "mediaUrl": "https://assets.grok.com/users/.../video.mp4",
-  "hdMediaUrl": "https://assets.grok.com/users/.../video_hd.mp4",
-  "thumbnailUrl": "https://assets.grok.com/users/.../thumb.webp",
-  "resolution": {"width": 848, "height": 480},
-  "duration": 5000
-}
+---
+
+## Metadata by Generation Mode
+
+### Mode 1: Grok-Image→Video (`img2vid`)
+
+| Field | Parent | Child |
+|-------|--------|-------|
+| `mediaType` | `MEDIA_POST_TYPE_IMAGE` | `MEDIA_POST_TYPE_VIDEO` |
+| `prompt` | Image generation prompt | - |
+| `originalPrompt` | - | Video edit prompt |
+| `modelName` | `imagine_x_1` | varies |
+| `mode` | - | `custom` |
+
+### Mode 2: Text-to-Video (`txt2vid`)
+
+| Field | Parent | Child |
+|-------|--------|-------|
+| `mediaType` | `MEDIA_POST_TYPE_VIDEO` | `MEDIA_POST_TYPE_VIDEO` |
+| `originalPrompt` | Video prompt | Same as parent |
+| `modelName` | `imagine_h_1` | varies |
+| `mode` | `text` | `text` |
+
+### Mode 3: Upload-Image→Video (`upload2vid`)
+
+| Field | Parent | Child |
+|-------|--------|-------|
+| `mediaType` | `MEDIA_POST_TYPE_IMAGE` | `MEDIA_POST_TYPE_VIDEO` |
+| `prompt` | *(none - uploaded)* | - |
+| `originalPrompt` | - | Video prompt |
+| `modelName` | `imagine_h_1` | varies |
+| `mode` | - | `custom` |
+
+---
+
+## Asset URL Pattern
+
+```
+https://assets.grok.com/users/{userId}/generated/{videoId}/generated_video.mp4
+https://assets.grok.com/users/{userId}/generated/{videoId}/generated_video_hd.mp4
 ```
 
-### Mode 2: Text-to-Video
+**Key insight**: The `{videoId}` in the URL is the **child video UUID**, not the parent post UUID.
 
-Workflow: Text prompt → Video directly (no intermediate image)
+### Accessing Assets
 
-**Example URL**: `https://grok.com/imagine/post/2a57075a-f11a-4f9e-a828-5957caa55cd8`
+Assets require special headers:
 
-**Parent Post Fields**:
-```json
-{
-  "mediaType": "MEDIA_POST_TYPE_VIDEO",
-  "mode": "text",
-  "originalPrompt": "A serene mountain landscape...",
-  "modelName": "imagine_h_1",
-  "mediaUrl": "https://assets.grok.com/users/.../video.mp4",
-  "hdMediaUrl": "https://assets.grok.com/users/.../video_hd.mp4",
-  "thumbnailUrl": "https://assets.grok.com/users/.../thumb.webp",
-  "resolution": {"width": 1280, "height": 720},
-  "duration": 5000,
-  "hasChildPosts": true,
-  "childPosts": [...]
+```python
+headers = {
+    "Referer": "https://grok.com/",
+    "Origin": "https://grok.com",
 }
+# Without these → 403 Forbidden
 ```
 
-**Child Post (Video Variants) Fields**:
-```json
-{
-  "mediaType": "MEDIA_POST_TYPE_VIDEO",
-  "mode": "text",
-  "originalPrompt": "A serene mountain landscape...",
-  "resolution": {"width": 1280, "height": 720},
-  "duration": 5000
-}
+The `get_asset_file_size()` method handles this automatically.
+
+---
+
+## Local File to Web Matching
+
+Downloaded videos follow this naming pattern:
+```
+grok-video-{PARENT_UUID}.mp4
+grok-video-{PARENT_UUID} (1).mp4
+grok-video-{PARENT_UUID} (2).mp4
 ```
 
-### Mode 3: Upload-Image→Video
+**Matching strategy**:
+1. Extract parent UUID from filename
+2. Call `get_post_details(parent_uuid)` to get all children
+3. For each child, call `get_asset_file_size()` to get web file size
+4. Match local file size to web file size (exact match)
 
-Workflow: Upload external image → Animate to video
+```python
+import os
+from grok_web import GrokClient
 
-**Example URL**: `https://grok.com/imagine/post/69fc3666-65aa-45a5-bc45-678d579b9182`
+client = GrokClient()
+local_size = os.path.getsize("/path/to/grok-video-xxx.mp4")
 
-**Parent Post Fields**:
-```json
-{
-  "mediaType": "MEDIA_POST_TYPE_IMAGE",
-  "modelName": "imagine_h_1",
-  "mediaUrl": "https://assets.grok.com/users/.../uploaded_image.png",
-  "hdMediaUrl": "https://assets.grok.com/users/.../uploaded_image_hd.png",
-  "thumbnailUrl": "https://assets.grok.com/users/.../thumb.webp",
-  "hasChildPosts": true,
-  "childPosts": [...]
-}
+details = client.get_post_details("xxx")
+for child in details.children:
+    if child.hd_media_url:
+        web_size = client.get_asset_file_size(child.hd_media_url)
+        if web_size == local_size:
+            print(f"Match! Local file → {child.id}")
 ```
 
-**Note**: No `prompt` field for uploaded images (since the image wasn't generated by Grok).
-
-**Child Post (Video) Fields**:
-```json
-{
-  "mediaType": "MEDIA_POST_TYPE_VIDEO",
-  "mode": "custom",
-  "originalPrompt": "Camera slowly zooms in...",
-  "modelName": "imagine_h_1",
-  "mediaUrl": "https://assets.grok.com/users/.../video.mp4",
-  "hdMediaUrl": "https://assets.grok.com/users/.../video_hd.mp4",
-  "resolution": {"width": 848, "height": 480},
-  "duration": 5000
-}
-```
-
-### Key Insights
-
-1. **UUID Mapping**: Downloaded video filename UUID = Parent post ID (not the video's own ID)
-2. **Multiple Videos**: A single parent post can have multiple `childPosts` (video variants)
-3. **Mode Detection**:
-   - Check `mediaType` first: `IMAGE` vs `VIDEO`
-   - For IMAGE parents, check if `prompt` exists (Grok-generated) or not (uploaded)
-   - For VIDEO parents, it's Text-to-Video mode
-4. **Model Names**:
-   - `imagine_x_1`: Used for Grok-generated images
-   - `imagine_h_1`: Used for videos and uploaded images
-
-### Common Fields (All Modes)
-
-**Always Available**:
-- `id` (UUID)
-- `userId`
-- `createdAt` (ISO 8601 timestamp)
-- `mediaType`
-- `mediaUrl`
-- `thumbnailUrl`
-
-**Sometimes Available**:
-- `hdMediaUrl` (high-definition version)
-- `prompt` (only for Grok-generated images)
-- `originalPrompt` (for videos)
-- `resolution` (for videos: `{width, height}`)
-- `duration` (for videos, in milliseconds)
-- `modelName`
-- `mode` (`custom` or `text`)
+---
 
 ## Error Handling
 
 ```python
-from grok_web import GrokClient, GrokAuthError, GrokAPIError
+from grok_web import GrokClient, GrokAuthError, GrokAPIError, GrokNotFoundError
 
 client = GrokClient()
 
 try:
-    post = client.get_post("invalid-uuid")
+    details = client.get_post_details("invalid-uuid")
 except GrokAuthError:
-    print("Authentication failed. Check your cookies.")
+    print("Cookies expired. Update ~/.grok-config.json")
+except GrokNotFoundError:
+    print("Post not found")
 except GrokAPIError as e:
     print(f"API error: {e}")
 ```
 
+---
+
 ## Cookie Expiration
 
-Cookies typically last several weeks to months. If authentication fails:
-1. Re-extract cookies from browser
+Cookies typically last several weeks. When they expire:
+
+1. Re-extract from browser (DevTools → Application → Cookies)
 2. Update `~/.grok-config.json`
-3. Retry
+3. Verify with `client.validate_auth()`
+
+---
+
+## Data Models
+
+### `PostSummary`
+Lightweight post info for list operations.
+
+### `PostDetails`
+Full post info including all children and raw API response.
+
+### `ChildVideo`
+Video metadata with computed properties like `best_video_url`.
+
+### `GenerationMode`
+Enum: `GROK_IMAGE_TO_VIDEO`, `TEXT_TO_VIDEO`, `UPLOAD_IMAGE_TO_VIDEO`, `UNKNOWN`
+
+---
 
 ## License
 

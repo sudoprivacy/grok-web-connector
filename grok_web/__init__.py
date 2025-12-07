@@ -1,12 +1,27 @@
 """
 Grok Web Connector - Python client for Grok Imagine web API.
 
+4 Core APIs:
+    1. list_posts()         - Scan and get overview of all posts
+    2. get_post_details()   - Get full details for a specific post
+    3. get_asset_file_size() - Get file size from assets.grok.com URL
+    4. validate_auth()      - Check if authentication is valid
+
 Usage:
-    from grok_web import GrokClient
+    from grok_web import GrokClient, GenerationMode
 
     client = GrokClient()
-    post = client.get_post("0c5c5864-fadb-440b-a52b-e441dab973d3")
-    print(post.url)
+
+    # Scan all posts
+    posts = client.list_posts(limit=10)
+    for p in posts:
+        print(f"{p.id}: {p.mode.value} ({p.video_count} videos)")
+
+    # Get details for a specific post
+    details = client.get_post_details("0c5c5864-fadb-440b-a52b-e441dab973d3")
+    print(f"Mode: {details.mode}")
+    for child in details.children:
+        print(f"  Child: {child.id}")
 """
 
 from .auth import load_cookies, save_cookies
@@ -18,16 +33,24 @@ from .exceptions import (
     GrokError,
     GrokNotFoundError,
 )
-from .models import GrokCookies, GrokPost, GrokVideo
+from .models import (
+    ChildVideo,
+    GenerationMode,
+    GrokCookies,
+    PostDetails,
+    PostSummary,
+)
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     # Main client
     "GrokClient",
     # Models
-    "GrokPost",
-    "GrokVideo",
+    "PostSummary",
+    "PostDetails",
+    "ChildVideo",
+    "GenerationMode",
     "GrokCookies",
     # Exceptions
     "GrokError",
