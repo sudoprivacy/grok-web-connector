@@ -111,7 +111,17 @@ details = client.get_post_details("0c5c5864-fadb-440b-a52b-e441dab973d3")
 ### 3. `get_asset_file_size()` - Get Asset File Size
 
 ```python
-size = client.get_asset_file_size(child.hd_media_url)
+# Works for ALL video types:
+# - img2vid children
+# - txt2vid parent (parent itself is a video!)
+# - txt2vid children
+
+# For txt2vid parent video:
+if details.mode.value == 'txt2vid' and details.hd_media_url:
+    parent_size = client.get_asset_file_size(details.hd_media_url)
+
+# For children (all modes):
+size = client.get_asset_file_size(child.hd_media_url or child.media_url)
 ```
 
 Get file size in bytes from `assets.grok.com` URL via HEAD request.
@@ -264,9 +274,10 @@ grok-video-{PARENT_UUID} (2).mp4
 
 **Matching strategy**:
 1. Extract parent UUID from filename
-2. Call `get_post_details(parent_uuid)` to get all children
-3. For each child, call `get_asset_file_size()` to get web file size
-4. Match local file size to web file size (exact match)
+2. Call `get_post_details(parent_uuid)` to get post and all children
+3. For txt2vid: also check parent's `hd_media_url` (parent itself is a video!)
+4. For each video URL, call `get_asset_file_size()` to get web file size
+5. Match local file size to web file size (exact match)
 
 ```python
 import os
@@ -276,11 +287,34 @@ client = GrokClient()
 local_size = os.path.getsize("/path/to/grok-video-xxx.mp4")
 
 details = client.get_post_details("xxx")
+
+# Build list of all videos to check
+videos_to_check = []
+
+# For txt2vid: parent itself is a video
+if details.mode.value == 'txt2vid' and details.hd_media_url:
+    videos_to_check.append({
+        'id': details.id,
+        'url': details.hd_media_url,
+        'is_parent': True
+    })
+
+# Add all children
 for child in details.children:
-    if child.hd_media_url:
-        web_size = client.get_asset_file_size(child.hd_media_url)
-        if web_size == local_size:
-            print(f"Match! Local file → {child.id}")
+    url = child.hd_media_url or child.media_url
+    if url:
+        videos_to_check.append({
+            'id': child.id,
+            'url': url,
+            'is_parent': False
+        })
+
+# Match by file size
+for video in videos_to_check:
+    web_size = client.get_asset_file_size(video['url'])
+    if web_size == local_size:
+        print(f"Match! Local file → {video['id']} (parent={video['is_parent']})")
+        break
 ```
 
 ---

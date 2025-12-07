@@ -208,6 +208,11 @@ class GrokClient:
         """
         Get file size of a Grok asset (video or image) via HEAD request.
 
+        Works for ALL video types:
+        - img2vid children: child.hd_media_url
+        - txt2vid parent: details.hd_media_url (parent itself is a video!)
+        - txt2vid children: child.media_url or child.hd_media_url
+
         This method handles the special headers required by assets.grok.com:
         - Referer: https://grok.com/
         - Origin: https://grok.com
@@ -216,7 +221,7 @@ class GrokClient:
 
         Args:
             asset_url: Full URL to asset on assets.grok.com
-                      (e.g., from ChildVideo.hd_media_url)
+                      (from PostDetails.hd_media_url or ChildVideo.hd_media_url)
 
         Returns:
             File size in bytes
@@ -226,9 +231,17 @@ class GrokClient:
 
         Example:
             >>> details = client.get_post_details(post_id)
+            >>>
+            >>> # For txt2vid: parent itself is a video
+            >>> if details.mode.value == 'txt2vid' and details.hd_media_url:
+            ...     parent_size = client.get_asset_file_size(details.hd_media_url)
+            ...     print(f"Parent video: {parent_size} bytes")
+            >>>
+            >>> # For all modes: children videos
             >>> for child in details.children:
-            ...     if child.hd_media_url:
-            ...         size = client.get_asset_file_size(child.hd_media_url)
+            ...     url = child.hd_media_url or child.media_url
+            ...     if url:
+            ...         size = client.get_asset_file_size(url)
             ...         print(f"{child.id}: {size} bytes")
         """
         if not asset_url:
