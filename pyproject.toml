@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "grok-web-connector"
-version = "0.1.0"
+version = "0.3.0"
 description = "Python client for Grok Imagine web API"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -13,11 +13,15 @@ authors = [
     {name = "Your Name", email = "elfenliedsp@gmail.com"}
 ]
 dependencies = [
-    "requests>=2.31.0",
     "pydantic>=2.0.0",
+    "curl_cffi>=0.13.0",  # For GrokClient (TLS fingerprint impersonation)
 ]
 
 [project.optional-dependencies]
+# Playwright clients for reliable Cloudflare bypass (recommended for Windows)
+playwright = [
+    "playwright>=1.40.0",
+]
 dev = [
     "pytest>=7.0.0",
     "black>=23.0.0",
