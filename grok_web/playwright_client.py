@@ -172,11 +172,13 @@ class GrokPlaywrightClient:
     def _get_asset_context(self) -> APIRequestContext:
         """Get or create asset context (lazy initialization)."""
         if self._asset_context is None:
+            # Include cookies for assets.grok.com (also protected by Cloudflare)
             self._asset_context = self._playwright.request.new_context(
                 extra_http_headers={
                     "Origin": "https://grok.com",
                     "Referer": "https://grok.com/",
                     "User-Agent": get_browser_headers()["User-Agent"],
+                    "Cookie": self._cookie_str,
                 }
             )
         return self._asset_context
@@ -607,11 +609,15 @@ class GrokAsyncPlaywrightClient:
     async def _get_asset_context(self) -> AsyncAPIRequestContext:
         """Get or create asset context (lazy initialization)."""
         if self._asset_context is None:
+            # Include cookies for assets.grok.com (also protected by Cloudflare)
+            headers = get_browser_headers()
+            headers["Cookie"] = self._cookie_str
             self._asset_context = await self._playwright.request.new_context(
                 extra_http_headers={
                     "Origin": "https://grok.com",
                     "Referer": "https://grok.com/",
-                    "User-Agent": get_browser_headers()["User-Agent"],
+                    "User-Agent": headers["User-Agent"],
+                    "Cookie": self._cookie_str,
                 }
             )
         return self._asset_context
