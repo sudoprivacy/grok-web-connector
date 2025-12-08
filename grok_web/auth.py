@@ -1,13 +1,112 @@
 """Authentication and configuration management for Grok Web Connector."""
 
 import json
+import platform
+import sys
 from pathlib import Path
+from typing import Any
 
 from .exceptions import GrokConfigError
 from .models import GrokCookies
 
 
 DEFAULT_CONFIG_PATH = Path.home() / ".grok-config.json"
+
+# Default Chrome version for headers
+# IMPORTANT: This should match the curl_cffi impersonate version (chrome136)
+# Even if your browser is newer, the TLS fingerprint must match the headers
+DEFAULT_CHROME_VERSION = "136"
+
+
+def get_platform_headers(chrome_version: str = DEFAULT_CHROME_VERSION) -> dict[str, str]:
+    """
+    Generate platform-specific headers based on current OS.
+
+    Args:
+        chrome_version: Chrome version number (e.g., "143")
+
+    Returns:
+        Dict with platform-specific headers for sec-ch-ua, sec-ch-ua-platform, and user-agent
+    """
+    system = platform.system()
+
+    if system == "Windows":
+        ua_platform = '"Windows"'
+        user_agent = (
+            f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            f"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome_version}.0.0.0 Safari/537.36"
+        )
+    elif system == "Darwin":  # macOS
+        ua_platform = '"macOS"'
+        user_agent = (
+            f"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            f"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome_version}.0.0.0 Safari/537.36"
+        )
+    else:  # Linux and others
+        ua_platform = '"Linux"'
+        user_agent = (
+            f"Mozilla/5.0 (X11; Linux x86_64) "
+            f"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome_version}.0.0.0 Safari/537.36"
+        )
+
+    return {
+        "sec-ch-ua": f'"Google Chrome";v="{chrome_version}", "Chromium";v="{chrome_version}", "Not A(Brand";v="24"',
+        "sec-ch-ua-platform": ua_platform,
+        "user-agent": user_agent,
+    }
+
+
+def load_config(config_path: Path | str | None = None) -> dict[str, Any]:
+    """
+    Load full configuration from config file.
+
+    Args:
+        config_path: Path to config file. Defaults to ~/.grok-config.json
+
+    Returns:
+        Dict with 'cookies' (GrokCookies) and 'headers' (dict, may be empty)
+
+    Raises:
+        GrokConfigError: If config file is missing or invalid
+    """
+    if config_path is None:
+        config_path = DEFAULT_CONFIG_PATH
+    else:
+        config_path = Path(config_path)
+
+    if not config_path.exists():
+        raise GrokConfigError(
+            f"Config file not found: {config_path}\n\n"
+            f"Please create {config_path} with your Grok cookies.\n"
+            f"See README.md for instructions."
+        )
+
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            config = json.load(f)
+    except json.JSONDecodeError as e:
+        raise GrokConfigError(f"Invalid JSON in config file: {e}")
+
+    if "cookies" not in config:
+        raise GrokConfigError(
+            "Config file missing 'cookies' key.\n"
+            "Expected format:\n"
+            '{\n  "cookies": {\n    "sso": "...",\n    "sso-rw": "...",\n'
+            '    "x-userid": "...",\n    "cf_clearance": "..."\n  }\n}'
+        )
+
+    try:
+        cookies = GrokCookies(**config["cookies"])
+    except Exception as e:
+        raise GrokConfigError(f"Invalid cookie configuration: {e}")
+
+    # Get custom headers from config (optional)
+    custom_headers = config.get("headers", {})
+
+    return {
+        "cookies": cookies,
+        "headers": custom_headers,
+    }
 
 
 def load_cookies(config_path: Path | str | None = None) -> GrokCookies:

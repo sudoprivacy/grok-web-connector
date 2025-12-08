@@ -31,7 +31,7 @@ from typing import Any
 
 from curl_cffi import requests
 
-from .auth import load_cookies
+from .auth import get_platform_headers, load_config, load_cookies
 from .exceptions import GrokAPIError, GrokAuthError, GrokNotFoundError
 import os
 import re
@@ -67,31 +67,21 @@ class GrokClient:
     BASE_URL = "https://grok.com"
     ASSETS_URL = "https://assets.grok.com"
 
-    # Headers for API requests (matching Chrome 142)
-    API_HEADERS = {
+    # Base headers for API requests (platform-specific headers added at runtime)
+    BASE_API_HEADERS = {
         "accept": "*/*",
-        "accept-language": "en-US,en;q=0.9",
+        "accept-language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
         "content-type": "application/json",
         "origin": "https://grok.com",
         "referer": "https://grok.com/",
-        "sec-ch-ua": '"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"',
         "sec-ch-ua-mobile": "?0",
-        "sec-ch-ua-platform": '"macOS"',
         "sec-fetch-dest": "empty",
         "sec-fetch-mode": "cors",
         "sec-fetch-site": "same-origin",
-        "user-agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
-        ),
     }
 
-    # Headers for asset requests (requires Referer and Origin!)
-    ASSET_HEADERS = {
-        "user-agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
-        ),
+    # Base headers for asset requests (requires Referer and Origin!)
+    BASE_ASSET_HEADERS = {
         "referer": "https://grok.com/",
         "origin": "https://grok.com",
     }
@@ -104,19 +94,44 @@ class GrokClient:
         """
         Initialize Grok client.
 
+        Headers are determined in the following priority:
+        1. Custom headers from config file ("headers" key in ~/.grok-config.json)
+        2. Auto-detected platform headers (Windows/macOS/Linux)
+
         Args:
             cookies: GrokCookies instance. If None, loads from config file.
             config_path: Path to config file. Only used if cookies is None.
                         Defaults to ~/.grok-config.json
         """
+        # Load config (cookies + optional custom headers)
         if cookies is None:
-            cookies = load_cookies(config_path)
+            config = load_config(config_path)
+            cookies = config["cookies"]
+            custom_headers = config["headers"]
+        else:
+            custom_headers = {}
 
         self.cookies = cookies
+
+        # Build headers: base + platform-specific + custom overrides
+        platform_headers = get_platform_headers()
+
+        self._api_headers = {
+            **self.BASE_API_HEADERS,
+            **platform_headers,  # sec-ch-ua, sec-ch-ua-platform, user-agent
+            **custom_headers,    # Custom overrides from config file
+        }
+
+        self._asset_headers = {
+            **self.BASE_ASSET_HEADERS,
+            "user-agent": platform_headers["user-agent"],
+            **{k: v for k, v in custom_headers.items() if k == "user-agent"},
+        }
+
         # Use curl_cffi with Chrome 136 impersonation to bypass Cloudflare bot detection
         # This mimics Chrome's TLS fingerprint for anti-bot bypass
         self._session = requests.Session(impersonate="chrome136")
-        self._session.headers.update(self.API_HEADERS)
+        self._session.headers.update(self._api_headers)
         self._session.cookies.update(cookies.to_dict())
 
     # =========================================================================
@@ -259,7 +274,7 @@ class GrokClient:
         try:
             response = requests.head(
                 asset_url,
-                headers=self.ASSET_HEADERS,
+                headers=self._asset_headers,
                 cookies=self.cookies.to_dict(),
                 timeout=15,
                 impersonate="chrome136",
