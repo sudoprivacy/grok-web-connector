@@ -84,7 +84,7 @@ async with AsyncClient() as client:
 """
 
 from .auth import load_cookies, save_cookies
-from .client import GrokClient, PlaywrightClient, AsyncClient
+from .client import AsyncClient, GrokClient, PlaywrightClient
 from .exceptions import (
     GrokAPIError,
     GrokAuthError,

@@ -1,15 +1,15 @@
 # Edit Image API Analysis
 
-**Discovery Date**: 2025-12-10  
+**Discovery Date**: 2025-12-10
 **Feature**: Image editing via chat API (new Grok Imagine feature)
 
 ---
 
 ## Capture 1: Moderated Result
 
-**File**: `grok-downloaded-video-local-organizer/grok-edit-image.tmp` (lines 1-59)  
-**Post ID**: `6f261828-e8d4-4d8f-abee-3c8b95d79e72`  
-**User Prompt**: Unknown (message field shows 5 spaces: "     ")  
+**File**: `grok-downloaded-video-local-organizer/grok-edit-image.tmp` (lines 1-59)
+**Post ID**: `6f261828-e8d4-4d8f-abee-3c8b95d79e72`
+**User Prompt**: Unknown (message field shows 5 spaces: "     ")
 **Result**: Both images moderated (blurry, not clickable)
 
 ### UI Flow
@@ -75,17 +75,17 @@
 
 ### Mixpanel Events
 
-**Line 28-43**: Input change event (`$mp_input_change`)  
+**Line 28-43**: Input change event (`$mp_input_change`)
 - Captures user typing in textarea
 - Event type: `change`
 
-**Line 44-59**: Click events (`$mp_click`)  
+**Line 44-59**: Click events (`$mp_click`)
 - Target: "Make video" button (`aria-label="Make video"`)
 - Multiple image clicks in masonry grid
 
 ### Questions
 
-1. **Where is the user prompt?** 
+1. **Where is the user prompt?**
    - User reported entering "戴上眼罩" (add eye mask)
    - But `message` field only contains spaces
    - Possible: Prompt in different request? Or capture timing issue?
@@ -107,4 +107,3 @@
 ## Comparison & Findings
 
 (To be analyzed after both captures)
-

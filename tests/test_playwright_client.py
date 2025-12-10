@@ -1,11 +1,12 @@
 """Tests for PlaywrightClient class."""
 
+from unittest.mock import MagicMock, patch
+
 import pytest
-from unittest.mock import Mock, patch, MagicMock, AsyncMock
 
 from grok_web import PlaywrightClient
-from grok_web.models import GrokCookies, PostSummary, PostDetails
 from grok_web.exceptions import GrokAPIError, GrokAuthError, GrokNotFoundError
+from grok_web.models import GrokCookies, PostSummary
 
 
 class TestPlaywrightClientInit:
@@ -211,7 +212,9 @@ class TestPlaywrightClientListPosts:
         data = call_args[1]["data"]
         assert data["filter"]["source"] == "MEDIA_POST_SOURCE_LIKED"
 
-    def test_list_posts_returns_summaries(self, mock_client: PlaywrightClient, sample_list_response: dict):
+    def test_list_posts_returns_summaries(
+        self, mock_client: PlaywrightClient, sample_list_response: dict
+    ):
         """list_posts returns PostSummary objects."""
         mock_response = MagicMock()
         mock_response.status = 200

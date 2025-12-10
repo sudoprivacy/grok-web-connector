@@ -1,0 +1,36 @@
+# Pre-commit hooks for grok-web-connector
+# Install: pip install pre-commit && pre-commit install
+# Run manually: pre-commit run --all-files
+
+repos:
+  # Ruff - extremely fast Python linter and formatter (written in Rust)
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.4
+    hooks:
+      # Linting (runs in ~100ms for entire codebase)
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+      # Formatting (replaces black, runs in ~50ms)
+      - id: ruff-format
+
+  # Basic file checks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files
+        args: ['--maxkb=1000']
+      - id: check-merge-conflict
+
+  # Run pytest (only on staged test files for speed)
+  - repo: local
+    hooks:
+      - id: pytest
+        name: pytest
+        entry: bash -c 'source .venv/bin/activate && python -m pytest tests/ -x -q --tb=short'
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]

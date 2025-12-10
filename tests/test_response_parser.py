@@ -1,10 +1,11 @@
 """Tests for ResponseParser class."""
 
-import pytest
 from datetime import datetime, timezone
 
+import pytest
+
 from grok_web._internal import ResponseParser
-from grok_web.models import GenerationMode, PostSummary, PostDetails
+from grok_web.models import GenerationMode, PostDetails, PostSummary
 
 
 class TestResponseParser:
@@ -187,7 +188,9 @@ class TestResponseParser:
         details = parser._parse_post_details(sample_post_data, "test-id", raw_data=raw)
         assert details.raw_data == raw
 
-    def test_parse_post_details_no_children(self, parser: ResponseParser, sample_text_to_video_post: dict):
+    def test_parse_post_details_no_children(
+        self, parser: ResponseParser, sample_text_to_video_post: dict
+    ):
         """Handle post with no children."""
         details = parser._parse_post_details(sample_text_to_video_post, "txt2vid-post-id")
         assert details.children == []

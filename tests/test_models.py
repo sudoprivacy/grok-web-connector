@@ -1,15 +1,14 @@
 """Tests for data models."""
 
-import pytest
 from datetime import datetime, timezone
 
 from grok_web.models import (
-    GrokCookies,
-    PostSummary,
-    PostDetails,
     ChildVideo,
-    VideoMatchResult,
     GenerationMode,
+    GrokCookies,
+    PostDetails,
+    PostSummary,
+    VideoMatchResult,
 )
 
 

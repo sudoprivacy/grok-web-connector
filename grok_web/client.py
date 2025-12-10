@@ -20,20 +20,24 @@ AsyncClient
     - Must be used as async context manager: async with AsyncClient() as client:
 """
 
+import re
 from pathlib import Path
 from typing import Any
-import re
 
 from curl_cffi import requests
-from playwright.sync_api import sync_playwright, Playwright, APIRequestContext
 from playwright.async_api import (
-    async_playwright,
-    Playwright as AsyncPlaywright,
     APIRequestContext as AsyncAPIRequestContext,
 )
+from playwright.async_api import (
+    Playwright as AsyncPlaywright,
+)
+from playwright.async_api import (
+    async_playwright,
+)
+from playwright.sync_api import APIRequestContext, Playwright, sync_playwright
 
+from ._internal import ResponseParser, SyncClientBase
 from .auth import get_platform_headers, load_config
-from ._internal import SyncClientBase, ResponseParser
 from .exceptions import GrokAPIError, GrokAuthError, GrokNotFoundError
 from .models import (
     GenerationMode,
@@ -42,7 +46,6 @@ from .models import (
     PostSummary,
     VideoMatchResult,
 )
-
 
 # =============================================================================
 # Helper functions
@@ -153,7 +156,7 @@ class GrokClient(SyncClientBase):
         try:
             response = self._session.request(method, url, json=json_data)
         except Exception as e:
-            raise GrokAPIError(f"Request failed: {e}")
+            raise GrokAPIError(f"Request failed: {e}") from e
 
         if response.status_code in (401, 403):
             raise GrokAuthError(
@@ -183,7 +186,7 @@ class GrokClient(SyncClientBase):
                 impersonate="chrome136",
             )
         except Exception as e:
-            raise GrokAPIError(f"Asset request failed: {e}")
+            raise GrokAPIError(f"Asset request failed: {e}") from e
 
         if response.status_code == 403:
             raise GrokAuthError("Asset access denied (403). Try PlaywrightClient.")
@@ -280,14 +283,12 @@ class PlaywrightClient(SyncClientBase):
             else:
                 raise GrokAPIError(f"Unsupported HTTP method: {method}")
         except Exception as e:
-            raise GrokAPIError(f"Request failed: {e}")
+            raise GrokAPIError(f"Request failed: {e}") from e
 
         if response.status in (401, 403):
             text = response.text()
             if "Just a moment" in text:
-                raise GrokAuthError(
-                    "Cloudflare challenge detected. Refresh cf_clearance cookie."
-                )
+                raise GrokAuthError("Cloudflare challenge detected. Refresh cf_clearance cookie.")
             raise GrokAuthError("Request blocked (401/403). Check cookies.")
 
         if response.status == 404:
@@ -307,7 +308,7 @@ class PlaywrightClient(SyncClientBase):
             context = self._get_asset_context()
             response = context.head(asset_url)
         except Exception as e:
-            raise GrokAPIError(f"Asset request failed: {e}")
+            raise GrokAPIError(f"Asset request failed: {e}") from e
 
         if response.status == 403:
             raise GrokAuthError("Asset access denied (403). Refresh cf_clearance.")
@@ -438,7 +439,7 @@ class AsyncClient(ResponseParser):
             context = await self._get_asset_context()
             response = await context.head(asset_url)
         except Exception as e:
-            raise GrokAPIError(f"Asset request failed: {e}")
+            raise GrokAPIError(f"Asset request failed: {e}") from e
 
         if response.status == 403:
             raise GrokAuthError("Asset access denied (403).")
@@ -483,22 +484,26 @@ class AsyncClient(ResponseParser):
         videos_to_check = []
 
         if details.mode == GenerationMode.TEXT_TO_VIDEO and details.hd_media_url:
-            videos_to_check.append({
-                "video_id": details.id,
-                "url": details.hd_media_url,
-                "is_parent": True,
-                "prompt": details.original_prompt,
-            })
+            videos_to_check.append(
+                {
+                    "video_id": details.id,
+                    "url": details.hd_media_url,
+                    "is_parent": True,
+                    "prompt": details.original_prompt,
+                }
+            )
 
         for child in details.children:
             url = child.hd_media_url or child.media_url
             if url:
-                videos_to_check.append({
-                    "video_id": child.id,
-                    "url": url,
-                    "is_parent": False,
-                    "prompt": child.original_prompt,
-                })
+                videos_to_check.append(
+                    {
+                        "video_id": child.id,
+                        "url": url,
+                        "is_parent": False,
+                        "prompt": child.original_prompt,
+                    }
+                )
 
         for video in videos_to_check:
             try:
@@ -579,7 +584,7 @@ class AsyncClient(ResponseParser):
             else:
                 raise GrokAPIError(f"Unsupported HTTP method: {method}")
         except Exception as e:
-            raise GrokAPIError(f"Request failed: {e}")
+            raise GrokAPIError(f"Request failed: {e}") from e
 
         if response.status in (401, 403):
             text = await response.text()

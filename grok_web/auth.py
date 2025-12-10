@@ -2,13 +2,11 @@
 
 import json
 import platform
-import sys
 from pathlib import Path
 from typing import Any
 
 from .exceptions import GrokConfigError
 from .models import GrokCookies
-
 
 DEFAULT_CONFIG_PATH = Path.home() / ".grok-config.json"
 
@@ -85,7 +83,7 @@ def load_config(config_path: Path | str | None = None) -> dict[str, Any]:
         with open(config_path, encoding="utf-8") as f:
             config = json.load(f)
     except json.JSONDecodeError as e:
-        raise GrokConfigError(f"Invalid JSON in config file: {e}")
+        raise GrokConfigError(f"Invalid JSON in config file: {e}") from e
 
     if "cookies" not in config:
         raise GrokConfigError(
@@ -98,7 +96,7 @@ def load_config(config_path: Path | str | None = None) -> dict[str, Any]:
     try:
         cookies = GrokCookies(**config["cookies"])
     except Exception as e:
-        raise GrokConfigError(f"Invalid cookie configuration: {e}")
+        raise GrokConfigError(f"Invalid cookie configuration: {e}") from e
 
     # Get custom headers from config (optional)
     custom_headers = config.get("headers", {})
@@ -138,7 +136,7 @@ def load_cookies(config_path: Path | str | None = None) -> GrokCookies:
         with open(config_path, encoding="utf-8") as f:
             config = json.load(f)
     except json.JSONDecodeError as e:
-        raise GrokConfigError(f"Invalid JSON in config file: {e}")
+        raise GrokConfigError(f"Invalid JSON in config file: {e}") from e
 
     if "cookies" not in config:
         raise GrokConfigError(
@@ -151,7 +149,7 @@ def load_cookies(config_path: Path | str | None = None) -> GrokCookies:
     try:
         return GrokCookies(**config["cookies"])
     except Exception as e:
-        raise GrokConfigError(f"Invalid cookie configuration: {e}")
+        raise GrokConfigError(f"Invalid cookie configuration: {e}") from e
 
 
 def save_cookies(cookies: GrokCookies, config_path: Path | str | None = None) -> None:

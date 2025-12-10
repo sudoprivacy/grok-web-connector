@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "grok-web-connector"
-version = "0.3.0"
+version = "0.4.0"
 description = "Python client for Grok Imagine web API"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -15,24 +15,67 @@ authors = [
 dependencies = [
     "pydantic>=2.0.0",
     "curl_cffi>=0.13.0",  # For GrokClient (TLS fingerprint impersonation)
-    "playwright>=1.40.0",  # For GrokPlaywrightClient (reliable Cloudflare bypass)
+    "playwright>=1.40.0",  # For PlaywrightClient (reliable Cloudflare bypass)
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=7.0.0",
-    "black>=23.0.0",
-    "ruff>=0.1.0",
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.23.0",
+    "ruff>=0.14.0",
+    "pre-commit>=3.6.0",
 ]
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["grok_web*"]
 
-[tool.black]
-line-length = 100
-target-version = ['py310']
+# =============================================================================
+# pytest configuration
+# =============================================================================
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = ["-ra", "-q", "--strict-markers"]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
 
+# =============================================================================
+# ruff configuration (linting + formatting)
+# =============================================================================
 [tool.ruff]
-line-length = 100
 target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "UP",  # pyupgrade
+    "ARG", # flake8-unused-arguments
+    "SIM", # flake8-simplify
+]
+ignore = [
+    "E501",   # line too long, handled by formatter
+    "B008",   # do not perform function calls in argument defaults
+    "SIM108", # ternary operator - prefer explicit if/else for readability
+    "SIM117", # nested with - prefer explicit for clarity
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]  # Allow unused imports in __init__.py
+"tests/*" = ["ARG", "S101"]  # Allow unused args and assert in tests
+
+[tool.ruff.lint.isort]
+known-first-party = ["grok_web"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"

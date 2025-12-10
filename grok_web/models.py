@@ -10,9 +10,9 @@ from pydantic import BaseModel, Field, computed_field
 class GenerationMode(str, Enum):
     """Grok Imagine generation modes (4 pipelines)."""
 
-    TEXT_TO_IMAGE = "txt2img"             # Text→Image (starting point for long videos)
-    GROK_IMAGE_TO_VIDEO = "img2vid"       # Grok-generated image→Video
-    TEXT_TO_VIDEO = "txt2vid"             # Text→Video directly
+    TEXT_TO_IMAGE = "txt2img"  # Text→Image (starting point for long videos)
+    GROK_IMAGE_TO_VIDEO = "img2vid"  # Grok-generated image→Video
+    TEXT_TO_VIDEO = "txt2vid"  # Text→Video directly
     UPLOAD_IMAGE_TO_VIDEO = "upload2vid"  # Upload external image→Video
     UNKNOWN = "unknown"
 
@@ -65,7 +65,9 @@ class PostSummary(BaseModel):
     created_at: datetime | None = Field(None, description="Creation timestamp (UTC)")
 
     # Media type
-    media_type: str | None = Field(None, description="MEDIA_POST_TYPE_IMAGE or MEDIA_POST_TYPE_VIDEO")
+    media_type: str | None = Field(
+        None, description="MEDIA_POST_TYPE_IMAGE or MEDIA_POST_TYPE_VIDEO"
+    )
 
     @computed_field
     @property
@@ -82,7 +84,9 @@ class PostDetails(BaseModel):
     mode: GenerationMode = Field(..., description="Detected generation mode")
 
     # Parent post info
-    media_type: str | None = Field(None, description="MEDIA_POST_TYPE_IMAGE or MEDIA_POST_TYPE_VIDEO")
+    media_type: str | None = Field(
+        None, description="MEDIA_POST_TYPE_IMAGE or MEDIA_POST_TYPE_VIDEO"
+    )
     prompt: str | None = Field(None, description="Image generation prompt (for img2vid mode)")
     original_prompt: str | None = Field(None, description="Video prompt (for txt2vid mode)")
 

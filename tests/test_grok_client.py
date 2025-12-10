@@ -1,14 +1,15 @@
 """Tests for GrokClient class."""
 
-import pytest
-from unittest.mock import Mock, patch, MagicMock
-from pathlib import Path
-import tempfile
 import os
+import tempfile
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 from grok_web import GrokClient
-from grok_web.models import GrokCookies, GenerationMode, PostSummary, PostDetails
 from grok_web.exceptions import GrokAPIError, GrokAuthError, GrokNotFoundError
+from grok_web.models import GrokCookies, PostDetails, PostSummary
 
 
 class TestGrokClientInit:
@@ -227,7 +228,9 @@ class TestGrokClientGetPostDetails:
         assert details.id == "test-post-id-1234"
         assert len(details.children) == 2
 
-    def test_get_post_details_includes_raw_data(self, client: GrokClient, sample_get_response: dict):
+    def test_get_post_details_includes_raw_data(
+        self, client: GrokClient, sample_get_response: dict
+    ):
         """Raw API response is preserved in raw_data."""
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -383,7 +386,9 @@ class TestGrokClientMatchLocalVideo:
     def test_match_local_video_file_not_found(self, client: GrokClient):
         """Raises error for non-existent file."""
         with pytest.raises(GrokAPIError, match="File not found"):
-            client.match_local_video("/nonexistent/grok-video-12345678-1234-1234-1234-123456789012.mp4")
+            client.match_local_video(
+                "/nonexistent/grok-video-12345678-1234-1234-1234-123456789012.mp4"
+            )
 
     def test_match_local_video_invalid_filename(self, client: GrokClient):
         """Raises error for invalid filename format."""

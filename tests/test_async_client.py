@@ -1,14 +1,14 @@
 """Tests for AsyncClient class."""
 
-import pytest
-from unittest.mock import MagicMock, AsyncMock, patch
-from pathlib import Path
-import tempfile
 import os
+import tempfile
+from unittest.mock import AsyncMock, patch
+
+import pytest
 
 from grok_web import AsyncClient
-from grok_web.models import GrokCookies, GenerationMode, PostSummary, PostDetails
 from grok_web.exceptions import GrokAPIError, GrokAuthError, GrokNotFoundError
+from grok_web.models import GrokCookies, PostDetails, PostSummary
 
 
 class TestAsyncClientInit:
@@ -137,7 +137,9 @@ class TestAsyncClientListPosts:
         return client
 
     @pytest.mark.asyncio
-    async def test_list_posts_returns_summaries(self, mock_client: AsyncClient, sample_list_response: dict):
+    async def test_list_posts_returns_summaries(
+        self, mock_client: AsyncClient, sample_list_response: dict
+    ):
         """list_posts returns list of PostSummary objects."""
         mock_response = AsyncMock()
         mock_response.status = 200
@@ -190,7 +192,9 @@ class TestAsyncClientGetPostDetails:
         return client
 
     @pytest.mark.asyncio
-    async def test_get_post_details_returns_details(self, mock_client: AsyncClient, sample_get_response: dict):
+    async def test_get_post_details_returns_details(
+        self, mock_client: AsyncClient, sample_get_response: dict
+    ):
         """get_post_details returns PostDetails object."""
         mock_response = AsyncMock()
         mock_response.status = 200
@@ -326,7 +330,9 @@ class TestAsyncClientMatchLocalVideo:
     async def test_match_local_video_file_not_found(self, mock_client: AsyncClient):
         """Raises error for non-existent file."""
         with pytest.raises(GrokAPIError, match="File not found"):
-            await mock_client.match_local_video("/nonexistent/grok-video-12345678-1234-1234-1234-123456789012.mp4")
+            await mock_client.match_local_video(
+                "/nonexistent/grok-video-12345678-1234-1234-1234-123456789012.mp4"
+            )
 
     @pytest.mark.asyncio
     async def test_match_local_video_invalid_filename(self, mock_client: AsyncClient):

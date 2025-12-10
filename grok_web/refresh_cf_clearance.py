@@ -24,6 +24,7 @@ The script will:
 import asyncio
 import json
 from pathlib import Path
+
 from playwright.async_api import async_playwright
 
 
@@ -59,12 +60,14 @@ async def refresh_cf_clearance():
         cookie_list = []
         for name in ["sso", "sso-rw", "x-userid", "cf_clearance"]:
             if name in cookies:
-                cookie_list.append({
-                    "name": name,
-                    "value": cookies[name],
-                    "domain": ".grok.com",
-                    "path": "/",
-                })
+                cookie_list.append(
+                    {
+                        "name": name,
+                        "value": cookies[name],
+                        "domain": ".grok.com",
+                        "path": "/",
+                    }
+                )
         await context.add_cookies(cookie_list)
 
         page = await context.new_page()

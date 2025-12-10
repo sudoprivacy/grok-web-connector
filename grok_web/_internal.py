@@ -8,13 +8,13 @@ This module contains base classes that are not part of the public API:
 Do not import from this module directly. Use the public API from grok_web instead.
 """
 
+import re
 from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-import re
 
-from .exceptions import GrokAPIError, GrokAuthError, GrokNotFoundError
+from .exceptions import GrokAPIError, GrokAuthError
 from .models import (
     ChildVideo,
     GenerationMode,
@@ -73,10 +73,7 @@ class ResponseParser:
         prompt_preview = prompt[:100] if prompt else None
 
         child_posts = data.get("childPosts", [])
-        video_count = sum(
-            1 for c in child_posts
-            if c.get("mediaType") == "MEDIA_POST_TYPE_VIDEO"
-        )
+        video_count = sum(1 for c in child_posts if c.get("mediaType") == "MEDIA_POST_TYPE_VIDEO")
 
         return PostSummary(
             id=data.get("id", ""),
@@ -317,22 +314,26 @@ class SyncClientBase(ResponseParser, ABC):
         videos_to_check = []
 
         if details.mode == GenerationMode.TEXT_TO_VIDEO and details.hd_media_url:
-            videos_to_check.append({
-                "video_id": details.id,
-                "url": details.hd_media_url,
-                "is_parent": True,
-                "prompt": details.original_prompt,
-            })
+            videos_to_check.append(
+                {
+                    "video_id": details.id,
+                    "url": details.hd_media_url,
+                    "is_parent": True,
+                    "prompt": details.original_prompt,
+                }
+            )
 
         for child in details.children:
             url = child.hd_media_url or child.media_url
             if url:
-                videos_to_check.append({
-                    "video_id": child.id,
-                    "url": url,
-                    "is_parent": False,
-                    "prompt": child.original_prompt,
-                })
+                videos_to_check.append(
+                    {
+                        "video_id": child.id,
+                        "url": url,
+                        "is_parent": False,
+                        "prompt": child.original_prompt,
+                    }
+                )
 
         for video in videos_to_check:
             try:

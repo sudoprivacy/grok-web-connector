@@ -1,7 +1,6 @@
 """Pytest fixtures for grok_web tests."""
 
 import pytest
-from datetime import datetime, timezone
 
 from grok_web.models import GrokCookies
 
