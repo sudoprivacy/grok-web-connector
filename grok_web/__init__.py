@@ -36,13 +36,19 @@ All clients require a cf_clearance cookie from Cloudflare. This cookie:
 
 To refresh cookies, run: python refresh_cf_clearance.py
 
-5 Core APIs (same for all clients)
+8 Core APIs (same for all clients)
 ==================================
-1. list_posts()           - Scan and get overview of all posts
-2. get_post_details()     - Get full details for a specific post
-3. get_asset_file_size()  - Get file size from assets.grok.com URL
-4. validate_auth()        - Check if authentication is valid
-5. match_local_video()    - Match local file to web video, generate new filename
+Read APIs:
+1. list_posts()              - Scan and get overview of all posts
+2. get_post_details()        - Get full details for a specific post
+3. get_asset_file_size()     - Get file size from assets.grok.com URL
+4. validate_auth()           - Check if authentication is valid
+5. match_local_video()       - Match local file to web video, generate new filename
+
+Write APIs:
+6. like_post()               - Save post to favorites (enables long-term persistence)
+7. unlike_post()             - Remove post from favorites (equivalent to delete)
+8. create_video_from_image() - Generate video from image via Grok chat API
 
 Usage Examples
 ==============

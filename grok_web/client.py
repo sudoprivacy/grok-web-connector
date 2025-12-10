@@ -1,11 +1,19 @@
 """
 Grok Web Connector - Main Client
 
-Provides 4 core APIs for interacting with Grok Imagine:
+Provides 8 core APIs for interacting with Grok Imagine:
+
+Read APIs:
 1. list_posts() - Scan and get overview of all posts
 2. get_post_details() - Get full details for a specific post
 3. get_asset_file_size() - Get file size from assets.grok.com URL
 4. validate_auth() - Check if authentication is valid
+5. match_local_video() - Match local file to web video, generate new filename
+
+Write APIs:
+6. like_post() - Save post to favorites (long-term persistence)
+7. unlike_post() - Remove post from favorites (delete)
+8. create_video_from_image() - Generate video from image via chat API
 
 IMPORTANT - Cloudflare Bot Detection:
     This client uses curl_cffi (not standard requests) to bypass Cloudflare's
@@ -438,6 +446,109 @@ class GrokClient:
             f"Parent ID: {parent_id}\n"
             f"Videos checked: {len(videos_to_check)}"
         )
+
+    def like_post(self, post_id: str) -> bool:
+        """
+        Like a post to save it to favorites.
+
+        This is the ONLY way to keep posts accessible long-term in Grok Imagine.
+        Unliked posts will eventually be removed from all views.
+
+        Args:
+            post_id: Post UUID to like
+
+        Returns:
+            True if successful
+
+        Raises:
+            GrokAuthError: If authentication fails
+            GrokAPIError: If request fails
+        """
+        self._api_request("POST", "/rest/media/post/like", {"id": post_id})
+        return True
+
+    def unlike_post(self, post_id: str) -> bool:
+        """
+        Unlike a post to remove it from favorites.
+
+        WARNING: This effectively deletes the post from your view.
+        There is no way to recover it from the UI after unliking.
+
+        Args:
+            post_id: Post UUID to unlike
+
+        Returns:
+            True if successful
+
+        Raises:
+            GrokAuthError: If authentication fails
+            GrokAPIError: If request fails
+        """
+        self._api_request("POST", "/rest/media/post/unlike", {"id": post_id})
+        return True
+
+    def create_video_from_image(
+        self,
+        image_url: str,
+        parent_post_id: str,
+        aspect_ratio: str = "2:3",
+        video_length: int = 6,
+    ) -> dict[str, Any]:
+        """
+        Generate a video from an image using Grok's chat API.
+
+        This triggers video generation (img2vid) by calling the chat interface
+        with a special videoGen tool override.
+
+        Args:
+            image_url: Full URL to image on imagine-public.x.ai
+            parent_post_id: Parent image post UUID (for linking video as child)
+            aspect_ratio: Video aspect ratio. Options: "2:3", "16:9", etc. Default: "2:3"
+            video_length: Video duration in seconds. Typical: 6 or 15. Default: 6
+
+        Returns:
+            Chat response dict (contains conversation ID and stream info)
+
+        Raises:
+            GrokAuthError: If authentication fails
+            GrokAPIError: If request fails
+
+        Example:
+            >>> client = GrokClient()
+            >>> response = client.create_video_from_image(
+            ...     image_url="https://imagine-public.x.ai/imagine-public/images/uuid.png",
+            ...     parent_post_id="uuid",
+            ...     aspect_ratio="2:3",
+            ...     video_length=6
+            ... )
+            >>> # Monitor chat response stream for completion
+            >>> # Then verify video in parent post's childPosts via get_post_details()
+        """
+        # Construct chat message with image URL
+        message = f"{image_url}  --mode=normal"
+
+        # Build chat API payload
+        payload = {
+            "temporary": True,
+            "modelName": "grok-3",
+            "message": message,
+            "toolOverrides": {"videoGen": True},
+            "responseMetadata": {
+                "experiments": [],
+                "modelConfigOverride": {
+                    "modelMap": {
+                        "videoGenModelConfig": {
+                            "parentPostId": parent_post_id,
+                            "aspectRatio": aspect_ratio,
+                            "videoLength": video_length,
+                        }
+                    }
+                },
+            },
+        }
+
+        # Call chat API
+        return self._api_request("POST", "/rest/app-chat/conversations/new", payload)
 
     # =========================================================================
     # Internal methods

@@ -8,9 +8,10 @@ from pydantic import BaseModel, Field, computed_field
 
 
 class GenerationMode(str, Enum):
-    """Grok Imagine video generation modes."""
+    """Grok Imagine generation modes (4 pipelines)."""
 
-    GROK_IMAGE_TO_VIDEO = "img2vid"      # Text→Image→Video (Grok generates image first)
+    TEXT_TO_IMAGE = "txt2img"             # Text→Image (starting point for long videos)
+    GROK_IMAGE_TO_VIDEO = "img2vid"       # Grok-generated image→Video
     TEXT_TO_VIDEO = "txt2vid"             # Text→Video directly
     UPLOAD_IMAGE_TO_VIDEO = "upload2vid"  # Upload external image→Video
     UNKNOWN = "unknown"
