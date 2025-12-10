@@ -82,6 +82,7 @@ class ResponseParser:
             video_count=video_count,
             created_at=self._parse_timestamp(data.get("createTime")),
             media_type=data.get("mediaType"),
+            raw_data=data,
         )
 
     def _parse_post_details(

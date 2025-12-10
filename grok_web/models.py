@@ -4,7 +4,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field, computed_field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 
 class GenerationMode(str, Enum):
@@ -69,6 +69,9 @@ class PostSummary(BaseModel):
         None, description="MEDIA_POST_TYPE_IMAGE or MEDIA_POST_TYPE_VIDEO"
     )
 
+    # Raw data for debugging
+    raw_data: dict[str, Any] | None = Field(None, description="Raw API response for this post")
+
     @computed_field
     @property
     def web_url(self) -> str:
@@ -132,6 +135,8 @@ class GrokCookies(BaseModel):
     x_userid: str = Field(..., alias="x-userid", description="User ID")
     cf_clearance: str = Field(..., description="Cloudflare clearance token")
 
+    model_config = ConfigDict(populate_by_name=True)
+
     def to_dict(self) -> dict[str, str]:
         """Convert to dictionary for requests library."""
         return {
@@ -140,9 +145,6 @@ class GrokCookies(BaseModel):
             "x-userid": self.x_userid,
             "cf_clearance": self.cf_clearance,
         }
-
-    class Config:
-        populate_by_name = True
 
 
 class VideoMatchResult(BaseModel):
