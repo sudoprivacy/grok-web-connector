@@ -5,27 +5,26 @@ Client Implementations
 ======================
 Three client classes are available:
 
-GrokClient (curl_cffi)
+GrokClient (recommended)
     - Uses curl_cffi library with Chrome TLS fingerprint impersonation
     - Lightweight, fast startup
     - Works well on macOS/Linux
-    - May fail on Windows due to TLS fingerprint mismatch with Cloudflare
 
-GrokPlaywrightClient (Playwright sync)
+PlaywrightClient
     - Uses Playwright's APIRequestContext with native Chromium TLS
     - Reliable Cloudflare bypass on all platforms
-    - Slightly slower startup (Playwright initialization)
-    - Use in synchronous code
+    - Use as context manager: with PlaywrightClient() as client:
 
-GrokAsyncPlaywrightClient (Playwright async)
-    - Async version of GrokPlaywrightClient
-    - Use in async contexts (MCP servers, asyncio applications)
+AsyncClient
+    - Async version using Playwright
+    - For async contexts (MCP servers, asyncio applications)
+    - Use as async context manager: async with AsyncClient() as client:
 
 Which Client to Use?
 ====================
-- macOS/Linux: Start with GrokClient. If you get 403 errors, switch to Playwright.
-- Windows: Use GrokPlaywrightClient or GrokAsyncPlaywrightClient directly.
-- MCP servers: Use GrokAsyncPlaywrightClient (required for async context).
+- macOS/Linux: Start with GrokClient. If you get 403 errors, switch to PlaywrightClient.
+- Windows: Use PlaywrightClient or AsyncClient directly.
+- MCP servers: Use AsyncClient (required for async context).
 
 Cookie Refresh
 ==============
@@ -63,7 +62,7 @@ API Test Status
 | 7  | unlike_post()            | NO     | Added 2025-12-10, needs testing    |
 | 8  | create_video_from_image()| NO     | Added 2025-12-10, needs testing    |
 
-Last updated: 2025-12-10
+Last updated: 2025-12-11
 
 Usage Examples
 ==============
@@ -74,19 +73,18 @@ posts = client.list_posts(limit=10)  # Returns your liked posts by default
 all_public = client.list_posts(limit=10, source=None)  # All public posts
 
 # Sync Playwright client (Windows or when curl_cffi fails)
-from grok_web import GrokPlaywrightClient
-with GrokPlaywrightClient() as client:
+from grok_web import PlaywrightClient
+with PlaywrightClient() as client:
     posts = client.list_posts(limit=10)  # Your liked posts
 
 # Async Playwright client (MCP servers, async code)
-from grok_web import GrokAsyncPlaywrightClient
-async with GrokAsyncPlaywrightClient() as client:
+from grok_web import AsyncClient
+async with AsyncClient() as client:
     posts = await client.list_posts(limit=10)
 """
 
 from .auth import load_cookies, save_cookies
-from .client import GrokClient
-from .playwright_client import GrokPlaywrightClient, GrokAsyncPlaywrightClient
+from .client import GrokClient, PlaywrightClient, AsyncClient
 from .exceptions import (
     GrokAPIError,
     GrokAuthError,
@@ -103,13 +101,13 @@ from .models import (
     VideoMatchResult,
 )
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = [
     # Clients
     "GrokClient",
-    "GrokPlaywrightClient",
-    "GrokAsyncPlaywrightClient",
+    "PlaywrightClient",
+    "AsyncClient",
     # Models
     "PostSummary",
     "PostDetails",
