@@ -15,13 +15,10 @@ authors = [
 dependencies = [
     "pydantic>=2.0.0",
     "curl_cffi>=0.13.0",  # For GrokClient (TLS fingerprint impersonation)
+    "playwright>=1.40.0",  # For GrokPlaywrightClient (reliable Cloudflare bypass)
 ]
 
 [project.optional-dependencies]
-# Playwright clients for reliable Cloudflare bypass (recommended for Windows)
-playwright = [
-    "playwright>=1.40.0",
-]
 dev = [
     "pytest>=7.0.0",
     "black>=23.0.0",

@@ -50,6 +50,21 @@ Write APIs:
 7. unlike_post()             - Remove post from favorites (equivalent to delete)
 8. create_video_from_image() - Generate video from image via Grok chat API
 
+API Test Status
+===============
+| #  | API                      | Tested | Notes                              |
+|----|--------------------------|--------|------------------------------------|
+| 1  | list_posts()             | YES    | Production-proven                  |
+| 2  | get_post_details()       | YES    | Production-proven                  |
+| 3  | get_asset_file_size()    | YES    | Production-proven                  |
+| 4  | validate_auth()          | YES    | Production-proven                  |
+| 5  | match_local_video()      | YES    | Production-proven                  |
+| 6  | like_post()              | NO     | Added 2025-12-10, needs testing    |
+| 7  | unlike_post()            | NO     | Added 2025-12-10, needs testing    |
+| 8  | create_video_from_image()| NO     | Added 2025-12-10, needs testing    |
+
+Last updated: 2025-12-10
+
 Usage Examples
 ==============
 # Sync client (macOS/Linux)
