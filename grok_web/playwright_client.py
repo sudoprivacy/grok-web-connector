@@ -190,16 +190,20 @@ class GrokPlaywrightClient:
     def list_posts(
         self,
         limit: int = 40,
-        source: str | None = None,
+        source: str = "MEDIA_POST_SOURCE_LIKED",
     ) -> list[PostSummary]:
         """
-        List user's posts with basic metadata.
+        List posts with basic metadata.
+
+        By default, returns only your liked/favorited posts (the only reliable
+        way to access your own content). Use source=None to browse all public
+        posts from any user.
 
         Args:
             limit: Maximum number of posts to return (default: 40)
             source: Filter by source type. Options:
-                    - None: All posts (default)
-                    - "MEDIA_POST_SOURCE_LIKED": Liked posts only
+                    - "MEDIA_POST_SOURCE_LIKED": Your liked posts only (default)
+                    - None: All public posts (from any user, not just yours)
 
         Returns:
             List of PostSummary objects
@@ -744,9 +748,9 @@ class GrokAsyncPlaywrightClient:
     async def list_posts(
         self,
         limit: int = 40,
-        source: str | None = None,
+        source: str = "MEDIA_POST_SOURCE_LIKED",
     ) -> list[PostSummary]:
-        """List user's posts with basic metadata."""
+        """List posts. Default: your liked posts. Use source=None for all public posts."""
         json_data: dict[str, Any] = {"limit": limit}
         if source:
             json_data["filter"] = {"source": source}

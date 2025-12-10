@@ -39,7 +39,7 @@ To refresh cookies, run: python refresh_cf_clearance.py
 8 Core APIs (same for all clients)
 ==================================
 Read APIs:
-1. list_posts()              - Scan and get overview of all posts
+1. list_posts()              - List your liked posts (default) or all public posts
 2. get_post_details()        - Get full details for a specific post
 3. get_asset_file_size()     - Get file size from assets.grok.com URL
 4. validate_auth()           - Check if authentication is valid
@@ -70,12 +70,13 @@ Usage Examples
 # Sync client (macOS/Linux)
 from grok_web import GrokClient
 client = GrokClient()
-posts = client.list_posts(limit=10)
+posts = client.list_posts(limit=10)  # Returns your liked posts by default
+all_public = client.list_posts(limit=10, source=None)  # All public posts
 
 # Sync Playwright client (Windows or when curl_cffi fails)
 from grok_web import GrokPlaywrightClient
 with GrokPlaywrightClient() as client:
-    posts = client.list_posts(limit=10)
+    posts = client.list_posts(limit=10)  # Your liked posts
 
 # Async Playwright client (MCP servers, async code)
 from grok_web import GrokAsyncPlaywrightClient

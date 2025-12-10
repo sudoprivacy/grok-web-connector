@@ -149,16 +149,20 @@ class GrokClient:
     def list_posts(
         self,
         limit: int = 40,
-        source: str | None = None,
+        source: str = "MEDIA_POST_SOURCE_LIKED",
     ) -> list[PostSummary]:
         """
-        List user's posts with basic metadata.
+        List posts with basic metadata.
+
+        By default, returns only your liked/favorited posts (the only reliable
+        way to access your own content). Use source=None to browse all public
+        posts from any user.
 
         Args:
             limit: Maximum number of posts to return (default: 40)
             source: Filter by source type. Options:
-                    - None: All posts (default)
-                    - "MEDIA_POST_SOURCE_LIKED": Liked posts only
+                    - "MEDIA_POST_SOURCE_LIKED": Your liked posts only (default)
+                    - None: All public posts (from any user, not just yours)
 
         Returns:
             List of PostSummary objects with:
@@ -169,9 +173,10 @@ class GrokClient:
             - created_at: Creation timestamp
 
         Example:
-            >>> posts = client.list_posts(limit=10)
+            >>> posts = client.list_posts(limit=10)  # Your liked posts
             >>> for p in posts:
             ...     print(f"{p.id}: {p.mode.value} ({p.video_count} videos)")
+            >>> all_posts = client.list_posts(source=None)  # All public posts
         """
         json_data: dict[str, Any] = {"limit": limit}
         # API requires filter to be present (even if empty)

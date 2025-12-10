@@ -118,7 +118,7 @@ POST /rest/media/post/like
 #### Phase 3: MCTS Tree Building
 **Use REST API** (already in connector):
 ```python
-# List all posts with list_posts()
+# List your liked posts with list_posts() (default behavior)
 # Get details with get_post_details()
 # Build tree from parent-child relationships
 # Score videos based on quality metrics

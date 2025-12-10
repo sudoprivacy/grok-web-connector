@@ -456,7 +456,7 @@ image_id: ""
 
 #### For Post Management:
 - **Use REST API** (already in connector):
-  - `list_posts()` - retrieve all posts
+  - `list_posts()` - retrieve your liked posts (default) or all public posts
   - `get_post_details()` - get full metadata + children
   - `get_asset_file_size()` - check file size before download
 
