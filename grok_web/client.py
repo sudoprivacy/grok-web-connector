@@ -401,6 +401,7 @@ class AsyncClient(ResponseParser):
         self,
         limit: int = 40,
         source: str = "MEDIA_POST_SOURCE_LIKED",
+        include_raw_data: bool = False,
     ) -> list[PostSummary]:
         """List posts. Default: your liked posts. Use source=None for all public."""
         json_data: dict[str, Any] = {"limit": limit}
@@ -414,7 +415,7 @@ class AsyncClient(ResponseParser):
         posts = []
         for item in data.get("posts", []):
             try:
-                summary = self._parse_post_summary(item)
+                summary = self._parse_post_summary(item, include_raw_data=include_raw_data)
                 posts.append(summary)
             except Exception:
                 continue

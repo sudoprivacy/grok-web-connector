@@ -65,7 +65,7 @@ class ResponseParser:
             pass
         return None
 
-    def _parse_post_summary(self, data: dict) -> PostSummary:
+    def _parse_post_summary(self, data: dict, include_raw_data: bool = False) -> PostSummary:
         """Parse API response into PostSummary."""
         mode = self._detect_generation_mode(data)
 
@@ -82,7 +82,7 @@ class ResponseParser:
             video_count=video_count,
             created_at=self._parse_timestamp(data.get("createTime")),
             media_type=data.get("mediaType"),
-            raw_data=data,
+            raw_data=data if include_raw_data else None,
         )
 
     def _parse_post_details(
@@ -170,6 +170,7 @@ class SyncClientBase(ResponseParser, ABC):
         self,
         limit: int = 40,
         source: str = "MEDIA_POST_SOURCE_LIKED",
+        include_raw_data: bool = False,
     ) -> list[PostSummary]:
         """
         List posts with basic metadata.
@@ -183,6 +184,8 @@ class SyncClientBase(ResponseParser, ABC):
             source: Filter by source type. Options:
                     - "MEDIA_POST_SOURCE_LIKED": Your liked posts only (default)
                     - None: All public posts (from any user, not just yours)
+            include_raw_data: If True, include raw API response in each PostSummary.
+                              Default False for better performance.
 
         Returns:
             List of PostSummary objects
@@ -198,7 +201,7 @@ class SyncClientBase(ResponseParser, ABC):
         posts = []
         for item in data.get("posts", []):
             try:
-                summary = self._parse_post_summary(item)
+                summary = self._parse_post_summary(item, include_raw_data=include_raw_data)
                 posts.append(summary)
             except Exception:
                 continue
