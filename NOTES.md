@@ -98,7 +98,11 @@ hdMediaUrl: .../generated_video_hd.mp4  (~3.1 MB, 2x larger)
 ```
 
 - `hdMediaUrl` only exists after calling upscale
-- Both URLs coexist after upscale (can download either)
+- **Both URLs coexist after upscale** - can download either!
+- **UI hides this**: After upscale, web UI only shows HD download button
+- **API reveals both**: Use `mediaUrl` for quick preview, `hdMediaUrl` for final output
+
+**MCTS optimization**: Download low-res for evaluation, HD only for final selected videos.
 
 ---
 
