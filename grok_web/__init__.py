@@ -58,8 +58,8 @@ API Test Status
 | 3  | get_asset_file_size()    | YES    | Production-proven                  |
 | 4  | validate_auth()          | YES    | Production-proven                  |
 | 5  | match_local_video()      | YES    | Production-proven                  |
-| 6  | like_post()              | NO     | Added 2025-12-10, needs testing    |
-| 7  | unlike_post()            | NO     | Added 2025-12-10, needs testing    |
+| 6  | like_post()              | YES    | Tested 2025-12-11                  |
+| 7  | unlike_post()            | YES    | Tested 2025-12-11                  |
 | 8  | create_video_from_image()| NO     | Added 2025-12-10, needs testing    |
 
 Last updated: 2025-12-11
