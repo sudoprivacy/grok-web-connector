@@ -28,8 +28,8 @@
 | 3 | `get_asset_file_size()` | HEAD `assets.grok.com/...` | ✅ |
 | 4 | `validate_auth()` | (uses list_posts) | ✅ |
 | 5 | `match_local_video()` | (uses get_post_details + HEAD) | ✅ |
-| 6 | `like_post()` | POST `/rest/media/post/like` | ❌ |
-| 7 | `unlike_post()` | POST `/rest/media/post/unlike` | ❌ |
+| 6 | `like_post()` | POST `/rest/media/post/like` | ✅ |
+| 7 | `unlike_post()` | POST `/rest/media/post/unlike` | ✅ |
 | 8 | `create_video_from_image()` | POST `/rest/app-chat/conversations/new` | ❌ |
 
 ### Not Yet Implemented
@@ -273,6 +273,7 @@ POST /rest/app-chat/conversations/new
 ## TODO
 
 - [ ] Implement `upscale_video()` API
-- [ ] Test `like_post()`, `unlike_post()`, `create_video_from_image()`
+- [x] Test `like_post()`, `unlike_post()` - ✅ 2025-12-11
+- [ ] Test `create_video_from_image()`
 - [ ] Add chat stream parser for real-time status
 - [ ] Document rate limits
