@@ -23,7 +23,7 @@
 
 | # | API | Endpoint | Tested |
 |---|-----|----------|--------|
-| 1 | `list_posts()` | POST `/rest/media/post/list` | ✅ |
+| 1 | `list_posts(include_raw_data=False)` | POST `/rest/media/post/list` | ✅ |
 | 2 | `get_post_details()` | POST `/rest/media/post/get` | ✅ |
 | 3 | `get_asset_file_size()` | HEAD `assets.grok.com/...` | ✅ |
 | 4 | `validate_auth()` | (uses list_posts) | ✅ |
@@ -51,8 +51,8 @@ From `get_post_details()` response:
     "id": "uuid",
     "userId": "user-uuid",
     "createTime": "2025-12-10T08:10:50.073380Z",
-    "prompt": "original user prompt",
-    "originalPrompt": "same as prompt",
+    "prompt": "Grok simplified prompt (NOT original input!)",
+    "originalPrompt": "same as prompt (also simplified)",
     "mediaType": "MEDIA_POST_TYPE_IMAGE",
     "mediaUrl": "https://imagine-public.x.ai/.../image.png",
     "mimeType": "image/png",
@@ -70,7 +70,10 @@ From `get_post_details()` response:
         "resolution": { "width": 464, "height": 688 },
         "videoDuration": 6,
         "modelName": "imagine_xdit_1",
-        "mode": "normal",
+        "mode": "normal | custom",
+        "prompt": "",
+        "originalPrompt": "user's img2vid edit prompt (only if mode=custom)",
+        "thumbnailImageUrl": "https://assets.grok.com/.../preview_image.jpg",
         "availableActions": ["LIKE", "SHARE", "DOWNLOAD", "DELETE", "UPSCALE_VIDEO"]
       }
     ]
@@ -88,7 +91,48 @@ From `get_post_details()` response:
 | `hdMediaUrl` | N/A | assets.grok.com | Only after upscale |
 | `videoDuration` | N/A | 6 | Seconds |
 | `availableActions` | no UPSCALE | has UPSCALE_VIDEO | Can detect if upscale available |
-| `userInteractionStatus.likeStatus` | true/false | - | Only on parent |
+| `userInteractionStatus` | ✅ has `likeStatus` | ❌ NOT FOUND | Only on parent! |
+
+### Prompt Fields (重要！)
+
+**Grok 会压缩/简化用户的 prompt！** API 返回的 `prompt` 已经是处理后的版本。
+
+| 层级 | 字段 | 内容 |
+|------|------|------|
+| **Parent** | `prompt` | txt2img 提示词（**已被 Grok 简化**，非原始输入） |
+| **Parent** | `originalPrompt` | 同上，两者相同 |
+| **Child** | `prompt` | 始终为空 `""` |
+| **Child** | `originalPrompt` | img2vid 编辑提示词（仅 `mode=custom` 时有值） |
+
+**结论**：无法通过 API 找回用户原始输入的完整 prompt。
+
+### Available Actions
+
+| Action | Parent | Child | 说明 |
+|--------|--------|-------|------|
+| `MEDIA_POST_ACTION_TYPE_LIKE` | ✅ | ✅ | 收藏 |
+| `MEDIA_POST_ACTION_TYPE_SHARE` | ✅ | ✅ | 分享 |
+| `MEDIA_POST_ACTION_TYPE_DOWNLOAD` | ✅ | ✅ | 下载 |
+| `MEDIA_POST_ACTION_TYPE_DELETE` | ✅ | ✅ | 删除 |
+| `MEDIA_POST_ACTION_TYPE_UPSCALE_VIDEO` | ❌ | ✅ | 仅视频有 |
+
+### Child Like 的坑！
+
+**Child 没有独立的 like 状态**，点 Child 的 LIKE/UNLIKE 实际操作的是 Parent！
+
+| 操作 | 效果 |
+|------|------|
+| 点 Child 的 Unlike | **整个 post（含所有 children）从 favorites 消失！** |
+| 只想删除某个视频 | 应该用 **DELETE**，不是 UNLIKE |
+
+### Thumbnail URLs
+
+可用于 UI 预览，省带宽：
+
+```
+Parent: https://imagine-public.x.ai/cdn-cgi/image/width=500,fit=scale-down,format=auto/...
+Child:  https://assets.grok.com/.../preview_image.jpg
+```
 
 ### HD vs Normal Video
 
