@@ -25,6 +25,108 @@ from .models import (
     VideoPreset,
 )
 
+# =============================================================================
+# Shared Utilities
+# =============================================================================
+
+PRESET_MAP = {
+    "normal": "normal",
+    "fun": "extremely-crazy",
+    "spicy": "extremely-spicy-or-crazy",
+}
+
+
+def resolve_preset(preset: VideoPreset | str) -> str:
+    """Resolve preset name to API mode value."""
+    if isinstance(preset, VideoPreset):
+        return preset.value
+    elif isinstance(preset, str) and preset.lower() in PRESET_MAP:
+        return PRESET_MAP[preset.lower()]
+    return str(preset)
+
+
+def generate_statsig_id() -> str:
+    """Generate a random statsig_id for video style exploration."""
+    import base64
+    import os
+
+    return base64.b64encode(os.urandom(70)).decode("utf-8").rstrip("=")
+
+
+def build_video_payload(
+    image_url: str,
+    parent_post_id: str,
+    mode_value: str,
+    aspect_ratio: str = "2:3",
+    video_length: int = 6,
+) -> dict:
+    """Build the payload for video generation API."""
+    message = f"{image_url}  --mode={mode_value}"
+    return {
+        "temporary": True,
+        "modelName": "grok-3",
+        "message": message,
+        "toolOverrides": {"videoGen": True},
+        "responseMetadata": {
+            "experiments": [],
+            "modelConfigOverride": {
+                "modelMap": {
+                    "videoGenModelConfig": {
+                        "parentPostId": parent_post_id,
+                        "aspectRatio": aspect_ratio,
+                        "videoLength": video_length,
+                    }
+                }
+            },
+        },
+    }
+
+
+def parse_video_ndjson_response(
+    response_text: str,
+    parent_post_id: str,
+    statsig_id: str,
+) -> VideoGenerationResult:
+    """Parse NDJSON response from video generation API."""
+    import json
+
+    conversation_id = None
+    video_result = None
+
+    for line in response_text.strip().split("\n"):
+        if not line:
+            continue
+        try:
+            data = json.loads(line)
+            result = data.get("result", {})
+
+            if "conversation" in result:
+                conversation_id = result["conversation"].get("conversationId")
+
+            response = result.get("response", {})
+            if "streamingVideoGenerationResponse" in response:
+                video_result = response["streamingVideoGenerationResponse"]
+        except json.JSONDecodeError:
+            continue
+
+    if not video_result:
+        raise GrokAPIError(
+            "Failed to parse video generation response. "
+            "No streamingVideoGenerationResponse found."
+        )
+
+    return VideoGenerationResult(
+        video_id=video_result.get("videoId", ""),
+        parent_post_id=video_result.get("parentPostId", parent_post_id),
+        moderated=video_result.get("moderated", False),
+        progress=video_result.get("progress", 0),
+        mode=video_result.get("mode", "normal"),
+        model_name=video_result.get("modelName"),
+        image_reference=video_result.get("imageReference"),
+        conversation_id=conversation_id,
+        statsig_id=statsig_id,
+    )
+
 
 class ResponseParser:
     """
@@ -463,99 +565,26 @@ class SyncClientBase(ResponseParser, ABC):
             GrokAPIError: If generation fails or response cannot be parsed
             GrokAuthError: If authentication fails (403)
         """
-        import base64
-        import json
-        import os
-
         # Generate or use provided statsig_id
         if statsig_id is None:
-            # Generate new random 70-byte ID for style exploration
-            statsig_id = base64.b64encode(os.urandom(70)).decode("utf-8").rstrip("=")
+            statsig_id = generate_statsig_id()
 
-        # Resolve preset to API mode value
-        preset_map = {
-            "normal": "normal",
-            "fun": "extremely-crazy",
-            "spicy": "extremely-spicy-or-crazy",
-        }
-        if isinstance(preset, VideoPreset):
-            mode_value = preset.value
-        elif isinstance(preset, str) and preset.lower() in preset_map:
-            mode_value = preset_map[preset.lower()]
-        else:
-            mode_value = str(preset)  # Allow raw mode values like "extremely-crazy"
-
-        message = f"{image_url}  --mode={mode_value}"
-
-        payload = {
-            "temporary": True,
-            "modelName": "grok-3",
-            "message": message,
-            "toolOverrides": {"videoGen": True},
-            "responseMetadata": {
-                "experiments": [],
-                "modelConfigOverride": {
-                    "modelMap": {
-                        "videoGenModelConfig": {
-                            "parentPostId": parent_post_id,
-                            "aspectRatio": aspect_ratio,
-                            "videoLength": video_length,
-                        }
-                    }
-                },
-            },
-        }
-
-        # Pass statsig_id as extra header
-        extra_headers = {"x-statsig-id": statsig_id}
+        # Build payload using shared utility
+        mode_value = resolve_preset(preset)
+        payload = build_video_payload(
+            image_url, parent_post_id, mode_value, aspect_ratio, video_length
+        )
 
         # Get raw text response (NDJSON streaming format)
         response_text = self._api_request_text(
-            "POST", "/rest/app-chat/conversations/new", payload, extra_headers=extra_headers
+            "POST",
+            "/rest/app-chat/conversations/new",
+            payload,
+            extra_headers={"x-statsig-id": statsig_id},
         )
 
-        # Parse NDJSON response - each line is a JSON object
-        conversation_id = None
-        video_result = None
-
-        for line in response_text.strip().split("\n"):
-            if not line:
-                continue
-            try:
-                data = json.loads(line)
-                result = data.get("result", {})
-
-                # Extract conversation ID from first response
-                if "conversation" in result:
-                    conversation_id = result["conversation"].get("conversationId")
-
-                # Extract video generation result
-                response = result.get("response", {})
-                if "streamingVideoGenerationResponse" in response:
-                    video_data = response["streamingVideoGenerationResponse"]
-                    # Keep updating with latest progress
-                    video_result = video_data
-
-            except json.JSONDecodeError:
-                continue
-
-        if not video_result:
-            raise GrokAPIError(
-                "Failed to parse video generation response. "
-                "No streamingVideoGenerationResponse found."
-            )
-
-        return VideoGenerationResult(
-            video_id=video_result.get("videoId", ""),
-            parent_post_id=video_result.get("parentPostId", parent_post_id),
-            moderated=video_result.get("moderated", False),
-            progress=video_result.get("progress", 0),
-            mode=video_result.get("mode", "normal"),
-            model_name=video_result.get("modelName"),
-            image_reference=video_result.get("imageReference"),
-            conversation_id=conversation_id,
-            statsig_id=statsig_id,
-        )
+        # Parse using shared utility
+        return parse_video_ndjson_response(response_text, parent_post_id, statsig_id)
 
     @abstractmethod
     def _api_request_text(
@@ -571,3 +600,316 @@ class SyncClientBase(ResponseParser, ABC):
             extra_headers: Additional headers to include (e.g., x-statsig-id)
         """
         pass
+
+
+class AsyncClientBase(ResponseParser, ABC):
+    """
+    Abstract base class for asynchronous Grok API clients.
+
+    Implements all async API methods. Subclasses only need to provide:
+    - __aenter__/__aexit__: Async context manager lifecycle
+    - _api_request(): Make authenticated API requests (async)
+    - _api_request_text(): Make authenticated request returning raw text (async)
+    - _asset_request_head(): Make HEAD request to assets URL (async)
+    """
+
+    BASE_URL = "https://grok.com"
+    ASSETS_URL = "https://assets.grok.com"
+
+    # =========================================================================
+    # Abstract methods (must be implemented by subclasses)
+    # =========================================================================
+
+    @abstractmethod
+    async def _api_request(
+        self,
+        method: str,
+        endpoint: str,
+        json_data: dict | None = None,
+    ) -> dict[str, Any]:
+        """Make authenticated request to Grok API."""
+        pass
+
+    @abstractmethod
+    async def _api_request_text(
+        self,
+        method: str,
+        endpoint: str,
+        json_data: dict | None = None,
+        extra_headers: dict | None = None,
+    ) -> str:
+        """Make authenticated request and return raw text response."""
+        pass
+
+    @abstractmethod
+    async def _asset_request_head(self, asset_url: str) -> int:
+        """Make HEAD request to asset URL and return Content-Length."""
+        pass
+
+    # =========================================================================
+    # API 1: list_posts()
+    # =========================================================================
+
+    async def list_posts(
+        self,
+        limit: int = 40,
+        source: str = "MEDIA_POST_SOURCE_LIKED",
+        include_raw_data: bool = False,
+    ) -> list[PostSummary]:
+        """
+        List posts with basic metadata (async).
+
+        Args:
+            limit: Maximum number of posts to return (default: 40)
+            source: Filter by source type. Options:
+                    - "MEDIA_POST_SOURCE_LIKED": Your liked posts only (default)
+                    - None: All public posts
+            include_raw_data: If True, include raw API response in each PostSummary.
+
+        Returns:
+            List of PostSummary objects
+        """
+        json_data: dict[str, Any] = {"limit": limit}
+        if source:
+            json_data["filter"] = {"source": source}
+        else:
+            json_data["filter"] = {}
+
+        data = await self._api_request("POST", "/rest/media/post/list", json_data)
+
+        posts = []
+        for item in data.get("posts", []):
+            try:
+                summary = self._parse_post_summary(item, include_raw_data=include_raw_data)
+                posts.append(summary)
+            except Exception:
+                continue
+
+        return posts
+
+    # =========================================================================
+    # API 2: get_post_details()
+    # =========================================================================
+
+    async def get_post_details(self, post_id: str) -> PostDetails:
+        """
+        Get full details of a post including all child videos (async).
+
+        Args:
+            post_id: Post UUID
+
+        Returns:
+            PostDetails object with all metadata and children
+        """
+        data = await self._api_request("POST", "/rest/media/post/get", {"id": post_id})
+        post_data = data.get("post", data)
+        return self._parse_post_details(post_data, post_id, raw_data=data)
+
+    # =========================================================================
+    # API 3: get_asset_file_size()
+    # =========================================================================
+
+    async def get_asset_file_size(self, asset_url: str) -> int:
+        """
+        Get file size of a Grok asset via HEAD request (async).
+
+        Args:
+            asset_url: Full URL to asset on assets.grok.com
+
+        Returns:
+            File size in bytes
+        """
+        if not asset_url:
+            raise GrokAPIError("Asset URL is empty")
+
+        if not asset_url.startswith(self.ASSETS_URL):
+            raise GrokAPIError(
+                f"Invalid asset URL. Expected {self.ASSETS_URL}/..., got: {asset_url[:50]}..."
+            )
+
+        return await self._asset_request_head(asset_url)
+
+    # =========================================================================
+    # API 4: validate_auth()
+    # =========================================================================
+
+    async def validate_auth(self) -> bool:
+        """
+        Check if current authentication is working (async).
+
+        Returns:
+            True if requests succeed, False otherwise
+        """
+        try:
+            await self._api_request(
+                "POST",
+                "/rest/media/post/list",
+                {"limit": 1, "filter": {}},
+            )
+            return True
+        except (GrokAuthError, GrokAPIError):
+            return False
+
+    # =========================================================================
+    # API 5: match_local_video()
+    # =========================================================================
+
+    async def match_local_video(self, local_path: str | Path) -> VideoMatchResult:
+        """
+        Match a local grok video to its web counterpart (async).
+
+        Args:
+            local_path: Path to local video file
+
+        Returns:
+            VideoMatchResult with parent_id, video_id, mode, new_filename
+        """
+        local_path = Path(local_path)
+
+        if not local_path.exists():
+            raise GrokAPIError(f"File not found: {local_path}")
+
+        filename = local_path.name
+        match = re.match(
+            r"grok-video-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
+            filename,
+        )
+        if not match:
+            raise GrokAPIError(
+                f"Invalid filename format. Expected 'grok-video-{{uuid}}.mp4', got: {filename}"
+            )
+
+        parent_id = match.group(1)
+        local_size = local_path.stat().st_size
+
+        details = await self.get_post_details(parent_id)
+
+        videos_to_check = []
+
+        if details.mode == GenerationMode.TEXT_TO_VIDEO and details.hd_media_url:
+            videos_to_check.append(
+                {
+                    "video_id": details.id,
+                    "url": details.hd_media_url,
+                    "is_parent": True,
+                    "prompt": details.original_prompt,
+                }
+            )
+
+        for child in details.children:
+            url = child.hd_media_url or child.media_url
+            if url:
+                videos_to_check.append(
+                    {
+                        "video_id": child.id,
+                        "url": url,
+                        "is_parent": False,
+                        "prompt": child.original_prompt,
+                    }
+                )
+
+        for video in videos_to_check:
+            try:
+                web_size = await self.get_asset_file_size(video["url"])
+                if web_size == local_size:
+                    new_filename = f"grok-video_{parent_id}_{video['video_id']}.mp4"
+                    return VideoMatchResult(
+                        parent_id=parent_id,
+                        video_id=video["video_id"],
+                        is_parent_video=video["is_parent"],
+                        mode=details.mode,
+                        original_prompt=video["prompt"],
+                        file_size=local_size,
+                        new_filename=new_filename,
+                    )
+            except Exception:
+                continue
+
+        raise GrokAPIError(
+            f"No matching video found on web for local file: {filename}\n"
+            f"Local size: {local_size} bytes\n"
+            f"Parent ID: {parent_id}\n"
+            f"Videos checked: {len(videos_to_check)}"
+        )
+
+    # =========================================================================
+    # API 6: like_post()
+    # =========================================================================
+
+    async def like_post(self, post_id: str) -> bool:
+        """
+        Like a post to save it to favorites (async).
+
+        Args:
+            post_id: Post UUID to like
+
+        Returns:
+            True if successful
+        """
+        await self._api_request("POST", "/rest/media/post/like", {"id": post_id})
+        return True
+
+    # =========================================================================
+    # API 7: unlike_post()
+    # =========================================================================
+
+    async def unlike_post(self, post_id: str) -> bool:
+        """
+        Unlike a post to remove it from favorites (async).
+
+        Args:
+            post_id: Post UUID to unlike
+
+        Returns:
+            True if successful
+        """
+        await self._api_request("POST", "/rest/media/post/unlike", {"id": post_id})
+        return True
+
+    # =========================================================================
+    # API 8: create_video_from_image()
+    # =========================================================================
+
+    async def create_video_from_image(
+        self,
+        image_url: str,
+        parent_post_id: str,
+        aspect_ratio: str = "2:3",
+        video_length: int = 6,
+        statsig_id: str | None = None,
+        preset: VideoPreset | str = "normal",
+    ) -> VideoGenerationResult:
+        """
+        Generate a video from an image using Grok's chat API (async).
+
+        Args:
+            image_url: Full URL to image on imagine-public.x.ai
+            parent_post_id: Parent image post UUID
+            aspect_ratio: Video aspect ratio (default: "2:3")
+            video_length: Duration in seconds (default: 6)
+            preset: Video generation preset (default: "normal")
+            statsig_id: Style seed for video generation
+
+        Returns:
+            VideoGenerationResult with video_id, moderated status, etc.
+        """
+        # Generate or use provided statsig_id
+        if statsig_id is None:
+            statsig_id = generate_statsig_id()
+
+        # Build payload using shared utility
+        mode_value = resolve_preset(preset)
+        payload = build_video_payload(
+            image_url, parent_post_id, mode_value, aspect_ratio, video_length
+        )
+
+        # Get raw text response (NDJSON streaming format)
+        response_text = await self._api_request_text(
+            "POST",
+            "/rest/app-chat/conversations/new",
+            payload,
+            extra_headers={"x-statsig-id": statsig_id},
+        )
+
+        # Parse using shared utility
+        return parse_video_ndjson_response(response_text, parent_post_id, statsig_id)

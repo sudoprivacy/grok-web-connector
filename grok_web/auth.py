@@ -10,10 +10,14 @@ from .models import GrokCookies
 
 DEFAULT_CONFIG_PATH = Path.home() / ".grok-config.json"
 
-# Default Chrome version for headers
-# IMPORTANT: This should match the curl_cffi impersonate version (chrome136)
-# Even if your browser is newer, the TLS fingerprint must match the headers
+# Default Chrome version for TLS fingerprint impersonation
+# IMPORTANT: Headers are auto-generated to match this version
+# Update this when Cloudflare starts blocking older versions
+# Note: curl_cffi max supported is chrome136 as of v0.13.0
 DEFAULT_CHROME_VERSION = "136"
+
+# curl_cffi impersonate string (must match DEFAULT_CHROME_VERSION)
+DEFAULT_IMPERSONATE = f"chrome{DEFAULT_CHROME_VERSION}"
 
 
 def get_platform_headers(chrome_version: str = DEFAULT_CHROME_VERSION) -> dict[str, str]:
@@ -101,9 +105,14 @@ def load_config(config_path: Path | str | None = None) -> dict[str, Any]:
     # Get custom headers from config (optional)
     custom_headers = config.get("headers", {})
 
+    # Get impersonate version from config (optional)
+    # Can be overridden in config file: {"impersonate": "chrome142"}
+    impersonate = config.get("impersonate", DEFAULT_IMPERSONATE)
+
     return {
         "cookies": cookies,
         "headers": custom_headers,
+        "impersonate": impersonate,
     }
 
 

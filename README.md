@@ -4,53 +4,82 @@ Python client library for interacting with Grok Imagine web API.
 
 ## Features
 
-- **4 Core APIs** for comprehensive Grok Imagine interaction
-- **Cloudflare bypass** via curl_cffi TLS fingerprint impersonation
-- Cookie-based authentication (no password required)
-- Automatic generation mode detection (img2vid, txt2vid, upload2vid)
+- **SmartGrokClient** - Recommended client with HTTP-first, browser-fallback strategy
+- **9 Core APIs** - list_posts, get_post_details, create_video, like/unlike, and more
+- **Auto Cloudflare bypass** - Browser fallback handles challenges automatically
+- **Video presets** - Normal, Fun, Spicy modes for video generation
 - Type-safe with Pydantic models
 
 ## Installation
 
 ```bash
-# From GitHub
-pip install git+https://github.com/elfenlieds7/grok-web-connector.git
-
-# Development mode
-cd /path/to/grok-web-connector
-pip install -e .
+pip install git+https://github.com/user/grok-web-connector.git
 ```
 
 ## Quick Start
 
+### Read-only operations (no browser needed)
+
 ```python
-from grok_web import GrokClient, GenerationMode
+from grok_web import get_client
 
-client = GrokClient()
-
-# 1. List all posts
-posts = client.list_posts(limit=10)
-for p in posts:
-    print(f"{p.id}: {p.mode.value} ({p.video_count} videos)")
-
-# 2. Get details for a specific post
-details = client.get_post_details("0c5c5864-fadb-440b-a52b-e441dab973d3")
-print(f"Mode: {details.mode.value}")
-print(f"Children: {details.video_count}")
-
-# 3. Get video file size
-for child in details.children:
-    if child.hd_media_url:
-        size = client.get_asset_file_size(child.hd_media_url)
-        print(f"{child.id}: {size} bytes")
+async with get_client() as client:
+    posts = await client.list_posts(limit=10)  # HTTP (fast)
+    details = await client.get_post_details(post_id)  # HTTP (fast)
 ```
+
+### Video creation (with browser fallback)
+
+```bash
+# Step 1: Start Chrome with remote debugging (once)
+# macOS:
+/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222
+
+# Windows:
+chrome.exe --remote-debugging-port=9222
+```
+
+```python
+from grok_web import get_client
+
+async with get_client(browser_host="127.0.0.1", browser_port=9222) as client:
+    posts = await client.list_posts()  # HTTP first, browser fallback
+    video = await client.create_video(post_id, preset="fun")  # Browser fallback
+```
+
+## Architecture
+
+### SmartGrokClient (Recommended)
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     SmartGrokClient                         │
+├─────────────────────────────────────────────────────────────┤
+│  All operations:                                            │
+│    1. Try HTTP first (fast, lightweight)                   │
+│    2. On Cloudflare challenge → fallback to browser        │
+│                                                             │
+│  Browser mode uses fetch() inside browser context,          │
+│  NOT clicking UI buttons (except for video creation)        │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### How browser fallback works
+
+| Operation | HTTP Path | Browser Fallback |
+|-----------|-----------|------------------|
+| list_posts | Playwright fetch | Browser-context fetch() |
+| get_post_details | Playwright fetch | Browser-context fetch() |
+| create_video | API call (often 403) | **Click UI buttons** |
+
+**Key insight**: Browser fallback for read APIs uses JavaScript `fetch()` inside the browser context, which automatically uses the browser's authenticated session cookies. Only `create_video` actually clicks UI buttons.
 
 ## Authentication Setup
 
 ### 1. Extract Cookies from Browser
 
 1. Open https://grok.com in Chrome
-2. Open DevTools (F12) → Application → Cookies → https://grok.com
+2. Open DevTools (F12) → Application → Cookies
 3. Copy these 4 cookie values:
    - `sso`
    - `sso-rw`
@@ -67,335 +96,126 @@ Create `~/.grok-config.json`:
     "sso": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9...",
     "sso-rw": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9...",
     "x-userid": "<redacted-user-id>",
-    "cf_clearance": "REDACTED_CF_CLEARANCE..."
+    "cf_clearance": "..."
   }
 }
 ```
-
-**Important**: Add `~/.grok-config.json` to your global `.gitignore`!
-
----
 
 ## API Reference
 
-### 1. `list_posts()` - Scan and Get Overview
+### Read APIs
 
 ```python
-posts = client.list_posts(limit=40, source=None)
+# List posts (default: liked posts)
+posts = await client.list_posts(limit=10, source="favorites")
+
+# Get post details
+details = await client.get_post_details(post_id)
+
+# Get asset file size
+size = await client.get_asset_file_size(asset_url)
+
+# Validate authentication
+is_valid = await client.validate_auth()
+
+# Match local video to web video
+match = await client.match_local_video("/path/to/video.mp4")
 ```
 
-**Parameters:**
-- `limit`: Maximum posts to return (default: 40)
-- `source`: Filter type (`None` for all, `"MEDIA_POST_SOURCE_LIKED"` for liked)
-
-**Returns:** `list[PostSummary]`
-- `id`: Post UUID
-- `mode`: Generation mode (see below)
-- `prompt_preview`: First 100 chars of prompt
-- `video_count`: Number of child videos
-- `created_at`: Creation timestamp
-- `web_url`: Computed web URL
-
-### 2. `get_post_details()` - Explore Single Post
+### Write APIs
 
 ```python
-details = client.get_post_details("0c5c5864-fadb-440b-a52b-e441dab973d3")
+# Like/unlike posts
+await client.like_post(post_id)
+await client.unlike_post(post_id)
+
+# Create video with preset
+result = await client.create_video(
+    parent_post_id="abc-123",
+    preset="fun",  # "normal", "fun", or "spicy"
+)
+print(result.video_id)
 ```
 
-**Returns:** `PostDetails`
-- All parent post metadata
-- `children`: List of `ChildVideo` objects with full metadata
-- `mode`: Detected generation mode
-- `raw_data`: Original API response (for debugging)
+## Video Presets
 
-### 3. `get_asset_file_size()` - Get Asset File Size
+| Preset | Description |
+|--------|-------------|
+| `normal` | Default style |
+| `fun` | More dynamic, playful |
+| `spicy` | Most dramatic effects |
+
+## Client Options
+
+### SmartGrokClient (Recommended)
 
 ```python
-# Works for ALL video types:
-# - img2vid children
-# - txt2vid parent (parent itself is a video!)
-# - txt2vid children
+from grok_web import get_client, SmartGrokClient
 
-# For txt2vid parent video:
-if details.mode.value == 'txt2vid' and details.hd_media_url:
-    parent_size = client.get_asset_file_size(details.hd_media_url)
+# Via factory function
+client = get_client(browser_host="127.0.0.1", browser_port=9222)
 
-# For children (all modes):
-size = client.get_asset_file_size(child.hd_media_url or child.media_url)
+# Or directly
+client = SmartGrokClient(browser_host="127.0.0.1", browser_port=9222)
 ```
 
-Get file size in bytes from `assets.grok.com` URL via HEAD request.
-
-**Important**: This method handles the special headers required:
-- `Referer: https://grok.com/`
-- `Origin: https://grok.com`
-
-Without these headers, requests return 403 Forbidden.
-
-### 4. `validate_auth()` - Check Authentication
+### Other Clients (Advanced)
 
 ```python
-if not client.validate_auth():
-    print("Cookies expired! Please update ~/.grok-config.json")
-```
+from grok_web import NodriverClient, AsyncClient, GrokClient
 
----
+# Full browser automation (all ops go through browser)
+async with NodriverClient(host="127.0.0.1", port=9222) as client:
+    ...
 
-## Generation Modes
+# Playwright HTTP client (requires valid cf_clearance)
+async with AsyncClient() as client:
+    ...
 
-Grok Imagine supports 3 video generation modes:
-
-| Mode | Enum Value | Workflow |
-|------|------------|----------|
-| **Grok-Image→Video** | `img2vid` | Text prompt → Grok generates image → Animate to video |
-| **Text-to-Video** | `txt2vid` | Text prompt → Video directly |
-| **Upload-Image→Video** | `upload2vid` | Upload external image → Animate to video |
-
-### Mode Detection Logic
-
-```python
-from grok_web import GenerationMode
-
-# Detection is automatic based on metadata:
-# - MEDIA_POST_TYPE_VIDEO + mode=text       → TEXT_TO_VIDEO
-# - MEDIA_POST_TYPE_IMAGE + prompt exists   → GROK_IMAGE_TO_VIDEO
-# - MEDIA_POST_TYPE_IMAGE + no prompt       → UPLOAD_IMAGE_TO_VIDEO
-```
-
----
-
-## API Endpoints (Internal)
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/rest/media/post/list` | POST | List user's posts |
-| `/rest/media/post/get` | POST | Get single post details |
-
-### Request Format
-
-```json
-// list
-{"limit": 40, "filter": {"source": "MEDIA_POST_SOURCE_LIKED"}}
-
-// get
-{"id": "uuid-here"}
-```
-
-### Response Structure
-
-```json
-{
-  "post": {
-    "id": "parent-uuid",
-    "mediaType": "MEDIA_POST_TYPE_IMAGE",
-    "prompt": "A woman with flowing hair...",
-    "modelName": "imagine_x_1",
-    "childPosts": [
-      {
-        "id": "child-uuid",
-        "mediaType": "MEDIA_POST_TYPE_VIDEO",
-        "originalPrompt": "Gentle wind blowing...",
-        "hdMediaUrl": "https://assets.grok.com/...",
-        "resolution": {"width": 848, "height": 480}
-      }
-    ]
-  }
-}
-```
-
----
-
-## Metadata by Generation Mode
-
-### Mode 1: Grok-Image→Video (`img2vid`)
-
-| Field | Parent | Child |
-|-------|--------|-------|
-| `mediaType` | `MEDIA_POST_TYPE_IMAGE` | `MEDIA_POST_TYPE_VIDEO` |
-| `prompt` | Image generation prompt | - |
-| `originalPrompt` | - | Video edit prompt |
-| `modelName` | `imagine_x_1` | varies |
-| `mode` | - | `custom` |
-
-### Mode 2: Text-to-Video (`txt2vid`)
-
-| Field | Parent | Child |
-|-------|--------|-------|
-| `mediaType` | `MEDIA_POST_TYPE_VIDEO` | `MEDIA_POST_TYPE_VIDEO` |
-| `originalPrompt` | Video prompt | Same as parent |
-| `modelName` | `imagine_h_1` | varies |
-| `mode` | `text` | `text` |
-
-### Mode 3: Upload-Image→Video (`upload2vid`)
-
-| Field | Parent | Child |
-|-------|--------|-------|
-| `mediaType` | `MEDIA_POST_TYPE_IMAGE` | `MEDIA_POST_TYPE_VIDEO` |
-| `prompt` | *(none - uploaded)* | - |
-| `originalPrompt` | - | Video prompt |
-| `modelName` | `imagine_h_1` | varies |
-| `mode` | - | `custom` |
-
----
-
-## Asset URL Pattern
-
-```
-https://assets.grok.com/users/{userId}/generated/{videoId}/generated_video.mp4
-https://assets.grok.com/users/{userId}/generated/{videoId}/generated_video_hd.mp4
-```
-
-**Key insight**: The `{videoId}` in the URL is the **child video UUID**, not the parent post UUID.
-
-### Accessing Assets
-
-Assets require special headers:
-
-```python
-headers = {
-    "Referer": "https://grok.com/",
-    "Origin": "https://grok.com",
-}
-# Without these → 403 Forbidden
-```
-
-The `get_asset_file_size()` method handles this automatically.
-
----
-
-## Local File to Web Matching
-
-Downloaded videos follow this naming pattern:
-```
-grok-video-{PARENT_UUID}.mp4
-grok-video-{PARENT_UUID} (1).mp4
-grok-video-{PARENT_UUID} (2).mp4
-```
-
-**Matching strategy**:
-1. Extract parent UUID from filename
-2. Call `get_post_details(parent_uuid)` to get post and all children
-3. For txt2vid: also check parent's `hd_media_url` (parent itself is a video!)
-4. For each video URL, call `get_asset_file_size()` to get web file size
-5. Match local file size to web file size (exact match)
-
-```python
-import os
-from grok_web import GrokClient
-
+# curl_cffi sync client (may get 403)
 client = GrokClient()
-local_size = os.path.getsize("/path/to/grok-video-xxx.mp4")
-
-details = client.get_post_details("xxx")
-
-# Build list of all videos to check
-videos_to_check = []
-
-# For txt2vid: parent itself is a video
-if details.mode.value == 'txt2vid' and details.hd_media_url:
-    videos_to_check.append({
-        'id': details.id,
-        'url': details.hd_media_url,
-        'is_parent': True
-    })
-
-# Add all children
-for child in details.children:
-    url = child.hd_media_url or child.media_url
-    if url:
-        videos_to_check.append({
-            'id': child.id,
-            'url': url,
-            'is_parent': False
-        })
-
-# Match by file size
-for video in videos_to_check:
-    web_size = client.get_asset_file_size(video['url'])
-    if web_size == local_size:
-        print(f"Match! Local file → {video['id']} (parent={video['is_parent']})")
-        break
 ```
-
----
 
 ## Error Handling
 
 ```python
-from grok_web import GrokClient, GrokAuthError, GrokAPIError, GrokNotFoundError
-
-client = GrokClient()
+from grok_web import GrokAuthError, GrokAPIError, GrokNotFoundError
 
 try:
-    details = client.get_post_details("invalid-uuid")
+    result = await client.create_video(post_id)
 except GrokAuthError:
-    # See "Troubleshooting 403 Errors" section below!
-    print("Request blocked - check TLS impersonation first, then cookies")
+    # Cloudflare challenge or 403
+    # If using SmartGrokClient without browser config, will raise this
+    print("Need browser fallback - set browser_host and browser_port")
 except GrokNotFoundError:
     print("Post not found")
 except GrokAPIError as e:
     print(f"API error: {e}")
 ```
 
----
+## Troubleshooting
 
-## Troubleshooting 403 Errors
+### HTTP returns 403 / Cloudflare challenge
 
-**IMPORTANT**: 403 errors are usually caused by **Cloudflare bot detection**, NOT cookie expiration!
-
-### How Cloudflare Bot Detection Works
-
-Cloudflare fingerprints the TLS handshake - the way a client negotiates encryption reveals whether it's a real browser or a Python script. Standard `requests` library has a distinctive TLS fingerprint that Cloudflare blocks.
-
-### Solution: curl_cffi
-
-This library uses `curl_cffi` which impersonates Chrome's TLS fingerprint:
+**Solution**: Use browser fallback
 
 ```python
-from curl_cffi import requests
-session = requests.Session(impersonate="chrome136")
+# Add browser config
+client = get_client(browser_host="127.0.0.1", browser_port=9222)
 ```
 
-### Troubleshooting Steps (in order!)
+### Video creation blocked
 
-1. **Update impersonation version** (most common fix)
-   - Edit `client.py`: change `impersonate="chrome136"` to newer version
-   - Available versions: `chrome131`, `chrome133a`, `chrome136`, etc.
-   - Check curl_cffi releases for latest Chrome versions
+The direct API (`create_video_from_image`) is often blocked with 403. SmartGrokClient automatically falls back to browser UI automation.
 
-2. **Update headers to match Chrome version**
-   - Update `sec-ch-ua` header to match your impersonation version
-   - Update `user-agent` Chrome version number
+### cf_clearance expired
 
-3. **Cookie expiration** (RARE - try steps 1-2 first!)
-   - Cookies typically last weeks/months
-   - Only refresh cookies after steps 1-2 fail
+If you're not using browser fallback and cf_clearance expires:
+1. Open Chrome, go to https://grok.com
+2. Copy new `cf_clearance` cookie value
+3. Update `~/.grok-config.json`
 
-### Why Cookie Expiration is Rare
-
-- `sso` and `sso-rw`: Session tokens, last weeks
-- `x-userid`: User identifier, doesn't expire
-- `cf_clearance`: Cloudflare token, tied to browser fingerprint
-
-The `cf_clearance` cookie is tied to the browser's TLS fingerprint. If curl_cffi's impersonation matches closely enough, the same cookie works indefinitely.
-
----
-
-## Data Models
-
-### `PostSummary`
-Lightweight post info for list operations.
-
-### `PostDetails`
-Full post info including all children and raw API response.
-
-### `ChildVideo`
-Video metadata with computed properties like `best_video_url`.
-
-### `GenerationMode`
-Enum: `GROK_IMAGE_TO_VIDEO`, `TEXT_TO_VIDEO`, `UPLOAD_IMAGE_TO_VIDEO`, `UNKNOWN`
-
----
+Or just use browser fallback which handles this automatically.
 
 ## License
 

@@ -115,6 +115,17 @@ class TestAsyncClientAPIRequest:
             await mock_client._api_request("POST", "/rest/media/post/list", {})
 
     @pytest.mark.asyncio
+    async def test_api_request_401_plain(self, mock_client: AsyncClient):
+        """401 without Cloudflare raises plain auth error."""
+        mock_response = AsyncMock()
+        mock_response.status = 401
+        mock_response.text = AsyncMock(return_value="Unauthorized")
+        mock_client._api_context.post = AsyncMock(return_value=mock_response)
+
+        with pytest.raises(GrokAuthError, match="blocked"):
+            await mock_client._api_request("POST", "/rest/media/post/list", {})
+
+    @pytest.mark.asyncio
     async def test_api_request_404(self, mock_client: AsyncClient):
         """404 raises GrokNotFoundError."""
         mock_response = AsyncMock()
@@ -123,6 +134,35 @@ class TestAsyncClientAPIRequest:
 
         with pytest.raises(GrokNotFoundError):
             await mock_client._api_request("POST", "/rest/media/post/get", {"id": "invalid"})
+
+    @pytest.mark.asyncio
+    async def test_api_request_500_raises_api_error(self, mock_client: AsyncClient):
+        """500 raises GrokAPIError."""
+        mock_response = AsyncMock()
+        mock_response.status = 500
+        mock_client._api_context.post = AsyncMock(return_value=mock_response)
+
+        with pytest.raises(GrokAPIError, match="API error: 500"):
+            await mock_client._api_request("POST", "/rest/media/post/list", {})
+
+    @pytest.mark.asyncio
+    async def test_api_request_invalid_json(self, mock_client: AsyncClient):
+        """Invalid JSON response returns empty dict."""
+        mock_response = AsyncMock()
+        mock_response.status = 200
+        mock_response.json = AsyncMock(side_effect=ValueError("Invalid JSON"))
+        mock_client._api_context.post = AsyncMock(return_value=mock_response)
+
+        result = await mock_client._api_request("POST", "/rest/media/post/list", {})
+        assert result == {}
+
+    @pytest.mark.asyncio
+    async def test_api_request_connection_error(self, mock_client: AsyncClient):
+        """Connection error raises GrokAPIError."""
+        mock_client._api_context.post = AsyncMock(side_effect=Exception("Connection failed"))
+
+        with pytest.raises(GrokAPIError, match="Request failed"):
+            await mock_client._api_request("POST", "/rest/media/post/list", {})
 
 
 class TestAsyncClientListPosts:
@@ -208,6 +248,96 @@ class TestAsyncClientGetPostDetails:
         assert len(details.children) == 2
 
 
+class TestAsyncClientAPIRequestText:
+    """Tests for AsyncClient._api_request_text method."""
+
+    @pytest.fixture
+    def mock_client(self, mock_cookies: GrokCookies):
+        """Create client with mocked Playwright."""
+        client = AsyncClient(cookies=mock_cookies)
+        client._playwright = AsyncMock()
+        client._api_context = AsyncMock()
+        return client
+
+    @pytest.mark.asyncio
+    async def test_api_request_text_post_success(self, mock_client: AsyncClient):
+        """Successful POST returns raw text."""
+        mock_response = AsyncMock()
+        mock_response.status = 200
+        mock_response.text = AsyncMock(return_value='{"key": "value"}')
+        mock_client._api_context.post = AsyncMock(return_value=mock_response)
+
+        result = await mock_client._api_request_text("POST", "/endpoint", {"data": 1})
+        assert result == '{"key": "value"}'
+
+    @pytest.mark.asyncio
+    async def test_api_request_text_get_success(self, mock_client: AsyncClient):
+        """Successful GET returns raw text."""
+        mock_response = AsyncMock()
+        mock_response.status = 200
+        mock_response.text = AsyncMock(return_value="plain text response")
+        mock_client._api_context.get = AsyncMock(return_value=mock_response)
+
+        result = await mock_client._api_request_text("GET", "/endpoint")
+        assert result == "plain text response"
+
+    @pytest.mark.asyncio
+    async def test_api_request_text_unsupported_method(self, mock_client: AsyncClient):
+        """Unsupported method raises error."""
+        with pytest.raises(GrokAPIError, match="Unsupported HTTP method"):
+            await mock_client._api_request_text("PUT", "/endpoint")
+
+    @pytest.mark.asyncio
+    async def test_api_request_text_401_cloudflare(self, mock_client: AsyncClient):
+        """401 with Cloudflare raises auth error."""
+        mock_response = AsyncMock()
+        mock_response.status = 401
+        mock_response.text = AsyncMock(return_value="Just a moment...")
+        mock_client._api_context.post = AsyncMock(return_value=mock_response)
+
+        with pytest.raises(GrokAuthError, match="Cloudflare"):
+            await mock_client._api_request_text("POST", "/endpoint", {})
+
+    @pytest.mark.asyncio
+    async def test_api_request_text_403_plain(self, mock_client: AsyncClient):
+        """403 without Cloudflare raises plain auth error."""
+        mock_response = AsyncMock()
+        mock_response.status = 403
+        mock_response.text = AsyncMock(return_value="Forbidden")
+        mock_client._api_context.post = AsyncMock(return_value=mock_response)
+
+        with pytest.raises(GrokAuthError, match="blocked"):
+            await mock_client._api_request_text("POST", "/endpoint", {})
+
+    @pytest.mark.asyncio
+    async def test_api_request_text_404(self, mock_client: AsyncClient):
+        """404 raises GrokNotFoundError."""
+        mock_response = AsyncMock()
+        mock_response.status = 404
+        mock_client._api_context.post = AsyncMock(return_value=mock_response)
+
+        with pytest.raises(GrokNotFoundError):
+            await mock_client._api_request_text("POST", "/endpoint", {})
+
+    @pytest.mark.asyncio
+    async def test_api_request_text_500(self, mock_client: AsyncClient):
+        """500 raises GrokAPIError."""
+        mock_response = AsyncMock()
+        mock_response.status = 500
+        mock_client._api_context.post = AsyncMock(return_value=mock_response)
+
+        with pytest.raises(GrokAPIError, match="API error: 500"):
+            await mock_client._api_request_text("POST", "/endpoint", {})
+
+    @pytest.mark.asyncio
+    async def test_api_request_text_connection_error(self, mock_client: AsyncClient):
+        """Connection error raises GrokAPIError."""
+        mock_client._api_context.post = AsyncMock(side_effect=Exception("Network error"))
+
+        with pytest.raises(GrokAPIError, match="Request failed"):
+            await mock_client._api_request_text("POST", "/endpoint", {})
+
+
 class TestAsyncClientGetAssetFileSize:
     """Tests for AsyncClient.get_asset_file_size method."""
 
@@ -244,6 +374,66 @@ class TestAsyncClientGetAssetFileSize:
         """Non-grok URL raises GrokAPIError."""
         with pytest.raises(GrokAPIError, match="Invalid asset URL"):
             await mock_client.get_asset_file_size("https://other.com/video.mp4")
+
+
+class TestAsyncClientAssetRequestHead:
+    """Tests for AsyncClient._asset_request_head method."""
+
+    @pytest.fixture
+    def mock_client(self, mock_cookies: GrokCookies):
+        """Create client with mocked Playwright."""
+        client = AsyncClient(cookies=mock_cookies)
+        client._playwright = AsyncMock()
+        client._api_context = AsyncMock()
+        client._asset_context = None
+        return client
+
+    @pytest.mark.asyncio
+    async def test_asset_head_403_raises_auth_error(self, mock_client: AsyncClient):
+        """403 raises GrokAuthError."""
+        mock_asset_context = AsyncMock()
+        mock_response = AsyncMock()
+        mock_response.status = 403
+        mock_asset_context.head = AsyncMock(return_value=mock_response)
+        mock_client._playwright.request.new_context = AsyncMock(return_value=mock_asset_context)
+
+        with pytest.raises(GrokAuthError, match="denied"):
+            await mock_client._asset_request_head("https://assets.grok.com/video.mp4")
+
+    @pytest.mark.asyncio
+    async def test_asset_head_500_raises_api_error(self, mock_client: AsyncClient):
+        """Non-200 raises GrokAPIError."""
+        mock_asset_context = AsyncMock()
+        mock_response = AsyncMock()
+        mock_response.status = 500
+        mock_asset_context.head = AsyncMock(return_value=mock_response)
+        mock_client._playwright.request.new_context = AsyncMock(return_value=mock_asset_context)
+
+        with pytest.raises(GrokAPIError, match="failed: 500"):
+            await mock_client._asset_request_head("https://assets.grok.com/video.mp4")
+
+    @pytest.mark.asyncio
+    async def test_asset_head_no_content_length(self, mock_client: AsyncClient):
+        """Missing Content-Length raises GrokAPIError."""
+        mock_asset_context = AsyncMock()
+        mock_response = AsyncMock()
+        mock_response.status = 200
+        mock_response.headers = {}
+        mock_asset_context.head = AsyncMock(return_value=mock_response)
+        mock_client._playwright.request.new_context = AsyncMock(return_value=mock_asset_context)
+
+        with pytest.raises(GrokAPIError, match="Content-Length"):
+            await mock_client._asset_request_head("https://assets.grok.com/video.mp4")
+
+    @pytest.mark.asyncio
+    async def test_asset_head_connection_error(self, mock_client: AsyncClient):
+        """Connection error raises GrokAPIError."""
+        mock_asset_context = AsyncMock()
+        mock_asset_context.head = AsyncMock(side_effect=Exception("Network error"))
+        mock_client._playwright.request.new_context = AsyncMock(return_value=mock_asset_context)
+
+        with pytest.raises(GrokAPIError, match="Asset request failed"):
+            await mock_client._asset_request_head("https://assets.grok.com/video.mp4")
 
 
 class TestAsyncClientValidateAuth:

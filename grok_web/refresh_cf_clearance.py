@@ -46,11 +46,12 @@ async def refresh_cf_clearance():
         return False
 
     async with async_playwright() as p:
-        # Launch real Chrome (not Chromium) for proper TLS fingerprint
-        print("Launching Chrome browser...")
+        # Launch Playwright Chromium (version closer to curl_cffi's chrome136)
+        # Using system Chrome causes TLS fingerprint mismatch with curl_cffi
+        print("Launching Playwright Chromium...")
         browser = await p.chromium.launch(
             headless=False,
-            channel="chrome",
+            # Removed channel="chrome" to use Playwright's bundled Chromium
         )
         context = await browser.new_context(
             viewport={"width": 1920, "height": 1080},

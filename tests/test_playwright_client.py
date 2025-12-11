@@ -132,6 +132,114 @@ class TestPlaywrightClientAPIRequest:
         with pytest.raises(GrokNotFoundError):
             mock_client._api_request("POST", "/rest/media/post/get", {"id": "invalid"})
 
+    def test_api_request_500(self, mock_client: PlaywrightClient):
+        """500 raises GrokAPIError."""
+        mock_response = MagicMock()
+        mock_response.status = 500
+        mock_client._api_context.post.return_value = mock_response
+
+        with pytest.raises(GrokAPIError, match="API error: 500"):
+            mock_client._api_request("POST", "/rest/media/post/list", {})
+
+    def test_api_request_connection_error(self, mock_client: PlaywrightClient):
+        """Connection error raises GrokAPIError."""
+        mock_client._api_context.post.side_effect = Exception("Connection failed")
+
+        with pytest.raises(GrokAPIError, match="Request failed"):
+            mock_client._api_request("POST", "/rest/media/post/list", {})
+
+    def test_api_request_invalid_json(self, mock_client: PlaywrightClient):
+        """Invalid JSON response returns empty dict."""
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_response.json.side_effect = ValueError("Invalid JSON")
+        mock_client._api_context.post.return_value = mock_response
+
+        result = mock_client._api_request("POST", "/rest/media/post/list", {})
+        assert result == {}
+
+
+class TestPlaywrightClientAPIRequestText:
+    """Tests for PlaywrightClient._api_request_text method."""
+
+    @pytest.fixture
+    def mock_client(self, mock_cookies: GrokCookies):
+        """Create client with mocked Playwright."""
+        client = PlaywrightClient(cookies=mock_cookies)
+        client._playwright = MagicMock()
+        client._api_context = MagicMock()
+        return client
+
+    def test_api_request_text_post_success(self, mock_client: PlaywrightClient):
+        """Successful POST returns raw text."""
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_response.text.return_value = '{"key": "value"}'
+        mock_client._api_context.post.return_value = mock_response
+
+        result = mock_client._api_request_text("POST", "/endpoint", {"data": 1})
+        assert result == '{"key": "value"}'
+
+    def test_api_request_text_get_success(self, mock_client: PlaywrightClient):
+        """Successful GET returns raw text."""
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_response.text.return_value = "plain text"
+        mock_client._api_context.get.return_value = mock_response
+
+        result = mock_client._api_request_text("GET", "/endpoint")
+        assert result == "plain text"
+
+    def test_api_request_text_unsupported_method(self, mock_client: PlaywrightClient):
+        """Unsupported method raises error."""
+        with pytest.raises(GrokAPIError, match="Unsupported HTTP method"):
+            mock_client._api_request_text("PUT", "/endpoint")
+
+    def test_api_request_text_401_cloudflare(self, mock_client: PlaywrightClient):
+        """401 with Cloudflare raises auth error."""
+        mock_response = MagicMock()
+        mock_response.status = 401
+        mock_response.text.return_value = "Just a moment..."
+        mock_client._api_context.post.return_value = mock_response
+
+        with pytest.raises(GrokAuthError, match="Cloudflare"):
+            mock_client._api_request_text("POST", "/endpoint", {})
+
+    def test_api_request_text_403_plain(self, mock_client: PlaywrightClient):
+        """403 without Cloudflare raises plain auth error."""
+        mock_response = MagicMock()
+        mock_response.status = 403
+        mock_response.text.return_value = "Forbidden"
+        mock_client._api_context.post.return_value = mock_response
+
+        with pytest.raises(GrokAuthError, match="blocked"):
+            mock_client._api_request_text("POST", "/endpoint", {})
+
+    def test_api_request_text_404(self, mock_client: PlaywrightClient):
+        """404 raises GrokNotFoundError."""
+        mock_response = MagicMock()
+        mock_response.status = 404
+        mock_client._api_context.post.return_value = mock_response
+
+        with pytest.raises(GrokNotFoundError):
+            mock_client._api_request_text("POST", "/endpoint", {})
+
+    def test_api_request_text_500(self, mock_client: PlaywrightClient):
+        """500 raises GrokAPIError."""
+        mock_response = MagicMock()
+        mock_response.status = 500
+        mock_client._api_context.post.return_value = mock_response
+
+        with pytest.raises(GrokAPIError, match="API error: 500"):
+            mock_client._api_request_text("POST", "/endpoint", {})
+
+    def test_api_request_text_connection_error(self, mock_client: PlaywrightClient):
+        """Connection error raises GrokAPIError."""
+        mock_client._api_context.post.side_effect = Exception("Network error")
+
+        with pytest.raises(GrokAPIError, match="Request failed"):
+            mock_client._api_request_text("POST", "/endpoint", {})
+
 
 class TestPlaywrightClientAssetRequest:
     """Tests for PlaywrightClient._asset_request_head method."""
@@ -185,6 +293,38 @@ class TestPlaywrightClientAssetRequest:
         mock_client._asset_context = mock_asset_context
 
         with pytest.raises(GrokAuthError):
+            mock_client._asset_request_head("https://assets.grok.com/video.mp4")
+
+    def test_asset_request_500(self, mock_client: PlaywrightClient):
+        """Non-200 raises GrokAPIError."""
+        mock_asset_context = MagicMock()
+        mock_response = MagicMock()
+        mock_response.status = 500
+        mock_asset_context.head.return_value = mock_response
+        mock_client._asset_context = mock_asset_context
+
+        with pytest.raises(GrokAPIError, match="failed: 500"):
+            mock_client._asset_request_head("https://assets.grok.com/video.mp4")
+
+    def test_asset_request_no_content_length(self, mock_client: PlaywrightClient):
+        """Missing Content-Length raises GrokAPIError."""
+        mock_asset_context = MagicMock()
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_response.headers = {}
+        mock_asset_context.head.return_value = mock_response
+        mock_client._asset_context = mock_asset_context
+
+        with pytest.raises(GrokAPIError, match="Content-Length"):
+            mock_client._asset_request_head("https://assets.grok.com/video.mp4")
+
+    def test_asset_request_connection_error(self, mock_client: PlaywrightClient):
+        """Connection error raises GrokAPIError."""
+        mock_asset_context = MagicMock()
+        mock_asset_context.head.side_effect = Exception("Network error")
+        mock_client._asset_context = mock_asset_context
+
+        with pytest.raises(GrokAPIError, match="Asset request failed"):
             mock_client._asset_request_head("https://assets.grok.com/video.mp4")
 
 

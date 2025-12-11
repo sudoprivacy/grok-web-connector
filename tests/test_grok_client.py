@@ -24,7 +24,7 @@ class TestGrokClientInit:
 
     def test_init_loads_from_config(self, mock_cookies: GrokCookies):
         """Initialize loads cookies from config file."""
-        mock_config = {"cookies": mock_cookies, "headers": {}}
+        mock_config = {"cookies": mock_cookies, "headers": {}, "impersonate": "chrome136"}
 
         with patch("grok_web.client.load_config", return_value=mock_config):
             with patch("grok_web.client.requests.Session") as mock_session:
@@ -34,7 +34,11 @@ class TestGrokClientInit:
 
     def test_init_custom_config_path(self, mock_cookies: GrokCookies):
         """Initialize with custom config path."""
-        mock_config = {"cookies": mock_cookies, "headers": {"x-custom": "header"}}
+        mock_config = {
+            "cookies": mock_cookies,
+            "headers": {"x-custom": "header"},
+            "impersonate": "chrome136",
+        }
 
         with patch("grok_web.client.load_config", return_value=mock_config) as mock_load:
             with patch("grok_web.client.requests.Session") as mock_session:

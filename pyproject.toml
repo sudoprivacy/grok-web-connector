@@ -79,3 +79,20 @@ known-first-party = ["grok_web"]
 quote-style = "double"
 indent-style = "space"
 line-ending = "auto"
+
+# =============================================================================
+# coverage configuration
+# =============================================================================
+[tool.coverage.run]
+source = ["grok_web"]
+omit = [
+    "grok_web/nodriver_cf_verify.py",  # Vendored third-party library
+    "grok_web/refresh_cf_clearance.py",  # Script file, not library code
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]

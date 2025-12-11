@@ -265,6 +265,8 @@ POST /rest/app-chat/conversations/new
 
 **重要发现**：`x-statsig-id` 影响视频生成风格！
 
+> **Research Log:** See [STATSIG_STYLES.md](./STATSIG_STYLES.md) for empirical ID→Style mapping experiments.
+
 ### 结构
 
 | 属性 | 值 |
