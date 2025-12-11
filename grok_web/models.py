@@ -170,3 +170,34 @@ class VideoMatchResult(BaseModel):
     def web_url(self) -> str:
         """Web URL for this video's parent post."""
         return f"https://grok.com/imagine/post/{self.parent_id}"
+
+
+class VideoGenerationResult(BaseModel):
+    """Result of create_video_from_image() API call."""
+
+    # Core identifiers
+    video_id: str = Field(..., description="Generated video UUID")
+    parent_post_id: str = Field(..., description="Parent image post UUID")
+
+    # Generation status
+    moderated: bool = Field(False, description="True if content was flagged by moderation")
+    progress: int = Field(100, description="Generation progress (100 = complete)")
+
+    # Metadata
+    mode: str = Field("normal", description="Generation mode (normal, custom, etc.)")
+    model_name: str | None = Field(None, description="Model used (e.g., imagine_xdit_1)")
+    image_reference: str | None = Field(None, description="Source image URL")
+
+    # Conversation info (for debugging)
+    conversation_id: str | None = Field(None, description="Chat conversation UUID")
+
+    @computed_field
+    @property
+    def web_url(self) -> str:
+        """Web URL for the parent post (video will appear there)."""
+        return f"https://grok.com/imagine/post/{self.parent_post_id}"
+
+    @property
+    def success(self) -> bool:
+        """Check if video was generated successfully (not moderated)."""
+        return self.progress == 100 and not self.moderated

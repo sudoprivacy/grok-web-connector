@@ -30,7 +30,7 @@
 | 5 | `match_local_video()` | (uses get_post_details + HEAD) | ✅ |
 | 6 | `like_post()` | POST `/rest/media/post/like` | ✅ |
 | 7 | `unlike_post()` | POST `/rest/media/post/unlike` | ✅ |
-| 8 | `create_video_from_image()` | POST `/rest/app-chat/conversations/new` | ❌ |
+| 8 | `create_video_from_image()` | POST `/rest/app-chat/conversations/new` | ✅ |
 
 ### Not Yet Implemented
 

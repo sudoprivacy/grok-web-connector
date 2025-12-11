@@ -60,7 +60,7 @@ API Test Status
 | 5  | match_local_video()      | YES    | Production-proven                  |
 | 6  | like_post()              | YES    | Tested 2025-12-11                  |
 | 7  | unlike_post()            | YES    | Tested 2025-12-11                  |
-| 8  | create_video_from_image()| NO     | Added 2025-12-10, needs testing    |
+| 8  | create_video_from_image()| YES    | Tested 2025-12-11, returns VideoGenerationResult |
 
 Last updated: 2025-12-11
 
@@ -98,6 +98,7 @@ from .models import (
     GrokCookies,
     PostDetails,
     PostSummary,
+    VideoGenerationResult,
     VideoMatchResult,
 )
 
@@ -115,6 +116,7 @@ __all__ = [
     "GenerationMode",
     "GrokCookies",
     "VideoMatchResult",
+    "VideoGenerationResult",
     # Exceptions
     "GrokError",
     "GrokAuthError",

@@ -361,10 +361,19 @@ class TestAsyncClientCreateVideoFromImage:
 
     @pytest.mark.asyncio
     async def test_create_video_from_image_payload(self, mock_client: AsyncClient):
-        """Verify correct payload structure."""
+        """Verify correct payload structure and VideoGenerationResult."""
+        # Mock NDJSON streaming response
+        ndjson_response = (
+            '{"result":{"conversation":{"conversationId":"conv-123"}}}\n'
+            '{"result":{"response":{"streamingVideoGenerationResponse":'
+            '{"videoId":"vid-456","parentPostId":"parent-123",'
+            '"moderated":false,"progress":100,"mode":"normal",'
+            '"modelName":"imagine_xdit_1"}}}}'
+        )
+
         mock_response = AsyncMock()
         mock_response.status = 200
-        mock_response.json = AsyncMock(return_value={"conversationId": "conv-123"})
+        mock_response.text = AsyncMock(return_value=ndjson_response)
         mock_client._api_context.post = AsyncMock(return_value=mock_response)
 
         result = await mock_client.create_video_from_image(
@@ -380,4 +389,13 @@ class TestAsyncClientCreateVideoFromImage:
 
         assert data["modelName"] == "grok-3"
         assert data["toolOverrides"]["videoGen"] is True
-        assert result == {"conversationId": "conv-123"}
+
+        # Verify result type and values
+        from grok_web import VideoGenerationResult
+
+        assert isinstance(result, VideoGenerationResult)
+        assert result.video_id == "vid-456"
+        assert result.parent_post_id == "parent-123"
+        assert result.moderated is False
+        assert result.progress == 100
+        assert result.success is True

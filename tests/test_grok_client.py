@@ -437,10 +437,19 @@ class TestGrokClientCreateVideoFromImage:
             return client
 
     def test_create_video_from_image_payload(self, client: GrokClient):
-        """Verify correct payload structure."""
+        """Verify correct payload structure and VideoGenerationResult."""
+        # Mock NDJSON streaming response
+        ndjson_response = (
+            '{"result":{"conversation":{"conversationId":"conv-123"}}}\n'
+            '{"result":{"response":{"streamingVideoGenerationResponse":'
+            '{"videoId":"vid-456","parentPostId":"parent-123",'
+            '"moderated":false,"progress":100,"mode":"normal",'
+            '"modelName":"imagine_xdit_1"}}}}'
+        )
+
         mock_response = MagicMock()
         mock_response.status_code = 200
-        mock_response.json.return_value = {"conversationId": "conv-123"}
+        mock_response.text = ndjson_response
         client._session.request.return_value = mock_response
 
         result = client.create_video_from_image(
@@ -458,4 +467,13 @@ class TestGrokClientCreateVideoFromImage:
         assert json_data["toolOverrides"]["videoGen"] is True
         assert "parent-123" in str(json_data)
         assert "16:9" in str(json_data)
-        assert result == {"conversationId": "conv-123"}
+
+        # Verify result type and values
+        from grok_web import VideoGenerationResult
+
+        assert isinstance(result, VideoGenerationResult)
+        assert result.video_id == "vid-456"
+        assert result.parent_post_id == "parent-123"
+        assert result.moderated is False
+        assert result.progress == 100
+        assert result.success is True

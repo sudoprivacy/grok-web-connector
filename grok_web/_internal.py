@@ -20,6 +20,7 @@ from .models import (
     GenerationMode,
     PostDetails,
     PostSummary,
+    VideoGenerationResult,
     VideoMatchResult,
 )
 
@@ -411,9 +412,12 @@ class SyncClientBase(ResponseParser, ABC):
         parent_post_id: str,
         aspect_ratio: str = "2:3",
         video_length: int = 6,
-    ) -> dict[str, Any]:
+    ) -> VideoGenerationResult:
         """
         Generate a video from an image using Grok's chat API.
+
+        This method blocks until video generation is complete (typically 20-30 seconds).
+        The API returns a streaming NDJSON response with progress updates.
 
         Args:
             image_url: Full URL to image on imagine-public.x.ai
@@ -422,8 +426,14 @@ class SyncClientBase(ResponseParser, ABC):
             video_length: Duration in seconds (default: 6)
 
         Returns:
-            Chat response dict
+            VideoGenerationResult with video_id, moderated status, etc.
+
+        Raises:
+            GrokAPIError: If generation fails or response cannot be parsed
+            GrokAuthError: If authentication fails (403)
         """
+        import json
+
         message = f"{image_url}  --mode=normal"
 
         payload = {
@@ -445,4 +455,57 @@ class SyncClientBase(ResponseParser, ABC):
             },
         }
 
-        return self._api_request("POST", "/rest/app-chat/conversations/new", payload)
+        # Get raw text response (NDJSON streaming format)
+        response_text = self._api_request_text("POST", "/rest/app-chat/conversations/new", payload)
+
+        # Parse NDJSON response - each line is a JSON object
+        conversation_id = None
+        video_result = None
+
+        for line in response_text.strip().split("\n"):
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+                result = data.get("result", {})
+
+                # Extract conversation ID from first response
+                if "conversation" in result:
+                    conversation_id = result["conversation"].get("conversationId")
+
+                # Extract video generation result
+                response = result.get("response", {})
+                if "streamingVideoGenerationResponse" in response:
+                    video_data = response["streamingVideoGenerationResponse"]
+                    # Keep updating with latest progress
+                    video_result = video_data
+
+            except json.JSONDecodeError:
+                continue
+
+        if not video_result:
+            raise GrokAPIError(
+                "Failed to parse video generation response. "
+                "No streamingVideoGenerationResponse found."
+            )
+
+        return VideoGenerationResult(
+            video_id=video_result.get("videoId", ""),
+            parent_post_id=video_result.get("parentPostId", parent_post_id),
+            moderated=video_result.get("moderated", False),
+            progress=video_result.get("progress", 0),
+            mode=video_result.get("mode", "normal"),
+            model_name=video_result.get("modelName"),
+            image_reference=video_result.get("imageReference"),
+            conversation_id=conversation_id,
+        )
+
+    @abstractmethod
+    def _api_request_text(
+        self,
+        method: str,
+        endpoint: str,
+        json_data: dict | None = None,
+    ) -> str:
+        """Make authenticated request and return raw text response."""
+        pass

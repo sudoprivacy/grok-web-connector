@@ -44,6 +44,7 @@ from .models import (
     GrokCookies,
     PostDetails,
     PostSummary,
+    VideoGenerationResult,
     VideoMatchResult,
 )
 
@@ -88,6 +89,13 @@ class GrokClient(SyncClientBase):
         >>> details = client.get_post_details(posts[0].id)
     """
 
+    # x-statsig-id is required for chat API (create_video_from_image)
+    # This appears to be a Statsig SDK client ID, reusable across requests
+    DEFAULT_STATSIG_ID = (
+        "W6IFgVSv2YSVxFj5Yt971KvAL1ldD75XJoGIR285iLdGPIiPNM7S1C9An8vmKsYb"
+        "R9N5sF963w2iXoRhwSHYizPczaEUWA"
+    )
+
     BASE_API_HEADERS = {
         "accept": "*/*",
         "accept-language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
@@ -98,6 +106,7 @@ class GrokClient(SyncClientBase):
         "sec-fetch-dest": "empty",
         "sec-fetch-mode": "cors",
         "sec-fetch-site": "same-origin",
+        "x-statsig-id": DEFAULT_STATSIG_ID,
     }
 
     BASE_ASSET_HEADERS = {
@@ -174,6 +183,37 @@ class GrokClient(SyncClientBase):
             return response.json()
         except ValueError:
             return {}
+
+    def _api_request_text(
+        self,
+        method: str,
+        endpoint: str,
+        json_data: dict | None = None,
+    ) -> str:
+        """Make authenticated request and return raw text response.
+
+        Used for streaming endpoints that return NDJSON (like create_video_from_image).
+        """
+        url = f"{self.BASE_URL}{endpoint}"
+
+        try:
+            response = self._session.request(method, url, json=json_data, timeout=120)
+        except Exception as e:
+            raise GrokAPIError(f"Request failed: {e}") from e
+
+        if response.status_code in (401, 403):
+            raise GrokAuthError(
+                "Request blocked (401/403). Try PlaywrightClient instead, "
+                "or update ~/.grok-config.json cookies."
+            )
+
+        if response.status_code == 404:
+            raise GrokNotFoundError("Resource not found")
+
+        if response.status_code >= 400:
+            raise GrokAPIError(f"API error: {response.status_code}")
+
+        return response.text
 
     def _asset_request_head(self, asset_url: str) -> int:
         """Make HEAD request to asset URL and return Content-Length."""
@@ -301,6 +341,37 @@ class PlaywrightClient(SyncClientBase):
             return response.json()
         except ValueError:
             return {}
+
+    def _api_request_text(
+        self,
+        method: str,
+        endpoint: str,
+        json_data: dict | None = None,
+    ) -> str:
+        """Make authenticated request and return raw text response."""
+        try:
+            if method.upper() == "POST":
+                response = self._api_context.post(endpoint, data=json_data, timeout=120000)
+            elif method.upper() == "GET":
+                response = self._api_context.get(endpoint, timeout=120000)
+            else:
+                raise GrokAPIError(f"Unsupported HTTP method: {method}")
+        except Exception as e:
+            raise GrokAPIError(f"Request failed: {e}") from e
+
+        if response.status in (401, 403):
+            text = response.text()
+            if "Just a moment" in text:
+                raise GrokAuthError("Cloudflare challenge detected. Refresh cf_clearance cookie.")
+            raise GrokAuthError("Request blocked (401/403). Check cookies.")
+
+        if response.status == 404:
+            raise GrokNotFoundError("Resource not found")
+
+        if response.status >= 400:
+            raise GrokAPIError(f"API error: {response.status}")
+
+        return response.text()
 
     def _asset_request_head(self, asset_url: str) -> int:
         """Make HEAD request to asset URL and return Content-Length."""
@@ -541,8 +612,10 @@ class AsyncClient(ResponseParser):
         parent_post_id: str,
         aspect_ratio: str = "2:3",
         video_length: int = 6,
-    ) -> dict[str, Any]:
+    ) -> VideoGenerationResult:
         """Generate a video from an image using Grok's chat API."""
+        import json as json_module
+
         message = f"{image_url}  --mode=normal"
 
         payload = {
@@ -564,7 +637,43 @@ class AsyncClient(ResponseParser):
             },
         }
 
-        return await self._api_request("POST", "/rest/app-chat/conversations/new", payload)
+        response_text = await self._api_request_text(
+            "POST", "/rest/app-chat/conversations/new", payload
+        )
+
+        conversation_id = None
+        video_result = None
+
+        for line in response_text.strip().split("\n"):
+            if not line:
+                continue
+            try:
+                data = json_module.loads(line)
+                result = data.get("result", {})
+
+                if "conversation" in result:
+                    conversation_id = result["conversation"].get("conversationId")
+
+                response = result.get("response", {})
+                if "streamingVideoGenerationResponse" in response:
+                    video_result = response["streamingVideoGenerationResponse"]
+
+            except json_module.JSONDecodeError:
+                continue
+
+        if not video_result:
+            raise GrokAPIError("Failed to parse video generation response.")
+
+        return VideoGenerationResult(
+            video_id=video_result.get("videoId", ""),
+            parent_post_id=video_result.get("parentPostId", parent_post_id),
+            moderated=video_result.get("moderated", False),
+            progress=video_result.get("progress", 0),
+            mode=video_result.get("mode", "normal"),
+            model_name=video_result.get("modelName"),
+            image_reference=video_result.get("imageReference"),
+            conversation_id=conversation_id,
+        )
 
     # =========================================================================
     # Internal
@@ -603,3 +712,34 @@ class AsyncClient(ResponseParser):
             return await response.json()
         except ValueError:
             return {}
+
+    async def _api_request_text(
+        self,
+        method: str,
+        endpoint: str,
+        json_data: dict | None = None,
+    ) -> str:
+        """Make authenticated request and return raw text response."""
+        try:
+            if method.upper() == "POST":
+                response = await self._api_context.post(endpoint, data=json_data, timeout=120000)
+            elif method.upper() == "GET":
+                response = await self._api_context.get(endpoint, timeout=120000)
+            else:
+                raise GrokAPIError(f"Unsupported HTTP method: {method}")
+        except Exception as e:
+            raise GrokAPIError(f"Request failed: {e}") from e
+
+        if response.status in (401, 403):
+            text = await response.text()
+            if "Just a moment" in text:
+                raise GrokAuthError("Cloudflare challenge. Refresh cf_clearance.")
+            raise GrokAuthError("Request blocked (401/403). Check cookies.")
+
+        if response.status == 404:
+            raise GrokNotFoundError("Resource not found")
+
+        if response.status >= 400:
+            raise GrokAPIError(f"API error: {response.status}")
+
+        return await response.text()
