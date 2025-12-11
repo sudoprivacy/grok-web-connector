@@ -44,3 +44,9 @@ htmlcov/
 
 # macOS
 .DS_Store
+
+# Temporary files
+*.tmp
+
+# Claude Code local settings
+.claude/settings.local.json
