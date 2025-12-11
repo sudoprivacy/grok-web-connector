@@ -100,6 +100,7 @@ from .models import (
     PostSummary,
     VideoGenerationResult,
     VideoMatchResult,
+    VideoPreset,
 )
 
 __version__ = "0.4.0"
@@ -117,6 +118,7 @@ __all__ = [
     "GrokCookies",
     "VideoMatchResult",
     "VideoGenerationResult",
+    "VideoPreset",
     # Exceptions
     "GrokError",
     "GrokAuthError",

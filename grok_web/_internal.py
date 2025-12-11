@@ -22,6 +22,7 @@ from .models import (
     PostSummary,
     VideoGenerationResult,
     VideoMatchResult,
+    VideoPreset,
 )
 
 
@@ -413,6 +414,7 @@ class SyncClientBase(ResponseParser, ABC):
         aspect_ratio: str = "2:3",
         video_length: int = 6,
         statsig_id: str | None = None,
+        preset: VideoPreset | str = "normal",
     ) -> VideoGenerationResult:
         """
         Generate a video from an image using Grok's chat API.
@@ -425,6 +427,10 @@ class SyncClientBase(ResponseParser, ABC):
             parent_post_id: Parent image post UUID
             aspect_ratio: Video aspect ratio (default: "2:3")
             video_length: Duration in seconds (default: 6)
+            preset: Video generation preset (default: "normal").
+                - VideoPreset.NORMAL / "normal": Standard generation
+                - VideoPreset.FUN / "fun": More dynamic/creative motion
+                - VideoPreset.SPICY / "spicy": Most permissive content filter
             statsig_id: Style seed for video generation (x-statsig-id header).
 
                 **Style Control Behavior:**
@@ -466,7 +472,20 @@ class SyncClientBase(ResponseParser, ABC):
             # Generate new random 70-byte ID for style exploration
             statsig_id = base64.b64encode(os.urandom(70)).decode("utf-8").rstrip("=")
 
-        message = f"{image_url}  --mode=normal"
+        # Resolve preset to API mode value
+        preset_map = {
+            "normal": "normal",
+            "fun": "extremely-crazy",
+            "spicy": "extremely-spicy-or-crazy",
+        }
+        if isinstance(preset, VideoPreset):
+            mode_value = preset.value
+        elif isinstance(preset, str) and preset.lower() in preset_map:
+            mode_value = preset_map[preset.lower()]
+        else:
+            mode_value = str(preset)  # Allow raw mode values like "extremely-crazy"
+
+        message = f"{image_url}  --mode={mode_value}"
 
         payload = {
             "temporary": True,

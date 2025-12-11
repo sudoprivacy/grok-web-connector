@@ -17,6 +17,14 @@ class GenerationMode(str, Enum):
     UNKNOWN = "unknown"
 
 
+class VideoPreset(str, Enum):
+    """Video generation presets (UI buttons: Normal, Fun, Spicy)."""
+
+    NORMAL = "normal"  # Standard video generation
+    FUN = "extremely-crazy"  # More dynamic/creative motion
+    SPICY = "extremely-spicy-or-crazy"  # Most permissive content filter
+
+
 class ChildVideo(BaseModel):
     """A video generated from a parent post (appears in childPosts array)."""
 

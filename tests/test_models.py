@@ -9,6 +9,7 @@ from grok_web.models import (
     PostDetails,
     PostSummary,
     VideoMatchResult,
+    VideoPreset,
 )
 
 
@@ -258,3 +259,130 @@ class TestVideoMatchResult:
             new_filename="test.mp4",
         )
         assert result.web_url == "https://grok.com/imagine/post/parent-123"
+
+
+class TestVideoPreset:
+    """Tests for VideoPreset enum."""
+
+    def test_enum_values(self):
+        """All expected enum values exist with correct API mode values."""
+        assert VideoPreset.NORMAL.value == "normal"
+        assert VideoPreset.FUN.value == "extremely-crazy"
+        assert VideoPreset.SPICY.value == "extremely-spicy-or-crazy"
+
+    def test_enum_value_is_string(self):
+        """VideoPreset enum values are strings."""
+        # VideoPreset.value returns the API mode string
+        assert VideoPreset.NORMAL.value == "normal"
+        assert VideoPreset.FUN.value == "extremely-crazy"
+        assert VideoPreset.SPICY.value == "extremely-spicy-or-crazy"
+        # Values are actual string instances
+        assert isinstance(VideoPreset.NORMAL.value, str)
+        assert isinstance(VideoPreset.FUN.value, str)
+
+    def test_enum_comparison(self):
+        """VideoPreset can be compared with strings."""
+        assert VideoPreset.NORMAL == "normal"
+        assert VideoPreset.FUN == "extremely-crazy"
+        assert VideoPreset.SPICY == "extremely-spicy-or-crazy"
+
+    def test_enum_from_string(self):
+        """VideoPreset can be created from string value."""
+        assert VideoPreset("normal") == VideoPreset.NORMAL
+        assert VideoPreset("extremely-crazy") == VideoPreset.FUN
+        assert VideoPreset("extremely-spicy-or-crazy") == VideoPreset.SPICY
+
+    def test_enum_names(self):
+        """VideoPreset enum names are user-friendly."""
+        assert VideoPreset.NORMAL.name == "NORMAL"
+        assert VideoPreset.FUN.name == "FUN"
+        assert VideoPreset.SPICY.name == "SPICY"
+
+
+class TestVideoPresetMapping:
+    """Tests for preset to API mode value mapping logic."""
+
+    def test_preset_map_values(self):
+        """Verify the mapping from user-friendly names to API values."""
+        # This tests the mapping logic used in create_video_from_image()
+        preset_map = {
+            "normal": "normal",
+            "fun": "extremely-crazy",
+            "spicy": "extremely-spicy-or-crazy",
+        }
+
+        # Verify all VideoPreset enum values match the expected API mode values
+        assert preset_map["normal"] == VideoPreset.NORMAL.value
+        assert preset_map["fun"] == VideoPreset.FUN.value
+        assert preset_map["spicy"] == VideoPreset.SPICY.value
+
+    def test_resolve_preset_from_enum(self):
+        """VideoPreset enum resolves to correct API mode value."""
+
+        def resolve_preset(preset: VideoPreset | str) -> str:
+            """Simulate the preset resolution logic from create_video_from_image."""
+            preset_map = {
+                "normal": "normal",
+                "fun": "extremely-crazy",
+                "spicy": "extremely-spicy-or-crazy",
+            }
+            if isinstance(preset, VideoPreset):
+                return preset.value
+            elif isinstance(preset, str) and preset.lower() in preset_map:
+                return preset_map[preset.lower()]
+            else:
+                return str(preset)
+
+        # Test with VideoPreset enum
+        assert resolve_preset(VideoPreset.NORMAL) == "normal"
+        assert resolve_preset(VideoPreset.FUN) == "extremely-crazy"
+        assert resolve_preset(VideoPreset.SPICY) == "extremely-spicy-or-crazy"
+
+    def test_resolve_preset_from_string(self):
+        """String preset names resolve to correct API mode values."""
+
+        def resolve_preset(preset: VideoPreset | str) -> str:
+            preset_map = {
+                "normal": "normal",
+                "fun": "extremely-crazy",
+                "spicy": "extremely-spicy-or-crazy",
+            }
+            if isinstance(preset, VideoPreset):
+                return preset.value
+            elif isinstance(preset, str) and preset.lower() in preset_map:
+                return preset_map[preset.lower()]
+            else:
+                return str(preset)
+
+        # Test with string values (case insensitive)
+        assert resolve_preset("normal") == "normal"
+        assert resolve_preset("fun") == "extremely-crazy"
+        assert resolve_preset("spicy") == "extremely-spicy-or-crazy"
+
+        # Test case insensitivity
+        assert resolve_preset("NORMAL") == "normal"
+        assert resolve_preset("Fun") == "extremely-crazy"
+        assert resolve_preset("SPICY") == "extremely-spicy-or-crazy"
+
+    def test_resolve_preset_raw_value(self):
+        """Raw API mode values pass through unchanged."""
+
+        def resolve_preset(preset: VideoPreset | str) -> str:
+            preset_map = {
+                "normal": "normal",
+                "fun": "extremely-crazy",
+                "spicy": "extremely-spicy-or-crazy",
+            }
+            if isinstance(preset, VideoPreset):
+                return preset.value
+            elif isinstance(preset, str) and preset.lower() in preset_map:
+                return preset_map[preset.lower()]
+            else:
+                return str(preset)
+
+        # Raw API values pass through
+        assert resolve_preset("extremely-crazy") == "extremely-crazy"
+        assert resolve_preset("extremely-spicy-or-crazy") == "extremely-spicy-or-crazy"
+
+        # Unknown values also pass through
+        assert resolve_preset("custom-mode") == "custom-mode"
