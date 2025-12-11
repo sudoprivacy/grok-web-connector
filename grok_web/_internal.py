@@ -412,6 +412,7 @@ class SyncClientBase(ResponseParser, ABC):
         parent_post_id: str,
         aspect_ratio: str = "2:3",
         video_length: int = 6,
+        statsig_id: str | None = None,
     ) -> VideoGenerationResult:
         """
         Generate a video from an image using Grok's chat API.
@@ -424,15 +425,25 @@ class SyncClientBase(ResponseParser, ABC):
             parent_post_id: Parent image post UUID
             aspect_ratio: Video aspect ratio (default: "2:3")
             video_length: Duration in seconds (default: 6)
+            statsig_id: Optional x-statsig-id for style control.
+                       Same ID produces similar video styles (camera motion, etc.).
+                       If None, generates a new random ID (explores new styles).
 
         Returns:
-            VideoGenerationResult with video_id, moderated status, etc.
+            VideoGenerationResult with video_id, moderated status, statsig_id used, etc.
 
         Raises:
             GrokAPIError: If generation fails or response cannot be parsed
             GrokAuthError: If authentication fails (403)
         """
+        import base64
         import json
+        import os
+
+        # Generate or use provided statsig_id
+        if statsig_id is None:
+            # Generate new random 70-byte ID for style exploration
+            statsig_id = base64.b64encode(os.urandom(70)).decode("utf-8").rstrip("=")
 
         message = f"{image_url}  --mode=normal"
 
@@ -455,8 +466,13 @@ class SyncClientBase(ResponseParser, ABC):
             },
         }
 
+        # Pass statsig_id as extra header
+        extra_headers = {"x-statsig-id": statsig_id}
+
         # Get raw text response (NDJSON streaming format)
-        response_text = self._api_request_text("POST", "/rest/app-chat/conversations/new", payload)
+        response_text = self._api_request_text(
+            "POST", "/rest/app-chat/conversations/new", payload, extra_headers=extra_headers
+        )
 
         # Parse NDJSON response - each line is a JSON object
         conversation_id = None
@@ -498,6 +514,7 @@ class SyncClientBase(ResponseParser, ABC):
             model_name=video_result.get("modelName"),
             image_reference=video_result.get("imageReference"),
             conversation_id=conversation_id,
+            statsig_id=statsig_id,
         )
 
     @abstractmethod
@@ -506,6 +523,11 @@ class SyncClientBase(ResponseParser, ABC):
         method: str,
         endpoint: str,
         json_data: dict | None = None,
+        extra_headers: dict | None = None,
     ) -> str:
-        """Make authenticated request and return raw text response."""
+        """Make authenticated request and return raw text response.
+
+        Args:
+            extra_headers: Additional headers to include (e.g., x-statsig-id)
+        """
         pass

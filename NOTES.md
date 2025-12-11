@@ -261,6 +261,55 @@ POST /rest/app-chat/conversations/new
 
 ---
 
+## x-statsig-id (Style Control)
+
+**重要发现**：`x-statsig-id` 影响视频生成风格！
+
+### 结构
+
+| 属性 | 值 |
+|------|-----|
+| 原始长度 | 94 字符 (Base64) |
+| 解码后 | 70 bytes 二进制 |
+| 内容 | 随机/加密数据，无明显结构 |
+| 服务端验证 | 几乎无（任意 70 bytes 都能用）|
+
+### 行为
+
+| 场景 | 效果 |
+|------|------|
+| 相同 x-statsig-id | 视频风格高度相似 (~99%)，如相同的 camera 运动、人物动作模式 |
+| 不同 x-statsig-id | 视频风格可能不同 |
+| 随机生成的 ID | 服务器接受，用于探索新风格 |
+
+### API 支持
+
+```python
+# 探索新风格（不指定，自动生成随机 ID）
+result = client.create_video_from_image(image_url, parent_id)
+print(result.statsig_id)  # 返回使用的 ID
+
+# 复现风格（指定已知的 ID）
+result = client.create_video_from_image(
+    image_url, parent_id,
+    statsig_id="ztbNHMzMR1nE1m/ZUYn3/..."  # 之前成功的 ID
+)
+```
+
+### MCTS Pipeline 应用
+
+1. **风格探索**：不指定 statsig_id，生成多样化视频
+2. **风格复现**：保存成功视频的 statsig_id，用于 fine-tuning
+3. **风格聚类**：收集 statsig_id 与视频风格的对应关系
+
+### 注意事项
+
+- x-statsig-id **不影响 moderation**，moderation 是基于内容的
+- 浏览器每次请求生成新的 ID（不是 Statsig 标准的 StableID）
+- 生成方式：`base64.b64encode(os.urandom(70)).decode().rstrip('=')`
+
+---
+
 ## Cookie & Auth Notes
 
 - `cf_clearance` binds to browser TLS fingerprint
@@ -274,6 +323,7 @@ POST /rest/app-chat/conversations/new
 
 - [ ] Implement `upscale_video()` API
 - [x] Test `like_post()`, `unlike_post()` - ✅ 2025-12-11
-- [ ] Test `create_video_from_image()`
+- [x] Test `create_video_from_image()` - ✅ 2025-12-11
+- [x] Add `statsig_id` parameter for style control - ✅ 2025-12-11
 - [ ] Add chat stream parser for real-time status
 - [ ] Document rate limits

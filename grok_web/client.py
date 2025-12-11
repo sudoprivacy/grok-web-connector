@@ -189,15 +189,21 @@ class GrokClient(SyncClientBase):
         method: str,
         endpoint: str,
         json_data: dict | None = None,
+        extra_headers: dict | None = None,
     ) -> str:
         """Make authenticated request and return raw text response.
 
         Used for streaming endpoints that return NDJSON (like create_video_from_image).
+
+        Args:
+            extra_headers: Additional headers to include (overrides session headers)
         """
         url = f"{self.BASE_URL}{endpoint}"
 
         try:
-            response = self._session.request(method, url, json=json_data, timeout=120)
+            response = self._session.request(
+                method, url, json=json_data, headers=extra_headers, timeout=120
+            )
         except Exception as e:
             raise GrokAPIError(f"Request failed: {e}") from e
 
@@ -347,13 +353,20 @@ class PlaywrightClient(SyncClientBase):
         method: str,
         endpoint: str,
         json_data: dict | None = None,
+        extra_headers: dict | None = None,
     ) -> str:
-        """Make authenticated request and return raw text response."""
+        """Make authenticated request and return raw text response.
+
+        Args:
+            extra_headers: Additional headers to include (e.g., x-statsig-id)
+        """
         try:
             if method.upper() == "POST":
-                response = self._api_context.post(endpoint, data=json_data, timeout=120000)
+                response = self._api_context.post(
+                    endpoint, data=json_data, headers=extra_headers, timeout=120000
+                )
             elif method.upper() == "GET":
-                response = self._api_context.get(endpoint, timeout=120000)
+                response = self._api_context.get(endpoint, headers=extra_headers, timeout=120000)
             else:
                 raise GrokAPIError(f"Unsupported HTTP method: {method}")
         except Exception as e:
@@ -718,13 +731,22 @@ class AsyncClient(ResponseParser):
         method: str,
         endpoint: str,
         json_data: dict | None = None,
+        extra_headers: dict | None = None,
     ) -> str:
-        """Make authenticated request and return raw text response."""
+        """Make authenticated request and return raw text response.
+
+        Args:
+            extra_headers: Additional headers to include (e.g., x-statsig-id)
+        """
         try:
             if method.upper() == "POST":
-                response = await self._api_context.post(endpoint, data=json_data, timeout=120000)
+                response = await self._api_context.post(
+                    endpoint, data=json_data, headers=extra_headers, timeout=120000
+                )
             elif method.upper() == "GET":
-                response = await self._api_context.get(endpoint, timeout=120000)
+                response = await self._api_context.get(
+                    endpoint, headers=extra_headers, timeout=120000
+                )
             else:
                 raise GrokAPIError(f"Unsupported HTTP method: {method}")
         except Exception as e:

@@ -191,6 +191,12 @@ class VideoGenerationResult(BaseModel):
     # Conversation info (for debugging)
     conversation_id: str | None = Field(None, description="Chat conversation UUID")
 
+    # Style control (for MCTS pipeline)
+    statsig_id: str | None = Field(
+        None,
+        description="x-statsig-id used for this generation. Same ID produces similar video styles.",
+    )
+
     @computed_field
     @property
     def web_url(self) -> str:
