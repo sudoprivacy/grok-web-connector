@@ -425,9 +425,30 @@ class SyncClientBase(ResponseParser, ABC):
             parent_post_id: Parent image post UUID
             aspect_ratio: Video aspect ratio (default: "2:3")
             video_length: Duration in seconds (default: 6)
-            statsig_id: Optional x-statsig-id for style control.
-                       Same ID produces similar video styles (camera motion, etc.).
-                       If None, generates a new random ID (explores new styles).
+            statsig_id: Style seed for video generation (x-statsig-id header).
+
+                **Style Control Behavior:**
+                - Same statsig_id → ~99% similar video style (camera motion, character
+                  movement patterns, animation timing). Videos may differ slightly in
+                  fine details (e.g., ending micro-expressions) but overall motion and
+                  framing will be nearly identical.
+                - Different statsig_id → potentially different style. May produce
+                  different camera movements (zoom vs pan), character actions
+                  (static vs moving), and overall animation feel.
+                - None (default) → generates random 70-byte ID, useful for exploring
+                  diverse styles in MCTS-style search.
+
+                **Format:** 94-char Base64 string encoding 70 random bytes.
+                Server accepts any valid Base64 of this length.
+
+                **Note:** statsig_id does NOT affect content moderation. Moderation
+                is determined by image content, not by this ID.
+
+                **MCTS Usage:**
+                - Exploration: omit statsig_id to discover new styles
+                - Exploitation: reuse statsig_id from successful generations
+                - The returned VideoGenerationResult.statsig_id can be saved and
+                  reused to reproduce similar styles
 
         Returns:
             VideoGenerationResult with video_id, moderated status, statsig_id used, etc.

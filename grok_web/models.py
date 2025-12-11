@@ -194,7 +194,13 @@ class VideoGenerationResult(BaseModel):
     # Style control (for MCTS pipeline)
     statsig_id: str | None = Field(
         None,
-        description="x-statsig-id used for this generation. Same ID produces similar video styles.",
+        description=(
+            "Style seed (x-statsig-id) used for this generation. "
+            "IMPORTANT: Same statsig_id produces ~99% similar video styles "
+            "(camera motion, character movement, animation timing). "
+            "Save this value to reproduce similar styles in future generations. "
+            "Format: 94-char Base64 encoding 70 random bytes."
+        ),
     )
 
     @computed_field
