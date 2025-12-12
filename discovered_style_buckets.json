@@ -1,5 +1,6 @@
 {
   "description": "Discovered stable_ids with interesting video generation styles",
+  "key_finding": "Motion range is primarily determined by IMAGE CONTENT, not stable_id. stable_id affects style within the image's motion constraints.",
   "buckets": [
     {
       "name": "camera_focused_low_motion",
@@ -24,6 +25,45 @@
         "special": "character initiates movement"
       },
       "notes": "Better for action scenes - character moves more actively"
+    },
+    {
+      "name": "big_motion_pick_up",
+      "stable_id": "KCtqUBycONQQAyK7CGkPe+Vw7DDR83Fzv/7w+6LebeUrGe0pH9Pvo+Yjx/Kv3iMRuQP6mWMjjH6PF25r3Lz+5EUFQ0LFbA",
+      "discovered_on": "2025-12-12",
+      "test_image": "31ead5f0-6f30-46bc-99a9-a0f3d303eece",
+      "sample_video": "0f519781-abc5-43f5-ba02-1a1b0dbd2aee",
+      "characteristics": {
+        "camera": "follows action",
+        "character_motion": "PICKS UP object from ground",
+        "special": "character interacts with environment"
+      },
+      "notes": "Good for interaction scenes - requires high-freedom image"
+    },
+    {
+      "name": "big_motion_raise_hand",
+      "stable_id": "rYAyErvIzG2eO8VBQ6L0yQrm8+ksIfmTkrLSclyMGgzqT2t1ADUj2sYQMQb/6kLd9qV2xRyW2rWtKMfBLOG8Ls28l+xPvQ",
+      "discovered_on": "2025-12-12",
+      "test_image": "31ead5f0-6f30-46bc-99a9-a0f3d303eece",
+      "sample_video": "5f48f14c-d168-4354-a94b-d79e9c57682d",
+      "characteristics": {
+        "camera": "varies",
+        "character_motion": "RAISES hand/arm",
+        "special": "upper body movement"
+      },
+      "notes": "Good for gesture/reaching scenes"
+    },
+    {
+      "name": "big_motion_sit_up",
+      "stable_id": "AGlTQTT2jvrtnhoOm1PxrLBHayX2hQ4RIRjJpEG9wIRkxHTzPFQnb6fXWF+X/HN2IwKO4rM8tGT8MH8R7P3CdSRyGe6xMg",
+      "discovered_on": "2025-12-12",
+      "test_image": "31ead5f0-6f30-46bc-99a9-a0f3d303eece",
+      "sample_video": "6e2e665f-70f1-401d-be6d-ef34267bcc49",
+      "characteristics": {
+        "camera": "varies",
+        "character_motion": "SITS UP straight",
+        "special": "posture change"
+      },
+      "notes": "Good for posture/position change scenes"
     }
   ]
 }
