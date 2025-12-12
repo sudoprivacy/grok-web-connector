@@ -907,6 +907,97 @@ class NodriverClient(AsyncClientBase):
             pass
         return None
 
+    @staticmethod
+    def generate_stable_id() -> str:
+        """Generate a valid Statsig stable_id.
+
+        Format: base64(70 random bytes) with padding stripped.
+        This matches the format used by Statsig SDK.
+
+        Returns:
+            A 94-character base64-encoded string.
+
+        Example:
+            >>> stable_id = NodriverClient.generate_stable_id()
+            >>> len(stable_id)
+            94
+        """
+        import base64
+        import os
+
+        return base64.b64encode(os.urandom(70)).decode().rstrip("=")
+
+    async def get_stable_id(self) -> str | None:
+        """Get the current stable_id from localStorage.
+
+        Returns:
+            The stable_id string, or None if not set.
+        """
+        js_code = "localStorage.getItem('STATSIG_LOCAL_STORAGE_STABLE_ID')"
+        try:
+            result = await self._tab.evaluate(js_code, await_promise=False)
+            return str(result) if result else None
+        except Exception:
+            return None
+
+    async def set_stable_id(self, stable_id: str, reload_page: bool = True) -> bool:
+        """Inject a custom stable_id into localStorage.
+
+        This allows controlling the A/B testing bucket for video generation styles.
+        The stable_id determines which style bucket you're assigned to.
+
+        Args:
+            stable_id: The stable_id to inject (use generate_stable_id() to create one)
+            reload_page: Whether to reload the page after injection (default: True).
+                        Set to False if you'll navigate elsewhere immediately.
+
+        Returns:
+            True if the stable_id was successfully injected and kept after reload.
+
+        Example:
+            >>> # Generate and inject a new stable_id
+            >>> new_id = NodriverClient.generate_stable_id()
+            >>> await client.set_stable_id(new_id)
+            True
+
+            >>> # Or inject a specific stable_id
+            >>> await client.set_stable_id("your-known-stable-id")
+            True
+        """
+        import asyncio
+
+        # Inject stable_id into localStorage
+        inject_js = f"""
+        (() => {{
+            // Clear existing statsig data
+            for (let i = localStorage.length - 1; i >= 0; i--) {{
+                const key = localStorage.key(i);
+                if (key && key.toLowerCase().includes('statsig')) {{
+                    localStorage.removeItem(key);
+                }}
+            }}
+            // Set our stable_id
+            localStorage.setItem('STATSIG_LOCAL_STORAGE_STABLE_ID', '{stable_id}');
+            return localStorage.getItem('STATSIG_LOCAL_STORAGE_STABLE_ID');
+        }})()
+        """
+        try:
+            await self._tab.evaluate(inject_js, await_promise=False)
+
+            if reload_page:
+                # Reload to reinitialize SDK with our stable_id
+                current_url = await self._tab.evaluate("window.location.href", await_promise=False)
+                await self._tab.get(current_url if current_url else f"{self.BASE_URL}/imagine")
+                await asyncio.sleep(4)
+
+                # Verify stable_id was kept
+                current_id = await self.get_stable_id()
+                return current_id == stable_id
+
+            return True
+        except Exception:
+            return False
+
     async def _navigate_to_post(self, post_id: str) -> None:
         """Navigate to a specific post page."""
         import asyncio
@@ -956,6 +1047,7 @@ class NodriverClient(AsyncClientBase):
         parent_post_id: str,
         preset: VideoPreset | str = VideoPreset.NORMAL,
         timeout: int = 120,
+        stable_id: str | None = None,
     ) -> VideoGenerationResult:
         """
         Generate video by simulating UI button click (more reliable for anti-bot bypass).
@@ -967,19 +1059,33 @@ class NodriverClient(AsyncClientBase):
             parent_post_id: The image post ID to generate video from
             preset: Video style preset - 'normal', 'fun', or 'spicy' (or VideoPreset enum)
             timeout: Max seconds to wait for video generation
+            stable_id: Optional custom stable_id to inject before generation.
+                      Use generate_stable_id() to create one. Controls A/B style bucket.
 
         Returns:
             VideoGenerationResult with video_id (may be empty if moderated)
 
         Example:
+            >>> # Basic usage
             >>> result = await client.create_video_via_ui(
             ...     parent_post_id="abc-123",
-            ...     preset="fun",  # or VideoPreset.FUN
+            ...     preset="fun",
+            ... )
+
+            >>> # With custom stable_id (for style bucket control)
+            >>> new_id = NodriverClient.generate_stable_id()
+            >>> result = await client.create_video_via_ui(
+            ...     parent_post_id="abc-123",
+            ...     stable_id=new_id,
             ... )
         """
         import asyncio
 
         from nodriver import cdp
+
+        # Inject custom stable_id if provided
+        if stable_id:
+            await self.set_stable_id(stable_id, reload_page=False)
 
         # Normalize preset to string
         preset_str = preset.value if isinstance(preset, VideoPreset) else str(preset).lower()
@@ -992,18 +1098,23 @@ class NodriverClient(AsyncClientBase):
         }
         preset_menu_text = preset_menu_map.get(preset_str, "Normal")
 
-        # Navigate to the post page
+        # Navigate to the post page (this reloads with our stable_id)
         await self._navigate_to_post(parent_post_id)
 
-        # Set up network monitoring to capture the response
+        # Set up network monitoring to capture the response and statsig_id
         await self._tab.send(cdp.network.enable())
 
-        captured_response = {"body": None, "request_id": None}
+        captured_response = {"body": None, "request_id": None, "statsig_id": None}
 
         async def handle_request(event: cdp.network.RequestWillBeSent):
             url = event.request.url
             if "conversations/new" in url or "app-chat" in url:
                 captured_response["request_id"] = event.request_id
+                # Capture statsig_id from request headers
+                headers = event.request.headers
+                # Headers can be dict or special CDP type
+                if headers and (hasattr(headers, "get") or isinstance(headers, dict)):
+                    captured_response["statsig_id"] = headers.get("x-statsig-id")
 
         async def handle_loading_finished(event: cdp.network.LoadingFinished):
             if (
@@ -1106,9 +1217,9 @@ class NodriverClient(AsyncClientBase):
                 raise GrokAPIError("Timeout waiting for video generation response")
             await asyncio.sleep(0.5)
 
-        # Parse response using shared utility (statsig_id unknown from UI click)
+        # Parse response using shared utility (statsig_id captured from request)
         return parse_video_ndjson_response(
-            captured_response["body"], parent_post_id, statsig_id=None
+            captured_response["body"], parent_post_id, statsig_id=captured_response["statsig_id"]
         )
 
 

@@ -204,9 +204,14 @@ class TestChildVideo:
         assert child.resolution == {"width": 1920, "height": 1080}
 
     def test_web_url_computed(self):
-        """web_url is correctly computed."""
+        """web_url returns direct URL to this video."""
         child = ChildVideo(id="child-1", parent_id="parent-123")
-        assert child.web_url == "https://grok.com/imagine/post/parent-123"
+        assert child.web_url == "https://grok.com/imagine/post/child-1"
+
+    def test_parent_web_url_computed(self):
+        """parent_web_url returns URL to parent post."""
+        child = ChildVideo(id="child-1", parent_id="parent-123")
+        assert child.parent_web_url == "https://grok.com/imagine/post/parent-123"
 
     def test_best_video_url_prefers_hd(self):
         """best_video_url prefers HD URL."""

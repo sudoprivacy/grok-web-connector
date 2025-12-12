@@ -49,7 +49,13 @@ class ChildVideo(BaseModel):
     @computed_field
     @property
     def web_url(self) -> str:
-        """Web URL (videos share parent's URL)."""
+        """Direct web URL to this video."""
+        return f"https://grok.com/imagine/post/{self.id}"
+
+    @computed_field
+    @property
+    def parent_web_url(self) -> str:
+        """Web URL to the parent post."""
         return f"https://grok.com/imagine/post/{self.parent_id}"
 
     @computed_field
