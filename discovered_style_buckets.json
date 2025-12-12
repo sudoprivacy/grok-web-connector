@@ -1,0 +1,29 @@
+{
+  "description": "Discovered stable_ids with interesting video generation styles",
+  "buckets": [
+    {
+      "name": "camera_focused_low_motion",
+      "stable_id": "+U7xFhIwD4xEJD0bjZVVOAi4TrBMqOnflxb/7N76L6hg/V+7GOLqj74Rcsev7I409fEL5MAyqxuaoJVGKy2xQCaCkwaVDA",
+      "discovered_on": "2025-12-12",
+      "characteristics": {
+        "camera": "zoom in slowly, or hover then zoom",
+        "character_motion": "minimal - head turns only",
+        "special": "occasionally adds new elements (chains)"
+      },
+      "notes": "Camera-dominant style, character stays mostly still"
+    },
+    {
+      "name": "character_motion",
+      "stable_id": "QLn1IwbbE4XDOEmdHUS2JR4qQu4wwu+0wpYl5sZGw7Ge0ClJZEPSJu7VHvBxNvq+dKsGMwjMV9JMG5+K8vWaECYIIVk/rg",
+      "discovered_on": "2025-12-12",
+      "test_image": "4f783d0c-004f-4fcc-86a2-c9daab90f950",
+      "sample_video": "672be453-63d7-4882-8aba-166312806ae4",
+      "characteristics": {
+        "camera": "varied - zoom in/out, or static",
+        "character_motion": "MORE DYNAMIC - swings body towards camera",
+        "special": "character initiates movement"
+      },
+      "notes": "Better for action scenes - character moves more actively"
+    }
+  ]
+}
