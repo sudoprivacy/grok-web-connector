@@ -2,6 +2,17 @@
 
 This document explains how to control video generation styles using Statsig stable_id.
 
+## Current Status (2025-12-12)
+
+**Video style variation via stable_id is currently NOT effective.**
+
+After extensive testing, we found that all videos now have "camera zoom in" behavior regardless of:
+- Different stable_ids
+- Different geographic locations (tested: Japan, Taiwan, Korea via VPN)
+- Manual vs automated generation
+
+This suggests Grok has updated their video generation model globally to use "camera zoom in" as the default/only camera behavior. The stable_id injection code still works technically, but does not produce different styles.
+
 ## Background
 
 Grok's video generation uses Statsig for A/B testing, which determines the video generation "style" (camera motion, subject motion, timing, etc.) based on a `stable_id`.
@@ -70,9 +81,11 @@ Generate video with optional custom stable_id.
 
 - `stable_id`: Optional. If provided, injects this stable_id before generation.
 
-## Observed Style Patterns
+## Observed Style Patterns (Historical)
 
-Based on experiments with the same source image:
+> **Note**: As of 2025-12-12, these style variations are no longer observed. All videos now show "camera zoom in" behavior. This section is kept for historical reference.
+
+Based on experiments with the same source image (before the model update):
 
 | Stable ID Pattern | Camera Behavior | Subject Motion |
 |-------------------|-----------------|----------------|
@@ -106,3 +119,22 @@ stable_id = base64.b64encode(os.urandom(70)).decode().rstrip("=")
 - Cannot inject stable_id via API (server validates crypto signature)
 - Must use browser automation (NodriverClient) for stable_id control
 - Style bucket assignment is server-side; we can only discover patterns empirically
+
+## Investigation Notes (2025-12-12)
+
+We conducted extensive research to understand why video styles changed. Key findings:
+
+### What We Tested
+- 10+ different stable_ids on the same image
+- VPN connections to Taiwan and Korea
+- Client-side country code modification
+- Request header analysis
+
+### What We Found
+1. **Video request does not contain country/geo data** - The server determines location from IP address
+2. **Cloudflare routes requests based on network topology**, not just IP geolocation
+3. **Mixpanel analytics tracks `country: JP/KR/etc`** but this is not used for style assignment
+4. **The `experiments: []` field in requests is empty** - all experiment assignment is server-side
+
+### Conclusion
+The "camera zoom in" behavior appears to be a global model/configuration update, not a geo-specific change. The stable_id mechanism still works for A/B bucket assignment, but all available buckets now produce the same camera behavior.
