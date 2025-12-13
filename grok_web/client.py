@@ -690,17 +690,19 @@ class NodriverClient(AsyncClientBase):
                 f"Failed to connect to Chrome at {self._remote_host}:{self._remote_port}: {e}"
             ) from e
 
-        # Try to reuse existing grok.com tab, or use first available tab
+        # Try to reuse existing grok.com tab, or use first available page tab
         self._tab = None
         try:
             targets = getattr(self._browser, "targets", None) or []
-            for target in targets:
+            # Filter for page targets only (not iframes, background_pages, etc.)
+            page_targets = [t for t in targets if getattr(t, "type_", "") == "page"]
+            for target in page_targets:
                 url = getattr(target, "url", "") or ""
                 if "grok.com" in url:
                     self._tab = target
                     break
-            if self._tab is None and targets:
-                self._tab = targets[0]
+            if self._tab is None and page_targets:
+                self._tab = page_targets[0]
         except Exception:
             pass  # Fall through to create new tab
 
