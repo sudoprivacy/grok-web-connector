@@ -59,9 +59,26 @@ def build_video_payload(
     mode_value: str,
     aspect_ratio: str = "2:3",
     video_length: int = 6,
+    adjustment_prompt: str | None = None,
 ) -> dict:
-    """Build the payload for video generation API."""
-    message = f"{image_url}  --mode={mode_value}"
+    """Build the payload for video generation API.
+
+    Args:
+        image_url: Source image URL
+        parent_post_id: Parent post UUID
+        mode_value: Video mode (normal, extremely-crazy, etc.)
+        aspect_ratio: Video aspect ratio
+        video_length: Video duration in seconds
+        adjustment_prompt: Optional prompt to guide video generation (e.g., camera movement,
+            character actions). If provided, mode is automatically set to 'custom'.
+            Examples: "camera slowly zooms out", "she turns her head to the left",
+            "static camera, no zoom"
+    """
+    # If adjustment_prompt is provided, use custom mode
+    if adjustment_prompt:
+        message = f"{image_url} {adjustment_prompt} --mode=custom"
+    else:
+        message = f"{image_url}  --mode={mode_value}"
     return {
         "temporary": True,
         "modelName": "grok-3",

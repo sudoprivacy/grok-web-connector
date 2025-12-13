@@ -662,15 +662,37 @@ class NodriverClient(AsyncClientBase):
 
         # Connect to existing browser or start new one
         if self._browser_reuse:
-            self._browser = await nodriver.start(
-                host=self._remote_host,
-                port=self._remote_port,
-            )
+            try:
+                self._browser = await nodriver.start(
+                    host=self._remote_host,
+                    port=self._remote_port,
+                )
+            except Exception as e:
+                raise GrokAPIError(
+                    f"Failed to connect to Chrome at {self._remote_host}:{self._remote_port}. "
+                    f"Make sure Chrome is running with: chrome --remote-debugging-port={self._remote_port}"
+                ) from e
+
+            # Try to reuse existing grok.com tab, or use first available tab
+            self._tab = None
+            try:
+                targets = getattr(self._browser, "targets", None) or []
+                for target in targets:
+                    url = getattr(target, "url", "") or ""
+                    if "grok.com" in url:
+                        self._tab = target
+                        break
+                if self._tab is None and targets:
+                    self._tab = targets[0]
+            except Exception:
+                pass  # Fall through to create new tab
+
+            if self._tab is None:
+                self._tab = await self._browser.get("about:blank")
         else:
             self._browser = await nodriver.start(headless=self._headless)
-
-        # Get a tab first (blank page)
-        self._tab = await self._browser.get("about:blank")
+            # Get a tab first (blank page)
+            self._tab = await self._browser.get("about:blank")
 
         # Set cookies via CDP before navigating to grok.com
         cookie_dict = self.cookies.to_dict()
@@ -1014,10 +1036,23 @@ class NodriverClient(AsyncClientBase):
         video_length: int = 6,
         statsig_id: str | None = None,
         preset: VideoPreset | str = "normal",
+        adjustment_prompt: str | None = None,
     ) -> VideoGenerationResult:
         """Generate a video from an image using Grok's chat API.
 
         NodriverClient override: tries to get statsig_id from page context first.
+
+        Args:
+            image_url: Source image URL
+            parent_post_id: Parent post UUID
+            aspect_ratio: Video aspect ratio (default "2:3")
+            video_length: Video duration in seconds (default 6)
+            statsig_id: Optional style seed for reproducible styles
+            preset: Video preset - 'normal', 'fun', or 'spicy'
+            adjustment_prompt: Optional prompt to control video generation.
+                Supports camera instructions: "Static Shot", "Pan Left", "Dolly Out", "Orbit", etc.
+                See grok-imagine-expert/docs/CAMERA_CONTROL.md for full list with demo URLs.
+                If provided, overrides preset and uses 'custom' mode.
         """
         # Try to get statsig_id from page context first, then generate if not found
         if statsig_id is None:
@@ -1028,7 +1063,12 @@ class NodriverClient(AsyncClientBase):
         # Build payload using shared utilities
         mode_value = resolve_preset(preset)
         payload = build_video_payload(
-            image_url, parent_post_id, mode_value, aspect_ratio, video_length
+            image_url,
+            parent_post_id,
+            mode_value,
+            aspect_ratio,
+            video_length,
+            adjustment_prompt=adjustment_prompt,
         )
 
         # Get raw text response
@@ -1048,6 +1088,7 @@ class NodriverClient(AsyncClientBase):
         preset: VideoPreset | str = VideoPreset.NORMAL,
         timeout: int = 120,
         stable_id: str | None = None,
+        adjustment_prompt: str | None = None,
     ) -> VideoGenerationResult:
         """
         Generate video by simulating UI button click (more reliable for anti-bot bypass).
@@ -1061,23 +1102,17 @@ class NodriverClient(AsyncClientBase):
             timeout: Max seconds to wait for video generation
             stable_id: Optional custom stable_id to inject before generation.
                       Use generate_stable_id() to create one. Controls A/B style bucket.
+            adjustment_prompt: Optional prompt to control video generation.
+                      Supports camera instructions: "Static Shot", "Pan Left", "Dolly Out", "Orbit", etc.
+                      See grok-imagine-expert/docs/CAMERA_CONTROL.md for full list with demo URLs.
+                      Overrides preset and uses 'custom' mode.
 
         Returns:
             VideoGenerationResult with video_id (may be empty if moderated)
 
         Example:
-            >>> # Basic usage
-            >>> result = await client.create_video_via_ui(
-            ...     parent_post_id="abc-123",
-            ...     preset="fun",
-            ... )
-
-            >>> # With custom stable_id (for style bucket control)
-            >>> new_id = NodriverClient.generate_stable_id()
-            >>> result = await client.create_video_via_ui(
-            ...     parent_post_id="abc-123",
-            ...     stable_id=new_id,
-            ... )
+            >>> result = await client.create_video_via_ui("abc-123", preset="fun")
+            >>> result = await client.create_video_via_ui("abc-123", adjustment_prompt="Static Shot")
         """
         import asyncio
 
@@ -1146,11 +1181,85 @@ class NodriverClient(AsyncClientBase):
         )
         await asyncio.sleep(1)
 
+        # If adjustment_prompt is provided, fill the textarea using React-compatible method
+        if adjustment_prompt:
+            # Escape the prompt for JavaScript
+            escaped_prompt = (
+                adjustment_prompt.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+            )
+
+            # React-compatible textarea filling:
+            # 1. Use native setter to bypass React's controlled input
+            # 2. Dispatch 'input' event to trigger React's onChange
+            fill_textarea_js = f"""
+            (function() {{
+                // Find the textarea by aria-label (Chinese UI: "制作视频", English: "Make video")
+                const textarea = document.querySelector('textarea[aria-label="制作视频"]') ||
+                                 document.querySelector('textarea[aria-label="Make video"]') ||
+                                 document.querySelector('textarea[placeholder*="视频"]') ||
+                                 document.querySelector('textarea[placeholder*="video"]');
+
+                if (!textarea) {{
+                    return 'textarea_not_found';
+                }}
+
+                // Focus the textarea first
+                textarea.focus();
+
+                // Use native setter to set value (bypasses React's controlled input)
+                const nativeTextAreaValueSetter = Object.getOwnPropertyDescriptor(
+                    window.HTMLTextAreaElement.prototype, 'value'
+                ).set;
+                nativeTextAreaValueSetter.call(textarea, "{escaped_prompt}");
+
+                // Dispatch input event to trigger React's onChange handler
+                const inputEvent = new Event('input', {{ bubbles: true, cancelable: true }});
+                textarea.dispatchEvent(inputEvent);
+
+                // Also dispatch change event for good measure
+                const changeEvent = new Event('change', {{ bubbles: true, cancelable: true }});
+                textarea.dispatchEvent(changeEvent);
+
+                return 'success';
+            }})()
+            """
+
+            fill_result = await self._tab.evaluate(fill_textarea_js, await_promise=False)
+            if fill_result == "textarea_not_found":
+                # Try alternative: look for any visible textarea
+                fill_alt_js = f"""
+                (function() {{
+                    const textareas = Array.from(document.querySelectorAll('textarea'));
+                    // Find visible textarea
+                    const visible = textareas.find(t => t.offsetParent !== null);
+                    if (!visible) return 'no_visible_textarea';
+
+                    visible.focus();
+                    const setter = Object.getOwnPropertyDescriptor(
+                        window.HTMLTextAreaElement.prototype, 'value'
+                    ).set;
+                    setter.call(visible, "{escaped_prompt}");
+                    visible.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                    visible.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                    return 'success_alt';
+                }})()
+                """
+                fill_result = await self._tab.evaluate(fill_alt_js, await_promise=False)
+
+            # Wait for React to process the state update
+            await asyncio.sleep(0.5)
+
+            # When using adjustment_prompt, skip preset selection and go directly to generate button
+            # (adjustment_prompt uses custom mode which overrides preset)
+
         # Non-default preset: selecting the preset auto-generates video
         # Default (Normal): need to click "生成视频" button directly
         preset_selected = False
 
-        if preset_str != "normal":
+        # Skip preset selection if using adjustment_prompt (it uses custom mode)
+        if adjustment_prompt:
+            preset_selected = False  # Force using generate button
+        elif preset_str != "normal":
             # Select non-default preset via "视频选项" menu (auto-generates video)
             try:
                 buttons = await self._tab.find_all("button, [role='button']")
@@ -1198,7 +1307,12 @@ class NodriverClient(AsyncClientBase):
                     if hasattr(btn, "text"):
                         text = btn.text.strip() if btn.text else ""
 
-                    if "生成视频" in text or "Create Video" in text or label == "生成视频":
+                    if (
+                        "生成视频" in text
+                        or "Create Video" in text
+                        or "Make video" in label
+                        or label == "生成视频"
+                    ):
                         create_btn = btn
                         break
 
@@ -1391,6 +1505,7 @@ class SmartGrokClient:
         preset: VideoPreset | str = "normal",
         aspect_ratio: str = "2:3",
         video_length: int = 6,
+        adjustment_prompt: str | None = None,
     ) -> VideoGenerationResult:
         """
         Create video with auto-fallback: try HTTP first, browser if blocked.
@@ -1401,6 +1516,10 @@ class SmartGrokClient:
             preset: Video style - 'normal', 'fun', or 'spicy'
             aspect_ratio: Video aspect ratio (default "2:3")
             video_length: Video length in seconds (default 6)
+            adjustment_prompt: Optional prompt to control video generation.
+                      Supports camera instructions: "Static Shot", "Pan Left", "Dolly Out", "Orbit", etc.
+                      See grok-imagine-expert/docs/CAMERA_CONTROL.md for full list with demo URLs.
+                      Overrides preset and uses 'custom' mode.
 
         Returns:
             VideoGenerationResult with video_id
@@ -1422,6 +1541,7 @@ class SmartGrokClient:
                 preset=preset,
                 aspect_ratio=aspect_ratio,
                 video_length=video_length,
+                adjustment_prompt=adjustment_prompt,
             )
         except GrokAuthError:
             # API blocked (403) - fallback to browser UI
@@ -1431,4 +1551,6 @@ class SmartGrokClient:
                     "Start Chrome with: chrome --remote-debugging-port=9222"
                 ) from None
             browser = await self._get_browser_client()
-            return await browser.create_video_via_ui(parent_post_id, preset=preset)
+            return await browser.create_video_via_ui(
+                parent_post_id, preset=preset, adjustment_prompt=adjustment_prompt
+            )

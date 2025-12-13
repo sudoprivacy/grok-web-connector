@@ -145,6 +145,19 @@ print(result.video_id)
 | `fun` | More dynamic, playful |
 | `spicy` | Most dramatic effects |
 
+## Camera Control Prompts
+
+Control camera movement in videos using the `adjustment_prompt` parameter:
+
+```python
+await client.create_video(post_id, adjustment_prompt="Static Shot")  # No movement
+await client.create_video(post_id, adjustment_prompt="Pan Left")     # Horizontal rotation
+await client.create_video(post_id, adjustment_prompt="Dolly Out")    # Camera moves back
+await client.create_video(post_id, adjustment_prompt="Orbit")        # Circle around subject
+```
+
+See **[grok-imagine-expert/docs/CAMERA_CONTROL.md](https://github.com/user/grok-imagine-expert/blob/main/docs/CAMERA_CONTROL.md)** for full documentation with tested demo URLs.
+
 ## Client Options
 
 ### SmartGrokClient (Recommended)

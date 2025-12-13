@@ -208,7 +208,9 @@ class TestSmartGrokClientVideoCreation:
             result = await client.create_video("test-post-id", preset="fun")
 
             mock_http.create_video_from_image.assert_called_once()
-            mock_browser.create_video_via_ui.assert_called_once_with("test-post-id", preset="fun")
+            mock_browser.create_video_via_ui.assert_called_once_with(
+                "test-post-id", preset="fun", adjustment_prompt=None
+            )
             assert result.video_id == "browser-video-id"
 
     @pytest.mark.asyncio

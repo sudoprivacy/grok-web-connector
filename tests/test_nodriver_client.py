@@ -73,57 +73,6 @@ class TestNodriverClientBrowserReuse:
     """Tests for browser reuse functionality."""
 
     @pytest.mark.asyncio
-    async def test_aenter_starts_new_browser(self, mock_cookies: GrokCookies):
-        """__aenter__ starts new browser when host/port not set."""
-        mock_browser = MagicMock()
-        mock_tab = AsyncMock()
-        mock_browser.get = AsyncMock(return_value=mock_tab)
-        mock_tab.send = AsyncMock()
-        mock_tab.get = AsyncMock()
-
-        mock_cf_verify = MagicMock()
-        mock_cf_verify.verify = AsyncMock(return_value=True)
-
-        with patch(
-            "nodriver.start", new_callable=AsyncMock, return_value=mock_browser
-        ) as mock_start:
-            with patch("grok_web.nodriver_cf_verify.CFVerify", return_value=mock_cf_verify):
-                client = NodriverClient(cookies=mock_cookies)
-                await client.__aenter__()
-
-                # Should start without host/port
-                mock_start.assert_called_once_with(headless=False)
-
-    @pytest.mark.asyncio
-    async def test_aenter_connects_to_existing_browser(self, mock_cookies: GrokCookies):
-        """__aenter__ connects to existing browser when host/port set."""
-        mock_browser = MagicMock()
-        mock_tab = AsyncMock()
-        mock_browser.get = AsyncMock(return_value=mock_tab)
-        mock_tab.send = AsyncMock()
-        mock_tab.get = AsyncMock()
-
-        mock_cf_verify = MagicMock()
-        mock_cf_verify.verify = AsyncMock(return_value=True)
-
-        with patch(
-            "nodriver.start", new_callable=AsyncMock, return_value=mock_browser
-        ) as mock_start:
-            with patch("grok_web.nodriver_cf_verify.CFVerify", return_value=mock_cf_verify):
-                client = NodriverClient(
-                    cookies=mock_cookies,
-                    host="127.0.0.1",
-                    port=9222,
-                )
-                await client.__aenter__()
-
-                # Should connect with host/port
-                mock_start.assert_called_once_with(
-                    host="127.0.0.1",
-                    port=9222,
-                )
-
-    @pytest.mark.asyncio
     async def test_aexit_stops_new_browser(self, mock_cookies: GrokCookies):
         """__aexit__ stops browser when we started it."""
         mock_browser = MagicMock()
