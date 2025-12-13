@@ -1126,6 +1126,7 @@ class NodriverClient(AsyncClientBase):
 
         Example:
             >>> result = await client.create_video_via_ui("abc-123", preset="fun")
+            >>> result = await client.create_video_via_ui("abc-123", adjustment_prompt="Static Shot")
             >>> result = await client.create_video_via_ui("abc-123", adjustment_prompt="she smiles")
         """
         import asyncio
