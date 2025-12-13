@@ -583,42 +583,35 @@ class NodriverClient(AsyncClientBase):
     Best choice for video generation workflows. Uses Chrome DevTools Protocol
     without WebDriver traces. Automatically handles Cloudflare Turnstile.
 
-    RECOMMENDED: Use with persistent Chrome for fastest performance.
+    Features:
+        - Auto-launches isolated Chrome instance if not running
+        - Reuses existing Chrome session for fast subsequent calls
+        - Handles Cloudflare challenges automatically
 
-    Setup (once):
-        # macOS:
-        /Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome \\
-            --remote-debugging-port=9222
-
-        # Windows:
-        chrome.exe --remote-debugging-port=9222
-
-        # Linux:
-        google-chrome --remote-debugging-port=9222
-
-    Usage (fast after first connection):
-        >>> # Connect to persistent Chrome (RECOMMENDED)
-        >>> async with NodriverClient(host="127.0.0.1", port=9222) as client:
-        ...     # First request: ~5s (Cloudflare challenge)
-        ...     # Subsequent: instant (session reused)
-        ...     posts = await client.list_posts(limit=10)
-        ...     result = await client.create_video_from_image(...)
-
-        >>> # Or use get_client() factory (same thing)
-        >>> from grok_web import get_client
-        >>> async with get_client(host="127.0.0.1", port=9222) as client:
-        ...     posts = await client.list_posts()
-
-    Without persistent Chrome (slower, starts new browser each time):
+    Usage:
+        >>> # Simplest usage - auto-launches Chrome if needed
         >>> async with NodriverClient() as client:
         ...     posts = await client.list_posts(limit=10)
+        ...     result = await client.create_video_via_ui(post_id)
 
-    Why persistent Chrome?
-        - First startup: ~5s (launches Chrome, handles Cloudflare)
-        - Subsequent calls: instant (reuses browser session)
-        - Browser stays open between script runs
-        - Perfect for batch video generation
+        >>> # Or use get_client() factory
+        >>> from grok_web import get_client
+        >>> async with get_client() as client:
+        ...     posts = await client.list_posts()
+
+        >>> # Connect to specific Chrome instance
+        >>> async with NodriverClient(port=9223) as client:
+        ...     posts = await client.list_posts()
+
+    Performance:
+        - First run: ~5s (launches Chrome, handles Cloudflare)
+        - Subsequent runs: instant (reuses browser session)
+        - Chrome stays open between script runs for fast batch processing
     """
+
+    # Default port for Chrome remote debugging
+    DEFAULT_DEBUG_PORT = 9222
+    DEFAULT_DEBUG_HOST = "127.0.0.1"
 
     def __init__(
         self,
@@ -627,6 +620,7 @@ class NodriverClient(AsyncClientBase):
         headless: bool = False,
         host: str | None = None,
         port: int | None = None,
+        auto_launch: bool = True,
     ):
         """
         Initialize NodriverClient.
@@ -635,9 +629,10 @@ class NodriverClient(AsyncClientBase):
             cookies: GrokCookies instance. If None, loads from config file.
             config_path: Path to config file. Defaults to ~/.grok-config.json
             headless: Run browser in headless mode (default: False for debugging)
-            host: Remote debugging host (e.g., "127.0.0.1"). If set with port,
-                  connects to existing Chrome instead of starting new one.
-            port: Remote debugging port (e.g., 9222). Requires host to be set.
+            host: Remote debugging host. Defaults to "127.0.0.1".
+            port: Remote debugging port. Defaults to 9222.
+            auto_launch: If True (default), automatically launch Chrome if not running.
+                        Set to False to only connect to existing Chrome.
         """
         if cookies is None:
             config = load_config(config_path)
@@ -648,11 +643,12 @@ class NodriverClient(AsyncClientBase):
         self._browser = None
         self._tab = None
         self._initialized = False
+        self._chrome_process = None  # Track Chrome process we launched
 
-        # Browser reuse support
-        self._remote_host = host
-        self._remote_port = port
-        self._browser_reuse = host is not None and port is not None
+        # Browser connection settings (always use reuse mode now)
+        self._remote_host = host or self.DEFAULT_DEBUG_HOST
+        self._remote_port = port or self.DEFAULT_DEBUG_PORT
+        self._auto_launch = auto_launch
 
     async def __aenter__(self):
         import asyncio
@@ -660,38 +656,55 @@ class NodriverClient(AsyncClientBase):
         import nodriver
         from nodriver import cdp
 
-        # Connect to existing browser or start new one
-        if self._browser_reuse:
+        from .browser import ensure_chrome_running, is_port_in_use
+
+        # Ensure Chrome is running (auto-launch if needed)
+        if self._auto_launch:
             try:
-                self._browser = await nodriver.start(
+                self._chrome_process = await ensure_chrome_running(
                     host=self._remote_host,
                     port=self._remote_port,
+                    headless=self._headless,
                 )
-            except Exception as e:
-                raise GrokAPIError(
-                    f"Failed to connect to Chrome at {self._remote_host}:{self._remote_port}. "
-                    f"Make sure Chrome is running with: chrome --remote-debugging-port={self._remote_port}"
-                ) from e
-
-            # Try to reuse existing grok.com tab, or use first available tab
-            self._tab = None
-            try:
-                targets = getattr(self._browser, "targets", None) or []
-                for target in targets:
-                    url = getattr(target, "url", "") or ""
-                    if "grok.com" in url:
-                        self._tab = target
-                        break
-                if self._tab is None and targets:
-                    self._tab = targets[0]
-            except Exception:
-                pass  # Fall through to create new tab
-
-            if self._tab is None:
-                self._tab = await self._browser.get("about:blank")
+            except FileNotFoundError as e:
+                raise GrokAPIError(str(e)) from e
+            except TimeoutError as e:
+                raise GrokAPIError(f"Chrome failed to start: {e}") from e
         else:
-            self._browser = await nodriver.start(headless=self._headless)
-            # Get a tab first (blank page)
+            # Check if Chrome is running when auto_launch is disabled
+            if not is_port_in_use(self._remote_host, self._remote_port):
+                raise GrokAPIError(
+                    f"Chrome not running on {self._remote_host}:{self._remote_port}. "
+                    f"Start Chrome with: chrome --remote-debugging-port={self._remote_port} "
+                    f"--user-data-dir=/tmp/chrome_debug"
+                )
+
+        # Connect to Chrome
+        try:
+            self._browser = await nodriver.start(
+                host=self._remote_host,
+                port=self._remote_port,
+            )
+        except Exception as e:
+            raise GrokAPIError(
+                f"Failed to connect to Chrome at {self._remote_host}:{self._remote_port}: {e}"
+            ) from e
+
+        # Try to reuse existing grok.com tab, or use first available tab
+        self._tab = None
+        try:
+            targets = getattr(self._browser, "targets", None) or []
+            for target in targets:
+                url = getattr(target, "url", "") or ""
+                if "grok.com" in url:
+                    self._tab = target
+                    break
+            if self._tab is None and targets:
+                self._tab = targets[0]
+        except Exception:
+            pass  # Fall through to create new tab
+
+        if self._tab is None:
             self._tab = await self._browser.get("about:blank")
 
         # Set cookies via CDP before navigating to grok.com
@@ -725,9 +738,10 @@ class NodriverClient(AsyncClientBase):
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        if self._browser and not self._browser_reuse:
-            # Only stop browser if we started it (not when reusing existing)
-            self._browser.stop()
+        # Don't stop Chrome - keep it running for reuse by subsequent calls
+        # The Chrome process stays open in background, which is the desired behavior
+        # for fast batch processing
+        pass
 
     async def _api_request(
         self,
@@ -1368,6 +1382,7 @@ class SmartGrokClient:
         browser_host: str | None = None,
         browser_port: int | None = None,
         browser_headless: bool = False,
+        enable_browser_fallback: bool = True,
     ):
         """
         Initialize SmartGrokClient.
@@ -1375,11 +1390,11 @@ class SmartGrokClient:
         Args:
             cookies: GrokCookies instance. If None, loads from config file.
             config_path: Path to config file. Defaults to ~/.grok-config.json
-            browser_host: Remote debugging host for Chrome (e.g., "127.0.0.1").
-                          Required for video creation fallback.
-            browser_port: Remote debugging port for Chrome (e.g., 9222).
-                          Required for video creation fallback.
+            browser_host: Remote debugging host. Defaults to "127.0.0.1".
+            browser_port: Remote debugging port. Defaults to 9222.
             browser_headless: Run browser in headless mode (default: False)
+            enable_browser_fallback: If True (default), enable browser fallback
+                          for video creation. Chrome will be auto-launched if needed.
         """
         if cookies is None:
             config = load_config(config_path)
@@ -1392,6 +1407,7 @@ class SmartGrokClient:
         self._browser_host = browser_host
         self._browser_port = browser_port
         self._browser_headless = browser_headless
+        self._enable_browser_fallback = enable_browser_fallback
 
     async def __aenter__(self):
         """Initialize HTTP client (lightweight, no browser)."""
@@ -1429,7 +1445,7 @@ class SmartGrokClient:
         try:
             return await self._http_client.list_posts(limit, source, include_raw_data)
         except GrokAuthError:
-            if self._browser_host is None or self._browser_port is None:
+            if not self._enable_browser_fallback:
                 raise
             browser = await self._get_browser_client()
             return await browser.list_posts(limit, source, include_raw_data)
@@ -1439,7 +1455,7 @@ class SmartGrokClient:
         try:
             return await self._http_client.get_post_details(post_id)
         except GrokAuthError:
-            if self._browser_host is None or self._browser_port is None:
+            if not self._enable_browser_fallback:
                 raise
             browser = await self._get_browser_client()
             return await browser.get_post_details(post_id)
@@ -1449,7 +1465,7 @@ class SmartGrokClient:
         try:
             return await self._http_client.get_asset_file_size(asset_url)
         except GrokAuthError:
-            if self._browser_host is None or self._browser_port is None:
+            if not self._enable_browser_fallback:
                 raise
             browser = await self._get_browser_client()
             return await browser.get_asset_file_size(asset_url)
@@ -1459,7 +1475,7 @@ class SmartGrokClient:
         try:
             return await self._http_client.validate_auth()
         except GrokAuthError:
-            if self._browser_host is None or self._browser_port is None:
+            if not self._enable_browser_fallback:
                 raise
             browser = await self._get_browser_client()
             return await browser.validate_auth()
@@ -1469,7 +1485,7 @@ class SmartGrokClient:
         try:
             return await self._http_client.match_local_video(local_path)
         except GrokAuthError:
-            if self._browser_host is None or self._browser_port is None:
+            if not self._enable_browser_fallback:
                 raise
             browser = await self._get_browser_client()
             return await browser.match_local_video(local_path)
@@ -1483,7 +1499,7 @@ class SmartGrokClient:
         try:
             return await self._http_client.like_post(post_id)
         except GrokAuthError:
-            if self._browser_host is None or self._browser_port is None:
+            if not self._enable_browser_fallback:
                 raise
             browser = await self._get_browser_client()
             return await browser.like_post(post_id)
@@ -1493,7 +1509,7 @@ class SmartGrokClient:
         try:
             return await self._http_client.unlike_post(post_id)
         except GrokAuthError:
-            if self._browser_host is None or self._browser_port is None:
+            if not self._enable_browser_fallback:
                 raise
             browser = await self._get_browser_client()
             return await browser.unlike_post(post_id)
@@ -1545,10 +1561,10 @@ class SmartGrokClient:
             )
         except GrokAuthError:
             # API blocked (403) - fallback to browser UI
-            if self._browser_host is None or self._browser_port is None:
+            if not self._enable_browser_fallback:
                 raise GrokAuthError(
-                    "Video API blocked (403). Browser fallback requires browser_host and browser_port. "
-                    "Start Chrome with: chrome --remote-debugging-port=9222"
+                    "Video API blocked (403). Enable browser fallback with enable_browser_fallback=True "
+                    "or use NodriverClient directly."
                 ) from None
             browser = await self._get_browser_client()
             return await browser.create_video_via_ui(

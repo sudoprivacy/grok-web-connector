@@ -33,32 +33,39 @@ class TestNodriverClientInit:
         assert client._headless is True
 
     def test_init_with_host_port(self, mock_cookies: GrokCookies):
-        """Initialize with host and port for browser reuse."""
+        """Initialize with custom host and port."""
         client = NodriverClient(
             cookies=mock_cookies,
-            host="127.0.0.1",
-            port=9222,
+            host="192.168.1.100",
+            port=9223,
         )
+        assert client._remote_host == "192.168.1.100"
+        assert client._remote_port == 9223
+        assert client._auto_launch is True
+
+    def test_init_default_host_port(self, mock_cookies: GrokCookies):
+        """Initialize with default host/port values."""
+        client = NodriverClient(cookies=mock_cookies)
         assert client._remote_host == "127.0.0.1"
         assert client._remote_port == 9222
-        assert client._browser_reuse is True
-
-    def test_init_without_host_port(self, mock_cookies: GrokCookies):
-        """Initialize without host/port starts new browser."""
-        client = NodriverClient(cookies=mock_cookies)
-        assert client._remote_host is None
-        assert client._remote_port is None
-        assert client._browser_reuse is False
+        assert client._auto_launch is True
 
     def test_init_with_only_host(self, mock_cookies: GrokCookies):
-        """Initialize with only host (no port) doesn't enable reuse."""
-        client = NodriverClient(cookies=mock_cookies, host="127.0.0.1")
-        assert client._browser_reuse is False
+        """Initialize with only host uses default port."""
+        client = NodriverClient(cookies=mock_cookies, host="192.168.1.100")
+        assert client._remote_host == "192.168.1.100"
+        assert client._remote_port == 9222
 
     def test_init_with_only_port(self, mock_cookies: GrokCookies):
-        """Initialize with only port (no host) doesn't enable reuse."""
-        client = NodriverClient(cookies=mock_cookies, port=9222)
-        assert client._browser_reuse is False
+        """Initialize with only port uses default host."""
+        client = NodriverClient(cookies=mock_cookies, port=9223)
+        assert client._remote_host == "127.0.0.1"
+        assert client._remote_port == 9223
+
+    def test_init_auto_launch_disabled(self, mock_cookies: GrokCookies):
+        """Initialize with auto_launch disabled."""
+        client = NodriverClient(cookies=mock_cookies, auto_launch=False)
+        assert client._auto_launch is False
 
     def test_init_custom_config_path(self, mock_cookies: GrokCookies):
         """Initialize with custom config path."""
@@ -73,31 +80,17 @@ class TestNodriverClientBrowserReuse:
     """Tests for browser reuse functionality."""
 
     @pytest.mark.asyncio
-    async def test_aexit_stops_new_browser(self, mock_cookies: GrokCookies):
-        """__aexit__ stops browser when we started it."""
+    async def test_aexit_keeps_browser_running(self, mock_cookies: GrokCookies):
+        """__aexit__ keeps browser running for reuse."""
         mock_browser = MagicMock()
         mock_browser.stop = MagicMock()
 
         client = NodriverClient(cookies=mock_cookies)
         client._browser = mock_browser
-        client._browser_reuse = False
 
         await client.__aexit__(None, None, None)
 
-        mock_browser.stop.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_aexit_keeps_reused_browser(self, mock_cookies: GrokCookies):
-        """__aexit__ doesn't stop browser when reusing existing."""
-        mock_browser = MagicMock()
-        mock_browser.stop = MagicMock()
-
-        client = NodriverClient(cookies=mock_cookies, host="127.0.0.1", port=9222)
-        client._browser = mock_browser
-
-        await client.__aexit__(None, None, None)
-
-        # Should NOT stop browser when reusing
+        # Browser should NOT be stopped - kept for reuse
         mock_browser.stop.assert_not_called()
 
 

@@ -214,23 +214,24 @@ class TestSmartGrokClientVideoCreation:
             assert result.video_id == "browser-video-id"
 
     @pytest.mark.asyncio
-    async def test_create_video_raises_without_browser_config(self, mock_cookies: GrokCookies):
-        """create_video() raises if 403 and no browser config."""
+    async def test_create_video_raises_when_fallback_disabled(self, mock_cookies: GrokCookies):
+        """create_video() raises if 403 and browser fallback disabled."""
         mock_http = AsyncMock()
         mock_http.get_post_details = AsyncMock(
-            return_value=MagicMock(image_url="https://example.com/image.png")
+            return_value=MagicMock(media_url="https://example.com/image.png")
         )
         mock_http.create_video_from_image = AsyncMock(
             side_effect=GrokAuthError("Request blocked (403)")
         )
 
-        client = SmartGrokClient(cookies=mock_cookies)  # No browser config
+        # Disable browser fallback
+        client = SmartGrokClient(cookies=mock_cookies, enable_browser_fallback=False)
         client._http_client = mock_http
 
         with pytest.raises(GrokAuthError) as exc_info:
             await client.create_video("test-post-id")
 
-        assert "Browser fallback requires browser_host and browser_port" in str(exc_info.value)
+        assert "Enable browser fallback" in str(exc_info.value)
 
 
 class TestSmartGrokClientLazyBrowser:

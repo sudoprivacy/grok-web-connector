@@ -7,25 +7,16 @@ Use SmartGrokClient via get_client() for best performance:
 
     from grok_web import get_client
 
-    # Simple read operations (no browser needed)
+    # All operations work out of the box - Chrome auto-launches if needed!
     async with get_client() as client:
-        posts = await client.list_posts(limit=10)  # HTTP (fast)
-        result = await client.match_local_video(path)  # HTTP (fast)
-
-    # Video creation with auto-fallback to browser
-    # Step 1: Start Chrome with remote debugging (once)
-    # /Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome --remote-debugging-port=9222
-
-    # Step 2: Connect with browser fallback enabled
-    async with get_client(browser_host="127.0.0.1", browser_port=9222) as client:
         posts = await client.list_posts()  # HTTP (fast)
-        video = await client.create_video(post_id, preset="fun")  # Browser fallback
+        video = await client.create_video(post_id, preset="fun")  # Auto browser fallback
 
 SmartGrokClient advantages:
 - HTTP for read operations (fast, no browser overhead)
-- Lazy browser initialization (only when video creation is blocked)
-- Auto-fallback from HTTP API to browser UI for video creation
+- Auto-launches isolated Chrome when needed (no manual setup!)
 - Browser stays open between calls for maximum speed
+- Lazy browser initialization (only when video creation is blocked)
 
 Client Implementations
 ======================
