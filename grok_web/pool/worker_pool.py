@@ -3,8 +3,9 @@
 import asyncio
 import contextlib
 import logging
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from ..client import NodriverClient
 from ..models import GrokCookies
@@ -52,6 +53,8 @@ class BrowserWorkerPool:
         cookies: GrokCookies | None = None,
         headless: bool = False,
         close_chrome: bool = True,
+        fail_condition: Callable[[dict], bool] | None = None,
+        requeue_position: Literal["front", "back"] = "back",
     ):
         """
         Initialize BrowserWorkerPool.
@@ -65,6 +68,11 @@ class BrowserWorkerPool:
             cookies: Pre-loaded GrokCookies. If None, loads from config.
             headless: Run Chrome in headless mode.
             close_chrome: Terminate Chrome processes on pool exit. Default True.
+            fail_condition: Callable that takes result data dict and returns True if
+                the job should be considered failed (even if no exception was raised).
+                Example: `lambda r: r.get("moderated", False)` to fail moderated videos.
+            requeue_position: Where to put failed jobs for retry: "front" (high priority)
+                or "back" (normal priority). Default "back".
         """
         self._num_workers = num_workers
         self._base_port = base_port
@@ -74,14 +82,17 @@ class BrowserWorkerPool:
         self._cookies = cookies
         self._headless = headless
         self._close_chrome = close_chrome
+        self._fail_condition = fail_condition
+        self._requeue_position = requeue_position
 
         # Worker management
         self._workers: dict[int, Worker] = {}
         self._worker_tasks: dict[int, asyncio.Task] = {}
         self._next_worker_id = 0
 
-        # Job management
-        self._job_queue: asyncio.Queue[Job] = asyncio.Queue()
+        # Job management - two queues for priority support
+        self._job_queue: asyncio.Queue[Job] = asyncio.Queue()  # Normal priority
+        self._priority_queue: asyncio.Queue[Job] = asyncio.Queue()  # High priority (front)
         self._results: dict[str, JobResult] = {}
         self._pending_jobs: dict[str, Job] = {}  # job_id -> Job (for tracking)
         self._result_events: dict[str, asyncio.Event] = {}  # For wait_for()
@@ -333,8 +344,9 @@ class BrowserWorkerPool:
         start_time = asyncio.get_event_loop().time()
 
         while True:
-            # Check if all jobs are done
-            if not self._pending_jobs and self._job_queue.empty():
+            # Check if all jobs are done (both queues must be empty)
+            queues_empty = self._job_queue.empty() and self._priority_queue.empty()
+            if not self._pending_jobs and queues_empty:
                 all_idle = all(w.status == WorkerStatus.IDLE for w in self._workers.values())
                 if all_idle:
                     break
@@ -378,8 +390,8 @@ class BrowserWorkerPool:
 
     @property
     def pending_count(self) -> int:
-        """Number of pending jobs."""
-        return len(self._pending_jobs) + self._job_queue.qsize()
+        """Number of pending jobs (both queues)."""
+        return len(self._pending_jobs) + self._job_queue.qsize() + self._priority_queue.qsize()
 
     @property
     def completed_count(self) -> int:
@@ -403,6 +415,7 @@ class BrowserWorkerPool:
             "workers": {w_id: w.to_dict() for w_id, w in self._workers.items()},
             "pending_jobs": len(self._pending_jobs),
             "queue_size": self._job_queue.qsize(),
+            "priority_queue_size": self._priority_queue.qsize(),
             "completed_jobs": len(self._results),
             "success_count": sum(1 for r in self._results.values() if r.success),
             "fail_count": sum(1 for r in self._results.values() if not r.success),
@@ -416,11 +429,16 @@ class BrowserWorkerPool:
         """Main loop for a worker - pulls jobs from queue and executes them."""
         while self._running and worker.status != WorkerStatus.STOPPING:
             try:
-                # Try to get a job with timeout (so we can check status)
-                try:
-                    job = await asyncio.wait_for(self._job_queue.get(), timeout=1.0)
-                except asyncio.TimeoutError:
-                    continue
+                # Try priority queue first (non-blocking), then regular queue
+                job = None
+                with contextlib.suppress(asyncio.QueueEmpty):
+                    job = self._priority_queue.get_nowait()
+
+                if job is None:
+                    try:
+                        job = await asyncio.wait_for(self._job_queue.get(), timeout=1.0)
+                    except asyncio.TimeoutError:
+                        continue
 
                 # Execute the job
                 worker.mark_busy(job)
@@ -433,62 +451,40 @@ class BrowserWorkerPool:
                     result_data = await self._execute_job(worker, job)
                     elapsed = time.time() - start_time
 
-                    # Success
-                    result = JobResult(
-                        job_id=job.job_id,
-                        success=True,
-                        data=result_data,
-                        worker_id=worker.worker_id,
-                    )
-                    self._results[job.job_id] = result
-                    worker.stats.success += 1
-                    worker.stats.total_time += elapsed
-
-                    # Remove from pending
-                    self._pending_jobs.pop(job.job_id, None)
-                    job.status = JobStatus.COMPLETED
-
-                    # Signal waiters
-                    if job.job_id in self._result_events:
-                        self._result_events[job.job_id].set()
-
-                    logger.info(
-                        f"Worker {worker.worker_id} completed {job.task_type} "
-                        f"({job.job_id[:8]}...) in {elapsed:.1f}s"
-                    )
-
-                except Exception as e:
-                    # Failure - retry or mark as failed
-                    job.retries += 1
-                    worker.stats.fail += 1
-
-                    if job.max_retries == -1 or job.retries < job.max_retries:
-                        # Re-queue for retry
-                        job.status = JobStatus.PENDING
-                        await self._job_queue.put(job)
-                        logger.warning(
-                            f"Worker {worker.worker_id} failed {job.task_type} "
-                            f"({job.job_id[:8]}...), retry {job.retries}: {e}"
+                    # Check fail_condition (soft failure)
+                    if self._fail_condition and self._fail_condition(result_data):
+                        # Soft failure - requeue
+                        await self._handle_job_failure(
+                            worker, job, f"fail_condition returned True: {result_data}"
                         )
                     else:
-                        # Max retries exceeded
+                        # Success
                         result = JobResult(
                             job_id=job.job_id,
-                            success=False,
-                            error=str(e),
+                            success=True,
+                            data=result_data,
                             worker_id=worker.worker_id,
                         )
                         self._results[job.job_id] = result
-                        self._pending_jobs.pop(job.job_id, None)
-                        job.status = JobStatus.FAILED
+                        worker.stats.success += 1
+                        worker.stats.total_time += elapsed
 
+                        # Remove from pending
+                        self._pending_jobs.pop(job.job_id, None)
+                        job.status = JobStatus.COMPLETED
+
+                        # Signal waiters
                         if job.job_id in self._result_events:
                             self._result_events[job.job_id].set()
 
-                        logger.error(
-                            f"Worker {worker.worker_id} failed {job.task_type} "
-                            f"({job.job_id[:8]}...) after {job.retries} retries: {e}"
+                        logger.info(
+                            f"Worker {worker.worker_id} completed {job.task_type} "
+                            f"({job.job_id[:8]}...) in {elapsed:.1f}s"
                         )
+
+                except Exception as e:
+                    # Hard failure - exception raised
+                    await self._handle_job_failure(worker, job, str(e))
 
                 finally:
                     worker.mark_idle()
@@ -499,6 +495,48 @@ class BrowserWorkerPool:
             except Exception as e:
                 logger.error(f"Worker {worker.worker_id} loop error: {e}")
                 await asyncio.sleep(1)  # Prevent tight loop on error
+
+    async def _handle_job_failure(self, worker: Worker, job: Job, error: str) -> None:
+        """Handle job failure - retry or mark as failed.
+
+        Args:
+            worker: The worker that executed the job
+            job: The failed job
+            error: Error message describing the failure
+        """
+        job.retries += 1
+        worker.stats.fail += 1
+
+        if job.max_retries == -1 or job.retries < job.max_retries:
+            # Re-queue for retry
+            job.status = JobStatus.PENDING
+            if self._requeue_position == "front":
+                await self._priority_queue.put(job)
+            else:
+                await self._job_queue.put(job)
+            logger.warning(
+                f"Worker {worker.worker_id} failed {job.task_type} "
+                f"({job.job_id[:8]}...), retry {job.retries}: {error}"
+            )
+        else:
+            # Max retries exceeded
+            result = JobResult(
+                job_id=job.job_id,
+                success=False,
+                error=error,
+                worker_id=worker.worker_id,
+            )
+            self._results[job.job_id] = result
+            self._pending_jobs.pop(job.job_id, None)
+            job.status = JobStatus.FAILED
+
+            if job.job_id in self._result_events:
+                self._result_events[job.job_id].set()
+
+            logger.error(
+                f"Worker {worker.worker_id} failed {job.task_type} "
+                f"({job.job_id[:8]}...) after {job.retries} retries: {error}"
+            )
 
     async def _execute_job(self, worker: Worker, job: Job) -> Any:
         """Execute a job on a worker.
