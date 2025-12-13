@@ -20,24 +20,21 @@ SmartGrokClient advantages:
 
 Client Implementations
 ======================
-1. SmartGrokClient (Recommended)
-   - HTTP for reads, browser fallback for video creation
+1. SmartGrokClient (Recommended - use via get_client())
+   - HTTP for reads, auto browser fallback when blocked
    - Best of both worlds: speed + reliability
-   - Use: async with get_client(browser_host, browser_port) as client:
+   - Chrome auto-launches if needed (isolated profile)
+   - Use: async with get_client() as client:
 
-2. NodriverClient
+2. NodriverClient (Direct browser control)
    - Full browser automation via Chrome DevTools Protocol
-   - All operations go through browser
-   - Use: async with NodriverClient(host, port) as client:
+   - Use when you need direct browser access
+   - Use: async with NodriverClient(port=9222) as client:
 
-3. AsyncClient
-   - Async Playwright-based HTTP client
-   - Requires manual cf_clearance cookie refresh
-   - Use: async with AsyncClient() as client:
-
-4. PlaywrightClient / GrokClient
-   - Sync clients for simple use cases
-   - Use: with PlaywrightClient() as client: / client = GrokClient()
+3. BrowserWorkerPool (Parallel processing)
+   - Multiple concurrent browser workers
+   - Job queue with progress persistence
+   - Use: async with BrowserWorkerPool(num_workers=3) as pool:
 
 Factory Functions
 =================
@@ -59,7 +56,27 @@ Write APIs:
 8. create_video()            - Generate video (HTTP first, browser fallback)
 9. create_video_from_image() - Direct API call (may be blocked with 403)
 
-Last updated: 2025-12-12
+Parallel Processing
+===================
+BrowserWorkerPool - for concurrent video generation with multiple Chrome instances:
+
+    from grok_web.pool import BrowserWorkerPool
+
+    async with BrowserWorkerPool(num_workers=3, state_file="progress.json") as pool:
+        # Submit jobs
+        for command in ["Orbit", "Pan Left", "Static Shot"]:
+            await pool.submit("create_video", post_id="abc123", adjustment_prompt=command)
+
+        # Wait for all
+        results = await pool.wait_all()
+
+Features:
+- Multiple concurrent workers on separate Chrome ports
+- Dynamic scaling: add/remove workers at runtime
+- Progress persistence: resume after restart
+- Graceful shutdown: complete current tasks before exit
+
+Last updated: 2025-12-14
 """
 
 from pathlib import Path
@@ -89,8 +106,9 @@ from .models import (
     VideoMatchResult,
     VideoPreset,
 )
+from .pool import BrowserWorkerPool
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 
 def get_client(
@@ -179,12 +197,11 @@ __all__ = [
     # Factory functions (recommended)
     "get_client",
     "get_sync_client",
-    # Clients (recommended first)
-    "SmartGrokClient",
-    "NodriverClient",
-    "AsyncClient",
-    "PlaywrightClient",
-    "GrokClient",
+    # Clients
+    "SmartGrokClient",  # Recommended: HTTP + browser fallback
+    "NodriverClient",  # Direct browser automation
+    # Worker Pool
+    "BrowserWorkerPool",
     # Models
     "PostSummary",
     "PostDetails",
@@ -204,3 +221,8 @@ __all__ = [
     "load_cookies",
     "save_cookies",
 ]
+
+# Internal clients (not recommended for direct use):
+# - AsyncClient: HTTP-only, no browser fallback. Used internally by SmartGrokClient.
+# - PlaywrightClient: Sync HTTP, no fallback. Used by get_sync_client().
+# - GrokClient: Sync curl_cffi, no fallback. Used by get_sync_client().
