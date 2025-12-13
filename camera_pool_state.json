@@ -1,0 +1,875 @@
+{
+  "version": 1,
+  "last_updated": "2025-12-14T01:46:54.309932",
+  "completed": {
+    "a9603645-dbd5-479a-b4d3-3671f7f22777": {
+      "job_id": "a9603645-dbd5-479a-b4d3-3671f7f22777",
+      "success": true,
+      "data": {
+        "video_id": "36fd488c-6154-4990-b79e-ecb135374896",
+        "moderated": false,
+        "parent_post_id": "9ac51419-65c8-467c-958e-97e9f1abadfa"
+      },
+      "error": null,
+      "completed_at": "2025-12-14T01:41:35.471345",
+      "worker_id": 0
+    },
+    "f9e885bf-d460-4791-83db-f0273244d6e2": {
+      "job_id": "f9e885bf-d460-4791-83db-f0273244d6e2",
+      "success": true,
+      "data": {
+        "video_id": "02ae4e6a-a336-4af5-924b-e9c6a948588f",
+        "moderated": true,
+        "parent_post_id": "9ac51419-65c8-467c-958e-97e9f1abadfa"
+      },
+      "error": null,
+      "completed_at": "2025-12-14T01:41:50.342444",
+      "worker_id": 1
+    },
+    "c53b064e-ac89-4590-9421-5d5f71c939c8": {
+      "job_id": "c53b064e-ac89-4590-9421-5d5f71c939c8",
+      "success": true,
+      "data": {
+        "video_id": "8da60d37-7fd0-40e9-a8da-ee8674948b23",
+        "moderated": true,
+        "parent_post_id": "9ac51419-65c8-467c-958e-97e9f1abadfa"
+      },
+      "error": null,
+      "completed_at": "2025-12-14T01:41:51.941655",
+      "worker_id": 2
+    },
+    "40b9dec3-6b27-4c02-b0d1-b3a0b0fd565e": {
+      "job_id": "40b9dec3-6b27-4c02-b0d1-b3a0b0fd565e",
+      "success": true,
+      "data": {
+        "video_id": "982accf8-3744-4808-b4f9-3caa35795312",
+        "moderated": true,
+        "parent_post_id": "9ac51419-65c8-467c-958e-97e9f1abadfa"
+      },
+      "error": null,
+      "completed_at": "2025-12-14T01:46:35.754840",
+      "worker_id": 1
+    },
+    "0180b425-6471-4d92-af13-9e47e7b3af36": {
+      "job_id": "0180b425-6471-4d92-af13-9e47e7b3af36",
+      "success": true,
+      "data": {
+        "video_id": "9fd44616-ce97-4338-86ea-e4ad6bfba3c7",
+        "moderated": false,
+        "parent_post_id": "9ac51419-65c8-467c-958e-97e9f1abadfa"
+      },
+      "error": null,
+      "completed_at": "2025-12-14T01:46:38.160155",
+      "worker_id": 0
+    },
+    "28b65e75-5352-4149-ab1c-213a76911f6d": {
+      "job_id": "28b65e75-5352-4149-ab1c-213a76911f6d",
+      "success": true,
+      "data": {
+        "video_id": "5d6c55fd-5371-489e-9658-281fb4c1b099",
+        "moderated": true,
+        "parent_post_id": "9ac51419-65c8-467c-958e-97e9f1abadfa"
+      },
+      "error": null,
+      "completed_at": "2025-12-14T01:46:54.309780",
+      "worker_id": 2
+    }
+  },
+  "pending": [
+    {
+      "job_id": "656578a0-1e96-4fb5-a646-11054e6a47f6",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "9ac51419-65c8-467c-958e-97e9f1abadfa",
+        "preset": "Pan Left"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:35:31.086083",
+      "status": "in_progress"
+    },
+    {
+      "job_id": "6b63d6b4-9a44-4c63-84a9-7ff4cdf7808d",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "9ac51419-65c8-467c-958e-97e9f1abadfa",
+        "preset": "Pan Left, locked distance"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:35:31.086156",
+      "status": "in_progress"
+    },
+    {
+      "job_id": "93f59b62-e545-4013-aa69-39f04b7eb841",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "9ac51419-65c8-467c-958e-97e9f1abadfa",
+        "preset": "Pan Left, maintain distance"
+      },
+      "retries": 1,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:35:31.086205",
+      "status": "pending"
+    },
+    {
+      "job_id": "6a50f8a3-e3e5-4530-a279-46c407ea8a26",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "9ac51419-65c8-467c-958e-97e9f1abadfa",
+        "preset": "Pan Right"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:35:31.086245",
+      "status": "pending"
+    },
+    {
+      "job_id": "7d581907-b2d1-4607-9443-bc9c2841edd6",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "9ac51419-65c8-467c-958e-97e9f1abadfa",
+        "preset": "Pan Right, fixed distance from subject"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:35:31.086281",
+      "status": "pending"
+    },
+    {
+      "job_id": "ea772b08-80b6-4074-83f9-67127488ae04",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "9ac51419-65c8-467c-958e-97e9f1abadfa",
+        "preset": "Dolly In"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:35:31.086312",
+      "status": "pending"
+    },
+    {
+      "job_id": "d20c5e14-8f7a-4b7b-b05b-a48fcf7b6728",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "9ac51419-65c8-467c-958e-97e9f1abadfa",
+        "preset": "Dolly Out"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:35:31.086355",
+      "status": "pending"
+    },
+    {
+      "job_id": "27c04fff-d298-4ceb-aacf-041f9bdb8b8a",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "9ac51419-65c8-467c-958e-97e9f1abadfa",
+        "preset": "Zoom In"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:35:31.086408",
+      "status": "pending"
+    },
+    {
+      "job_id": "401723a7-a3fb-4321-b314-7464d103f2bc",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "9ac51419-65c8-467c-958e-97e9f1abadfa",
+        "preset": "Zoom Out"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:35:31.086473",
+      "status": "pending"
+    },
+    {
+      "job_id": "2d164141-0d07-4e54-b9d7-b7ac8b1bfa9c",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "9ac51419-65c8-467c-958e-97e9f1abadfa",
+        "preset": "Crane Shot"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:35:31.086507",
+      "status": "pending"
+    },
+    {
+      "job_id": "0c482b48-bfbe-42d6-b97c-738fa2c5e9d2",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "9ac51419-65c8-467c-958e-97e9f1abadfa",
+        "preset": "Handheld"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:35:31.086541",
+      "status": "pending"
+    },
+    {
+      "job_id": "ce4aca4e-7635-43e2-b8b8-56a49c5fbef0",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "e396bb74-3204-4eb5-bcec-035d24af9eaa",
+        "preset": "Static Shot"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:35:31.086595",
+      "status": "pending"
+    },
+    {
+      "job_id": "c7e15d81-8875-4872-86f7-97cec21e5ed7",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "e396bb74-3204-4eb5-bcec-035d24af9eaa",
+        "preset": "Locked Shot"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:35:31.086726",
+      "status": "pending"
+    },
+    {
+      "job_id": "50696130-9dab-4f58-9b72-98b07d9019da",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "e396bb74-3204-4eb5-bcec-035d24af9eaa",
+        "preset": "Locked Off Shot"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:35:31.086769",
+      "status": "pending"
+    },
+    {
+      "job_id": "1f4dee80-f9f9-4cd6-85c7-112adbbcfe86",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "e396bb74-3204-4eb5-bcec-035d24af9eaa",
+        "preset": "Fixed Frame"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:35:31.086805",
+      "status": "pending"
+    },
+    {
+      "job_id": "771b60c2-0e46-4ab9-8e0c-20c1d2c65004",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "e396bb74-3204-4eb5-bcec-035d24af9eaa",
+        "preset": "Immobile Shot"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:35:31.086836",
+      "status": "pending"
+    },
+    {
+      "job_id": "009f2245-d12e-4918-908f-ef56134bcf18",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "e396bb74-3204-4eb5-bcec-035d24af9eaa",
+        "preset": "Tripod Shot"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:35:31.086877",
+      "status": "pending"
+    },
+    {
+      "job_id": "bd96786b-b342-40a7-a888-204cbf2c45ce",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "e396bb74-3204-4eb5-bcec-035d24af9eaa",
+        "preset": "no camera movement"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:35:31.086911",
+      "status": "pending"
+    },
+    {
+      "job_id": "d7504213-7705-4c8b-adcc-6b6faa8d70e7",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "e396bb74-3204-4eb5-bcec-035d24af9eaa",
+        "preset": "tripod, no camera shake"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:35:31.086935",
+      "status": "pending"
+    },
+    {
+      "job_id": "5a3ce632-12b4-4f8b-a7d4-ab9e87b03568",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "e396bb74-3204-4eb5-bcec-035d24af9eaa",
+        "preset": "stable horizon"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:35:31.086956",
+      "status": "pending"
+    },
+    {
+      "job_id": "39a95f2c-1166-483f-8b74-8e15e1d7d113",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "9ac51419-65c8-467c-958e-97e9f1abadfa",
+        "adjustment_prompt": "Orbit"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:41:21.548759",
+      "status": "pending"
+    },
+    {
+      "job_id": "68231082-221d-425f-8aea-527b56e0a268",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "9ac51419-65c8-467c-958e-97e9f1abadfa",
+        "adjustment_prompt": "Orbit 360\u00b0"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:41:21.548808",
+      "status": "pending"
+    },
+    {
+      "job_id": "eeaba56b-236f-490b-96d2-a8354090936b",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "9ac51419-65c8-467c-958e-97e9f1abadfa",
+        "adjustment_prompt": "360\u00b0 clockwise orbit"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:41:21.548832",
+      "status": "pending"
+    },
+    {
+      "job_id": "9db94adf-871c-4a05-88ba-64c7ace3298b",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "9ac51419-65c8-467c-958e-97e9f1abadfa",
+        "adjustment_prompt": "360\u00b0 counterclockwise orbit"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:41:21.548849",
+      "status": "pending"
+    },
+    {
+      "job_id": "8fcd443a-e7da-4147-9883-7796e1d0bd49",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "9ac51419-65c8-467c-958e-97e9f1abadfa",
+        "adjustment_prompt": "slow orbit"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:41:21.548872",
+      "status": "pending"
+    },
+    {
+      "job_id": "cd336468-2b7c-4dca-9f01-436f7107af2b",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "9ac51419-65c8-467c-958e-97e9f1abadfa",
+        "adjustment_prompt": "orbit around subject"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:41:21.548890",
+      "status": "pending"
+    },
+    {
+      "job_id": "cf46299b-f75c-4963-90df-fdc853d9d5e4",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "9ac51419-65c8-467c-958e-97e9f1abadfa",
+        "adjustment_prompt": "Pan Left"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:41:21.548903",
+      "status": "pending"
+    },
+    {
+      "job_id": "0347f326-1bcd-4740-9dda-ac4744ccef7a",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "9ac51419-65c8-467c-958e-97e9f1abadfa",
+        "adjustment_prompt": "Pan Left, locked distance"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:41:21.548919",
+      "status": "pending"
+    },
+    {
+      "job_id": "fadb199f-e2ea-4d99-bb2e-aafba631fc9b",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "9ac51419-65c8-467c-958e-97e9f1abadfa",
+        "adjustment_prompt": "Pan Left, maintain distance"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:41:21.548931",
+      "status": "pending"
+    },
+    {
+      "job_id": "e69f38b3-53e1-4dfd-98db-19498c818c3b",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "9ac51419-65c8-467c-958e-97e9f1abadfa",
+        "adjustment_prompt": "Pan Right"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:41:21.548943",
+      "status": "pending"
+    },
+    {
+      "job_id": "c9a59229-0191-49c0-adbb-f13de60c6088",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "9ac51419-65c8-467c-958e-97e9f1abadfa",
+        "adjustment_prompt": "Pan Right, fixed distance from subject"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:41:21.548960",
+      "status": "pending"
+    },
+    {
+      "job_id": "4549e2ed-c1a9-4509-9297-f59e2e17642d",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "9ac51419-65c8-467c-958e-97e9f1abadfa",
+        "adjustment_prompt": "Dolly In"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:41:21.548976",
+      "status": "pending"
+    },
+    {
+      "job_id": "f837c2a5-ed7c-4209-a23d-8beb7de3bf1d",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "9ac51419-65c8-467c-958e-97e9f1abadfa",
+        "adjustment_prompt": "Dolly Out"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:41:21.548988",
+      "status": "pending"
+    },
+    {
+      "job_id": "2ba38aa5-eac2-4e1c-8fd2-8fedb650a1bf",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "9ac51419-65c8-467c-958e-97e9f1abadfa",
+        "adjustment_prompt": "Zoom In"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:41:21.549000",
+      "status": "pending"
+    },
+    {
+      "job_id": "7a4adc7c-ebf7-4f19-a233-fb59dba8684a",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "9ac51419-65c8-467c-958e-97e9f1abadfa",
+        "adjustment_prompt": "Zoom Out"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:41:21.549012",
+      "status": "pending"
+    },
+    {
+      "job_id": "afe10cc9-763b-498d-a447-0113d9fc9241",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "9ac51419-65c8-467c-958e-97e9f1abadfa",
+        "adjustment_prompt": "Crane Shot"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:41:21.549023",
+      "status": "pending"
+    },
+    {
+      "job_id": "0c711594-2d00-47e1-83f7-cdf358257747",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "9ac51419-65c8-467c-958e-97e9f1abadfa",
+        "adjustment_prompt": "Handheld"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:41:21.549035",
+      "status": "pending"
+    },
+    {
+      "job_id": "c6ef56a7-3efd-4d5a-ba97-4cdcb51d3566",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "e396bb74-3204-4eb5-bcec-035d24af9eaa",
+        "adjustment_prompt": "Static Shot"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:41:21.549054",
+      "status": "pending"
+    },
+    {
+      "job_id": "f29c0fdb-ea53-4743-a56f-cfc2a805be38",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "e396bb74-3204-4eb5-bcec-035d24af9eaa",
+        "adjustment_prompt": "Locked Shot"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:41:21.549072",
+      "status": "pending"
+    },
+    {
+      "job_id": "542bcd7f-6ef2-4415-a56c-216ecdce1546",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "e396bb74-3204-4eb5-bcec-035d24af9eaa",
+        "adjustment_prompt": "Locked Off Shot"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:41:21.549086",
+      "status": "pending"
+    },
+    {
+      "job_id": "174cd835-a0cb-491e-b17a-dddc266abeff",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "e396bb74-3204-4eb5-bcec-035d24af9eaa",
+        "adjustment_prompt": "Fixed Frame"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:41:21.549100",
+      "status": "pending"
+    },
+    {
+      "job_id": "88515c13-0ff2-4f7d-9813-750cd4f09019",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "e396bb74-3204-4eb5-bcec-035d24af9eaa",
+        "adjustment_prompt": "Immobile Shot"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:41:21.549112",
+      "status": "pending"
+    },
+    {
+      "job_id": "f3f6df6a-34f3-494c-a2dc-7a12e535305e",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "e396bb74-3204-4eb5-bcec-035d24af9eaa",
+        "adjustment_prompt": "Tripod Shot"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:41:21.549232",
+      "status": "pending"
+    },
+    {
+      "job_id": "598ad443-4eb3-4841-8911-7ae1d5295a15",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "e396bb74-3204-4eb5-bcec-035d24af9eaa",
+        "adjustment_prompt": "no camera movement"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:41:21.549269",
+      "status": "pending"
+    },
+    {
+      "job_id": "24b16e34-3f28-49c1-974f-98d2dbcda684",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "e396bb74-3204-4eb5-bcec-035d24af9eaa",
+        "adjustment_prompt": "tripod, no camera shake"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:41:21.549296",
+      "status": "pending"
+    },
+    {
+      "job_id": "9fb557de-516b-417f-ba07-c94cec5dc099",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "e396bb74-3204-4eb5-bcec-035d24af9eaa",
+        "adjustment_prompt": "stable horizon"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:41:21.549324",
+      "status": "pending"
+    },
+    {
+      "job_id": "84ae9812-9ca5-47a3-b3a6-44465218653e",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "9ac51419-65c8-467c-958e-97e9f1abadfa",
+        "adjustment_prompt": "Zoom In"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:46:24.767749",
+      "status": "pending"
+    },
+    {
+      "job_id": "fcfac182-7a6e-4630-bcd8-6d2c9740a81f",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "9ac51419-65c8-467c-958e-97e9f1abadfa",
+        "adjustment_prompt": "Zoom Out"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:46:24.767803",
+      "status": "pending"
+    },
+    {
+      "job_id": "03ff74dd-6127-4cd9-adcf-c912dae80c18",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "9ac51419-65c8-467c-958e-97e9f1abadfa",
+        "adjustment_prompt": "Pull Back"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:46:24.767825",
+      "status": "pending"
+    },
+    {
+      "job_id": "e98e8f64-94af-41f2-a63e-8ce8a9054fa0",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "9ac51419-65c8-467c-958e-97e9f1abadfa",
+        "adjustment_prompt": "Arc Shot"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:46:24.767841",
+      "status": "pending"
+    },
+    {
+      "job_id": "bd2a8be5-5ba1-4c4a-a1fe-3ce2abe27bb9",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "9ac51419-65c8-467c-958e-97e9f1abadfa",
+        "adjustment_prompt": "Tracking Shot"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:46:24.767853",
+      "status": "pending"
+    },
+    {
+      "job_id": "6b56853b-93ff-43fb-a367-0cf8a47bd6bc",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "9ac51419-65c8-467c-958e-97e9f1abadfa",
+        "adjustment_prompt": "Follow"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:46:24.767870",
+      "status": "pending"
+    },
+    {
+      "job_id": "445067e2-456c-463c-a628-e4372fd9afa0",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "9ac51419-65c8-467c-958e-97e9f1abadfa",
+        "adjustment_prompt": "Pedestal Up"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:46:24.767884",
+      "status": "pending"
+    },
+    {
+      "job_id": "3151aff8-f827-471c-81bd-7865ad09d1ec",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "9ac51419-65c8-467c-958e-97e9f1abadfa",
+        "adjustment_prompt": "Pedestal Down"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:46:24.767899",
+      "status": "pending"
+    },
+    {
+      "job_id": "b5b381b1-906b-40ab-8ade-09da66b8fe22",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "e396bb74-3204-4eb5-bcec-035d24af9eaa",
+        "adjustment_prompt": "Static Shot"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:46:24.767917",
+      "status": "pending"
+    },
+    {
+      "job_id": "1389d7f2-be25-4348-8a38-1ab4c5295f50",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "e396bb74-3204-4eb5-bcec-035d24af9eaa",
+        "adjustment_prompt": "Locked Shot"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:46:24.767931",
+      "status": "pending"
+    },
+    {
+      "job_id": "8d643c30-5512-42f0-8bd9-8a301a3f8b12",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "e396bb74-3204-4eb5-bcec-035d24af9eaa",
+        "adjustment_prompt": "Tripod Shot"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:46:24.767943",
+      "status": "pending"
+    },
+    {
+      "job_id": "e6fc6b7b-ff7d-4f24-9f8d-1bb5b6b2c002",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "e396bb74-3204-4eb5-bcec-035d24af9eaa",
+        "adjustment_prompt": "no camera movement"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:46:24.767955",
+      "status": "pending"
+    },
+    {
+      "job_id": "bf472581-27fc-4b3b-a870-d9c533ce8348",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "e396bb74-3204-4eb5-bcec-035d24af9eaa",
+        "adjustment_prompt": "stable frame"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:46:24.767967",
+      "status": "pending"
+    }
+  ],
+  "in_progress": [
+    {
+      "job_id": "6b63d6b4-9a44-4c63-84a9-7ff4cdf7808d",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "9ac51419-65c8-467c-958e-97e9f1abadfa",
+        "preset": "Pan Left, locked distance"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:35:31.086156",
+      "status": "in_progress"
+    },
+    {
+      "job_id": "656578a0-1e96-4fb5-a646-11054e6a47f6",
+      "task_type": "create_video_via_ui",
+      "args": [],
+      "kwargs": {
+        "parent_post_id": "9ac51419-65c8-467c-958e-97e9f1abadfa",
+        "preset": "Pan Left"
+      },
+      "retries": 0,
+      "max_retries": 5,
+      "created_at": "2025-12-14T01:35:31.086083",
+      "status": "in_progress"
+    }
+  ]
+}

@@ -1121,14 +1121,17 @@ class NodriverClient(AsyncClientBase):
             adjustment_prompt: Video generation prompt (same as typing in Grok UI after image).
                       Can include any instructions: camera movement, character actions, or both.
                       Examples: "Static Shot", "she turns her head", "camera zooms in while he walks".
-                      Overrides preset and uses 'custom' mode.
+                      When provided, overrides preset and sets result.mode='custom'.
 
         Returns:
-            VideoGenerationResult with video_id (may be empty if moderated)
+            VideoGenerationResult with video_id (may be empty if moderated).
+            When adjustment_prompt is used, result.mode will be 'custom'.
 
         Example:
             >>> result = await client.create_video_via_ui("abc-123", preset="fun")
+            >>> result.mode  # 'fun'
             >>> result = await client.create_video_via_ui("abc-123", adjustment_prompt="Static Shot")
+            >>> result.mode  # 'custom'
             >>> result = await client.create_video_via_ui("abc-123", adjustment_prompt="she smiles")
         """
         import asyncio
