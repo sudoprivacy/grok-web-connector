@@ -1545,12 +1545,19 @@ class SmartGrokClient:
             If HTTP API returns 403, automatically falls back to browser UI.
             Browser fallback requires browser_host and browser_port to be set.
         """
+        # If adjustment_prompt is provided, must use browser UI (HTTP API doesn't support it)
+        if adjustment_prompt:
+            browser = await self._get_browser_client()
+            return await browser.create_video_via_ui(
+                parent_post_id, preset=preset, adjustment_prompt=adjustment_prompt
+            )
+
         # Get image URL if not provided
         if image_url is None:
             post = await self.get_post_details(parent_post_id)
             image_url = post.media_url
 
-        # Try HTTP API first
+        # Try HTTP API first (only when no adjustment_prompt)
         try:
             return await self._http_client.create_video_from_image(
                 image_url=image_url,
@@ -1558,7 +1565,6 @@ class SmartGrokClient:
                 preset=preset,
                 aspect_ratio=aspect_ratio,
                 video_length=video_length,
-                adjustment_prompt=adjustment_prompt,
             )
         except GrokAuthError:
             # API blocked (403) - fallback to browser UI
@@ -1568,6 +1574,4 @@ class SmartGrokClient:
                     "or use NodriverClient directly."
                 ) from None
             browser = await self._get_browser_client()
-            return await browser.create_video_via_ui(
-                parent_post_id, preset=preset, adjustment_prompt=adjustment_prompt
-            )
+            return await browser.create_video_via_ui(parent_post_id, preset=preset)
