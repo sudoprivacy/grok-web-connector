@@ -86,8 +86,7 @@ line-ending = "auto"
 [tool.coverage.run]
 source = ["grok_web"]
 omit = [
-    "grok_web/nodriver_cf_verify.py",  # Vendored third-party library
-    "grok_web/refresh_cf_clearance.py",  # Script file, not library code
+    "grok_web/nodriver_cf_verify.py",  # Vendored third-party library (AGPL)
 ]
 
 [tool.coverage.report]
