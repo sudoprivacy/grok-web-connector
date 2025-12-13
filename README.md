@@ -145,18 +145,32 @@ print(result.video_id)
 | `fun` | More dynamic, playful |
 | `spicy` | Most dramatic effects |
 
-## Camera Control Prompts
+## Adjustment Prompt (Video Generation Prompt)
 
-Control camera movement in videos using the `adjustment_prompt` parameter:
+The `adjustment_prompt` parameter is the prompt used to generate child videos from a parent image. This is the same prompt you would type in the Grok Imagine web UI after an image is generated.
+
+**Generation flow:**
+1. Initial image prompt → generates parent image
+2. `adjustment_prompt` → generates child video from that image
+
+You can use it for **any video generation instruction**, not just camera control:
 
 ```python
-await client.create_video(post_id, adjustment_prompt="Static Shot")  # No movement
-await client.create_video(post_id, adjustment_prompt="Pan Left")     # Horizontal rotation
-await client.create_video(post_id, adjustment_prompt="Dolly Out")    # Camera moves back
-await client.create_video(post_id, adjustment_prompt="Orbit")        # Circle around subject
+# Camera control
+await client.create_video(post_id, adjustment_prompt="Static Shot")
+await client.create_video(post_id, adjustment_prompt="Pan Left")
+await client.create_video(post_id, adjustment_prompt="Dolly Out")
+
+# Character actions
+await client.create_video(post_id, adjustment_prompt="she slowly turns her head")
+await client.create_video(post_id, adjustment_prompt="he reaches for the object")
+await client.create_video(post_id, adjustment_prompt="the character walks forward")
+
+# Combined instructions
+await client.create_video(post_id, adjustment_prompt="camera zooms in while she smiles")
 ```
 
-See **[grok-imagine-expert/docs/CAMERA_CONTROL.md](https://github.com/user/grok-imagine-expert/blob/main/docs/CAMERA_CONTROL.md)** for full documentation with tested demo URLs.
+See **[grok-imagine-expert/docs/CAMERA_CONTROL.md](https://github.com/user/grok-imagine-expert/blob/main/docs/CAMERA_CONTROL.md)** for camera-specific examples with tested demo URLs.
 
 ## Client Options
 

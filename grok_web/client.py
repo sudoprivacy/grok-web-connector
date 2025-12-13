@@ -1063,9 +1063,9 @@ class NodriverClient(AsyncClientBase):
             video_length: Video duration in seconds (default 6)
             statsig_id: Optional style seed for reproducible styles
             preset: Video preset - 'normal', 'fun', or 'spicy'
-            adjustment_prompt: Optional prompt to control video generation.
-                Supports camera instructions: "Static Shot", "Pan Left", "Dolly Out", "Orbit", etc.
-                See grok-imagine-expert/docs/CAMERA_CONTROL.md for full list with demo URLs.
+            adjustment_prompt: Video generation prompt (same as typing in Grok UI after image).
+                Can include any instructions: camera movement, character actions, or both.
+                Examples: "Static Shot", "she turns her head", "camera zooms in while he walks".
                 If provided, overrides preset and uses 'custom' mode.
         """
         # Try to get statsig_id from page context first, then generate if not found
@@ -1116,9 +1116,9 @@ class NodriverClient(AsyncClientBase):
             timeout: Max seconds to wait for video generation
             stable_id: Optional custom stable_id to inject before generation.
                       Use generate_stable_id() to create one. Controls A/B style bucket.
-            adjustment_prompt: Optional prompt to control video generation.
-                      Supports camera instructions: "Static Shot", "Pan Left", "Dolly Out", "Orbit", etc.
-                      See grok-imagine-expert/docs/CAMERA_CONTROL.md for full list with demo URLs.
+            adjustment_prompt: Video generation prompt (same as typing in Grok UI after image).
+                      Can include any instructions: camera movement, character actions, or both.
+                      Examples: "Static Shot", "she turns her head", "camera zooms in while he walks".
                       Overrides preset and uses 'custom' mode.
 
         Returns:
@@ -1126,7 +1126,7 @@ class NodriverClient(AsyncClientBase):
 
         Example:
             >>> result = await client.create_video_via_ui("abc-123", preset="fun")
-            >>> result = await client.create_video_via_ui("abc-123", adjustment_prompt="Static Shot")
+            >>> result = await client.create_video_via_ui("abc-123", adjustment_prompt="she smiles")
         """
         import asyncio
 
@@ -1532,9 +1532,9 @@ class SmartGrokClient:
             preset: Video style - 'normal', 'fun', or 'spicy'
             aspect_ratio: Video aspect ratio (default "2:3")
             video_length: Video length in seconds (default 6)
-            adjustment_prompt: Optional prompt to control video generation.
-                      Supports camera instructions: "Static Shot", "Pan Left", "Dolly Out", "Orbit", etc.
-                      See grok-imagine-expert/docs/CAMERA_CONTROL.md for full list with demo URLs.
+            adjustment_prompt: Video generation prompt (same as typing in Grok UI after image).
+                      Can include any instructions: camera movement, character actions, or both.
+                      Examples: "Static Shot", "she turns her head", "camera zooms in while he walks".
                       Overrides preset and uses 'custom' mode.
 
         Returns:
