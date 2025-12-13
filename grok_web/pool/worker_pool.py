@@ -51,6 +51,7 @@ class BrowserWorkerPool:
         config_path: Path | str | None = None,
         cookies: GrokCookies | None = None,
         headless: bool = False,
+        close_chrome: bool = True,
     ):
         """
         Initialize BrowserWorkerPool.
@@ -63,6 +64,7 @@ class BrowserWorkerPool:
             config_path: Path to grok config file (default: ~/.grok-config.json)
             cookies: Pre-loaded GrokCookies. If None, loads from config.
             headless: Run Chrome in headless mode.
+            close_chrome: Terminate Chrome processes on pool exit. Default True.
         """
         self._num_workers = num_workers
         self._base_port = base_port
@@ -71,6 +73,7 @@ class BrowserWorkerPool:
         self._config_path = config_path
         self._cookies = cookies
         self._headless = headless
+        self._close_chrome = close_chrome
 
         # Worker management
         self._workers: dict[int, Worker] = {}
@@ -125,10 +128,17 @@ class BrowserWorkerPool:
         if self._worker_tasks:
             await asyncio.gather(*self._worker_tasks.values(), return_exceptions=True)
 
-        # Close all browser clients
+        # Close all browser clients and optionally terminate Chrome
         for worker in self._workers.values():
             if worker.client:
                 try:
+                    # Terminate Chrome process if close_chrome is True
+                    if self._close_chrome and hasattr(worker.client, "_chrome_process"):
+                        chrome_process = worker.client._chrome_process
+                        if chrome_process is not None:
+                            chrome_process.terminate()
+                            logger.info(f"Terminated Chrome for worker {worker.worker_id}")
+
                     await worker.client.__aexit__(None, None, None)
                 except Exception as e:
                     logger.warning(f"Error closing worker {worker.worker_id}: {e}")
@@ -207,9 +217,16 @@ class BrowserWorkerPool:
                 await self._worker_tasks[worker_id]
             del self._worker_tasks[worker_id]
 
-        # Close browser client
+        # Close browser client and optionally terminate Chrome
         if worker.client:
             try:
+                # Terminate Chrome process if close_chrome is True
+                if self._close_chrome and hasattr(worker.client, "_chrome_process"):
+                    chrome_process = worker.client._chrome_process
+                    if chrome_process is not None:
+                        chrome_process.terminate()
+                        logger.info(f"Terminated Chrome for worker {worker_id}")
+
                 await worker.client.__aexit__(None, None, None)
             except Exception as e:
                 logger.warning(f"Error closing worker {worker_id}: {e}")

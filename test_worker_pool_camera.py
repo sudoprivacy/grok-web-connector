@@ -8,37 +8,25 @@ from datetime import datetime
 ORBIT_POST = "9ac51419-65c8-467c-958e-97e9f1abadfa"
 STATIC_POST = "e396bb74-3204-4eb5-bcec-035d24af9eaa"
 
-# Camera commands to test
+# Camera commands to test (new batch - 2025-12-14)
 ORBIT_COMMANDS = [
-    "Orbit",
-    "Orbit 360°",
-    "360° clockwise orbit",
-    "360° counterclockwise orbit",
-    "slow orbit",
-    "orbit around subject",
-    "Pan Left",
-    "Pan Left, locked distance",
-    "Pan Left, maintain distance",
-    "Pan Right",
-    "Pan Right, fixed distance from subject",
-    "Dolly In",
-    "Dolly Out",
-    "Zoom In",
-    "Zoom Out",
-    "Crane Shot",
-    "Handheld",
+    "Tilt Up",
+    "Tilt Down",
+    "Push In",
+    "Follow Shot",
+    "Tracking Shot",
+    "Steady Shot",
+    "Arc Shot",
+    "Pull Back",
+    "Push Forward",
+    "Rotate Left",
+    "Rotate Right",
+    "Dutch Angle",
+    "Whip Pan",
 ]
 
 STATIC_COMMANDS = [
-    "Static Shot",
-    "Locked Shot",
-    "Locked Off Shot",
-    "Fixed Frame",
-    "Immobile Shot",
-    "Tripod Shot",
-    "no camera movement",
-    "tripod, no camera shake",
-    "stable horizon",
+    # All static commands already tested
 ]
 
 
