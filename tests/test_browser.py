@@ -182,13 +182,36 @@ class TestEnsureChromeRunning:
     """Tests for ensure_chrome_running async function."""
 
     @pytest.mark.asyncio
-    async def test_returns_none_when_chrome_already_running(self):
-        """Returns None when Chrome is already running on port."""
+    async def test_returns_none_when_user_chrome_already_running(self):
+        """Returns None when user's Chrome (real profile) is already running on port."""
         from grok_web.browser import ensure_chrome_running
 
         with patch("grok_web.browser.is_port_in_use", return_value=True):
-            result = await ensure_chrome_running()
-            assert result is None
+            # Not a temp Chrome (user's real Chrome)
+            with patch("grok_web.browser.is_temp_chrome_on_port", return_value=(False, 12345)):
+                result = await ensure_chrome_running()
+                assert result is None
+
+    @pytest.mark.asyncio
+    async def test_kills_stale_temp_chrome_and_launches_new(self):
+        """Kills stale temp Chrome and launches fresh one."""
+        from grok_web.browser import ensure_chrome_running
+
+        mock_process = MagicMock()
+        # First call: port in use; after kill: not in use; then: in use (new Chrome)
+        port_checks = [True, False, True]
+
+        with patch("grok_web.browser.is_port_in_use", side_effect=port_checks):
+            # It's a stale temp Chrome
+            with patch("grok_web.browser.is_temp_chrome_on_port", return_value=(True, 99999)):
+                with patch("grok_web.browser.kill_stale_temp_chrome", return_value=True):
+                    with patch(
+                        "grok_web.browser.launch_chrome_with_debug_port",
+                        return_value=mock_process,
+                    ):
+                        with patch("grok_web.browser.asyncio.sleep"):
+                            result = await ensure_chrome_running()
+                            assert result == mock_process
 
     @pytest.mark.asyncio
     async def test_launches_chrome_when_not_running(self):
