@@ -453,10 +453,11 @@ class TestBrowserWorkerPoolInit:
 
         pool = BrowserWorkerPool()
         assert pool._num_workers == 3
-        assert pool._base_port == 9223
         assert pool._state_file is None
         assert pool._max_retries == -1
         assert pool._running is False
+        assert pool._used_ports == set()
+        assert pool._available_nodriver_ports == []
 
     def test_pool_init_custom(self):
         """Pool accepts custom parameters."""
@@ -464,13 +465,11 @@ class TestBrowserWorkerPoolInit:
 
         pool = BrowserWorkerPool(
             num_workers=5,
-            base_port=9300,
             state_file="custom.json",
             max_retries=10,
             headless=True,
         )
         assert pool._num_workers == 5
-        assert pool._base_port == 9300
         assert pool._state_file == Path("custom.json")
         assert pool._max_retries == 10
         assert pool._headless is True

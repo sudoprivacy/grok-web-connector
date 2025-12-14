@@ -7,6 +7,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal
 
+from ..browser import find_nodriver_chromes, get_available_port
 from ..client import NodriverClient
 from ..models import GrokCookies
 from .job import Job, JobResult, JobStatus
@@ -14,10 +15,6 @@ from .persistence import PoolState, load_state, save_state
 from .worker import Worker, WorkerStats, WorkerStatus
 
 logger = logging.getLogger(__name__)
-
-# Default base port - workers get BASE_PORT + worker_id
-# We use 9223 as base to avoid 9222 (user's Chrome)
-DEFAULT_BASE_PORT = 9223
 
 
 class BrowserWorkerPool:
@@ -46,7 +43,6 @@ class BrowserWorkerPool:
     def __init__(
         self,
         num_workers: int = 3,
-        base_port: int = DEFAULT_BASE_PORT,
         state_file: Path | str | None = None,
         max_retries: int = -1,
         config_path: Path | str | None = None,
@@ -61,7 +57,6 @@ class BrowserWorkerPool:
 
         Args:
             num_workers: Initial number of workers to start
-            base_port: Base port for Chrome instances. Worker N uses base_port + N.
             state_file: Path to state file for persistence. None = no persistence.
             max_retries: Max retries per job. -1 = unlimited retries.
             config_path: Path to grok config file (default: ~/.grok-config.json)
@@ -73,9 +68,13 @@ class BrowserWorkerPool:
                 Example: `lambda r: r.get("moderated", False)` to fail moderated videos.
             requeue_position: Where to put failed jobs for retry: "front" (high priority)
                 or "back" (normal priority). Default "back".
+
+        Port Allocation:
+            Ports are allocated automatically. The pool first reuses existing nodriver
+            Chrome instances (identified by grok_chrome_ temp profile), then launches
+            new Chrome on available ports as needed.
         """
         self._num_workers = num_workers
-        self._base_port = base_port
         self._state_file = Path(state_file) if state_file else None
         self._max_retries = max_retries
         self._config_path = config_path
@@ -89,6 +88,8 @@ class BrowserWorkerPool:
         self._workers: dict[int, Worker] = {}
         self._worker_tasks: dict[int, asyncio.Task] = {}
         self._next_worker_id = 0
+        self._used_ports: set[int] = set()  # Ports currently in use by workers
+        self._available_nodriver_ports: list[int] = []  # Existing nodriver Chrome to reuse
 
         # Job management - two queues for priority support
         self._job_queue: asyncio.Queue[Job] = asyncio.Queue()  # Normal priority
@@ -120,6 +121,13 @@ class BrowserWorkerPool:
                 )
 
         self._running = True
+
+        # Find existing nodriver Chrome instances to reuse
+        self._available_nodriver_ports = find_nodriver_chromes()
+        if self._available_nodriver_ports:
+            logger.info(
+                f"Found {len(self._available_nodriver_ports)} existing nodriver Chrome: {self._available_nodriver_ports}"
+            )
 
         # Start initial workers
         for _ in range(self._num_workers):
@@ -164,13 +172,33 @@ class BrowserWorkerPool:
     async def add_worker(self) -> int:
         """Add a new worker to the pool.
 
+        Port allocation strategy:
+        1. First, try to reuse existing nodriver Chrome instances
+        2. If none available, find an available port and launch new Chrome
+
         Returns:
             worker_id of the new worker
         """
         worker_id = self._next_worker_id
         self._next_worker_id += 1
 
-        port = self._base_port + worker_id
+        # Smart port allocation
+        port = None
+        reusing = False
+
+        # Try to reuse an existing nodriver Chrome
+        while self._available_nodriver_ports:
+            candidate = self._available_nodriver_ports.pop(0)
+            if candidate not in self._used_ports:
+                port = candidate
+                reusing = True
+                break
+
+        # If no reusable Chrome, find an available port
+        if port is None:
+            port = get_available_port(exclude=self._used_ports)
+
+        self._used_ports.add(port)
 
         # Create worker
         worker = Worker(worker_id=worker_id, port=port)
@@ -188,10 +216,12 @@ class BrowserWorkerPool:
         try:
             await client.__aenter__()
             worker.client = client
-            logger.info(f"Worker {worker_id} started on port {port}")
+            action = "reusing" if reusing else "launched new"
+            logger.info(f"Worker {worker_id} started ({action} Chrome on port {port})")
         except Exception as e:
             logger.error(f"Failed to start worker {worker_id}: {e}")
             worker.status = WorkerStatus.ERROR
+            self._used_ports.discard(port)
             del self._workers[worker_id]
             raise
 
@@ -242,9 +272,12 @@ class BrowserWorkerPool:
             except Exception as e:
                 logger.warning(f"Error closing worker {worker_id}: {e}")
 
+        # Release the port
+        self._used_ports.discard(worker.port)
+
         worker.mark_stopped()
         del self._workers[worker_id]
-        logger.info(f"Worker {worker_id} removed")
+        logger.info(f"Worker {worker_id} removed (port {worker.port} released)")
 
     # =========================================================================
     # Job Management

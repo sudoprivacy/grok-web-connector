@@ -197,6 +197,50 @@ def is_temp_chrome_on_port(port: int) -> tuple[bool, int | None]:
     return False, pid
 
 
+def find_nodriver_chromes(port_range: tuple[int, int] = (9222, 9300)) -> list[int]:
+    """Find all ports with nodriver Chrome instances (temp profiles).
+
+    Scans the given port range for Chrome instances launched by this library.
+
+    Args:
+        port_range: Tuple of (start_port, end_port) to scan
+
+    Returns:
+        List of ports with nodriver Chrome instances.
+    """
+    nodriver_ports = []
+    for port in range(port_range[0], port_range[1]):
+        is_temp, _ = is_temp_chrome_on_port(port)
+        if is_temp:
+            nodriver_ports.append(port)
+    return nodriver_ports
+
+
+def get_available_port(start: int = 9222, end: int = 9300, exclude: set[int] | None = None) -> int:
+    """Find an available port for Chrome.
+
+    Args:
+        start: Start of port range to search
+        end: End of port range to search
+        exclude: Set of ports to skip (e.g., already assigned to workers)
+
+    Returns:
+        An available port number
+
+    Raises:
+        RuntimeError: If no available port found in range
+    """
+    exclude = exclude or set()
+
+    for port in range(start, end):
+        if port in exclude:
+            continue
+        if not is_port_in_use(DEFAULT_DEBUG_HOST, port):
+            return port
+
+    raise RuntimeError(f"No available port found in range {start}-{end}")
+
+
 def kill_stale_temp_chrome(port: int) -> bool:
     """Kill a stale temp Chrome process on the given port.
 
