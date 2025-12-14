@@ -554,38 +554,52 @@ class BrowserWorkerPool:
 
         task_type = job.task_type
         args = job.args
-        kwargs = job.kwargs
+        kwargs = dict(job.kwargs)  # Copy to avoid modifying original
 
-        # Dispatch based on task type
-        if task_type == "create_video":
-            result = await client.create_video(*args, **kwargs)
-            return {
-                "video_id": result.video_id,
-                "moderated": result.moderated,
-                "parent_post_id": result.parent_post_id,
-            }
+        # Extract ui_delay if present (for UI operations)
+        ui_delay = kwargs.pop("ui_delay", None)
+        if ui_delay is not None:
+            original_ui_delay = client._ui_delay
+            client._ui_delay = ui_delay
 
-        elif task_type == "create_video_via_ui":
-            result = await client.create_video_via_ui(*args, **kwargs)
-            return {
-                "video_id": result.video_id,
-                "moderated": result.moderated,
-                "parent_post_id": result.parent_post_id,
-            }
+        try:
+            # Dispatch based on task type
+            if task_type == "create_video":
+                result = await client.create_video(*args, **kwargs)
+                return {
+                    "video_id": result.video_id,
+                    "moderated": result.moderated,
+                    "parent_post_id": result.parent_post_id,
+                }
 
-        elif task_type == "list_posts":
-            posts = await client.list_posts(*args, **kwargs)
-            return [p.to_dict() if hasattr(p, "to_dict") else p for p in posts]
+            elif task_type == "create_video_via_ui":
+                result = await client.create_video_via_ui(*args, **kwargs)
+                return {
+                    "video_id": result.video_id,
+                    "moderated": result.moderated,
+                    "parent_post_id": result.parent_post_id,
+                }
 
-        elif task_type == "get_post_details":
-            post = await client.get_post_details(*args, **kwargs)
-            return post._raw_data if hasattr(post, "_raw_data") else post
+            elif task_type == "list_posts":
+                posts = await client.list_posts(*args, **kwargs)
+                return [p.to_dict() if hasattr(p, "to_dict") else p for p in posts]
 
-        elif task_type == "like_post":
-            return await client.like_post(*args, **kwargs)
+            elif task_type == "get_post_details":
+                post = await client.get_post_details(*args, **kwargs)
+                return post._raw_data if hasattr(post, "_raw_data") else post
 
-        elif task_type == "unlike_post":
-            return await client.unlike_post(*args, **kwargs)
+            elif task_type == "like_post":
+                return await client.like_post(*args, **kwargs)
 
-        else:
-            raise ValueError(f"Unknown task type: {task_type}")
+            elif task_type == "unlike_post":
+                return await client.unlike_post(*args, **kwargs)
+
+            elif task_type == "delete_video_via_ui":
+                return await client.delete_video_via_ui(*args, **kwargs)
+
+            else:
+                raise ValueError(f"Unknown task type: {task_type}")
+        finally:
+            # Restore original ui_delay
+            if ui_delay is not None:
+                client._ui_delay = original_ui_delay

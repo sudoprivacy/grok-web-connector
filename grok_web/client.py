@@ -621,6 +621,7 @@ class NodriverClient(AsyncClientBase):
         host: str | None = None,
         port: int | None = None,
         auto_launch: bool = True,
+        ui_delay: float = 1.0,
     ):
         """
         Initialize NodriverClient.
@@ -633,6 +634,8 @@ class NodriverClient(AsyncClientBase):
             port: Remote debugging port. Defaults to 9222.
             auto_launch: If True (default), automatically launch Chrome if not running.
                         Set to False to only connect to existing Chrome.
+            ui_delay: Multiplier for UI operation delays (default: 1.0).
+                     Increase for slower connections, decrease for faster ones.
         """
         if cookies is None:
             config = load_config(config_path)
@@ -644,6 +647,7 @@ class NodriverClient(AsyncClientBase):
         self._tab = None
         self._initialized = False
         self._chrome_process = None  # Track Chrome process we launched
+        self._ui_delay = ui_delay
 
         # Browser connection settings (always use reuse mode now)
         self._remote_host = host or self.DEFAULT_DEBUG_HOST
@@ -1105,73 +1109,108 @@ class NodriverClient(AsyncClientBase):
         Navigates to the video page, clicks "..." menu, then "Delete post",
         and confirms in the dialog. Only deletes the specific child video.
 
+        Timing is controlled by self._ui_delay parameter (default: 1.0).
+
         Args:
             video_id: The child video UUID to delete
 
         Returns:
-            True if deletion was successful
+            True if deletion was successful (or video already doesn't exist)
 
         Raises:
             GrokAPIError: If delete button not found or deletion fails
         """
         import asyncio
 
+        d = self._ui_delay  # Shorthand for delay multiplier
+
         # Navigate to the video page
         await self._tab.get(f"{self.BASE_URL}/imagine/post/{video_id}")
-        await asyncio.sleep(3)
+        await asyncio.sleep(3 * d)  # Wait for page to fully load
+
+        # Check if page is 404 (video already deleted)
+        page_text = await self._tab.evaluate("document.body.innerText")
+        if "Page not found" in page_text or "404" in page_text:
+            return True  # Video already doesn't exist, consider it deleted
 
         # Step 1: Click the "..." menu button using mouse_click (JS click doesn't work)
-        buttons = await self._tab.find_all("button")
+        # Use specific selector to avoid clicking video player's menu
         menu_btn = None
-        for btn in buttons:
-            label = btn.attrs.get("aria-label", "")
-            if label in ("更多选项", "More options"):
-                menu_btn = btn
-                break
+        for _ in range(3):
+            try:
+                # Find button with both aria-label AND aria-haspopup to get post menu
+                menu_btn = await self._tab.find(
+                    'button[aria-label="更多选项"][aria-haspopup="menu"], '
+                    'button[aria-label="More options"][aria-haspopup="menu"]'
+                )
+                if menu_btn:
+                    break
+            except Exception:
+                pass
+            await asyncio.sleep(2 * d)
 
         if menu_btn is None:
             raise GrokAPIError("Could not find '...' menu button (更多选项)")
 
+        await menu_btn.scroll_into_view()
+        await asyncio.sleep(0.5 * d)
         await menu_btn.mouse_click()
-        await asyncio.sleep(0.8)
+        await asyncio.sleep(1 * d)  # Wait for menu to open
 
         # Step 2: Click "删除帖子" (Delete post) in the dropdown menu
-        # Menu items have role="menuitem"
-        delete_item = None
-        menu_items = await self._tab.find_all("[role='menuitem']")
-        for item in menu_items:
-            try:
-                text = item.text.strip() if hasattr(item, "text") and item.text else ""
-                if text in ("删除帖子", "Delete post"):
-                    delete_item = item
-                    break
-            except Exception:
-                continue
+        # Use JS to find and click since nodriver find_all may return video player items
+        clicked = False
+        for _ in range(3):
+            result = await self._tab.evaluate("""
+                (function() {
+                    const items = document.querySelectorAll('[role="menuitem"]');
+                    for (const item of items) {
+                        const text = item.innerText.trim();
+                        if (text === '删除帖子' || text === 'Delete post') {
+                            item.click();
+                            return true;
+                        }
+                    }
+                    return false;
+                })()
+            """)
+            if result:
+                clicked = True
+                break
+            await asyncio.sleep(1 * d)
 
-        if delete_item is None:
+        if not clicked:
             raise GrokAPIError("Could not find 'Delete post' (删除帖子) in menu")
 
-        await delete_item.mouse_click()
-        await asyncio.sleep(0.8)
+        await asyncio.sleep(1 * d)  # Wait for dialog to appear
 
         # Step 3: Click "Delete post" button in confirmation dialog
         # Dialog shows: "Are you sure you want to delete?" with "Delete post" and "Cancel"
-        confirm_btn = None
-        all_buttons = await self._tab.find_all("button")
-        for btn in all_buttons:
-            try:
-                text = btn.text.strip() if hasattr(btn, "text") and btn.text else ""
-                if text in ("Delete post", "删除帖子"):
-                    confirm_btn = btn
-                    break
-            except Exception:
-                continue
+        # Use JS to click the confirm button
+        confirmed = False
+        for _ in range(3):
+            result = await self._tab.evaluate("""
+                (function() {
+                    const buttons = document.querySelectorAll('button');
+                    for (const btn of buttons) {
+                        const text = btn.innerText.trim();
+                        if (text === 'Delete post' || text === '删除帖子') {
+                            btn.click();
+                            return true;
+                        }
+                    }
+                    return false;
+                })()
+            """)
+            if result:
+                confirmed = True
+                break
+            await asyncio.sleep(1 * d)
 
-        if confirm_btn is None:
+        if not confirmed:
             raise GrokAPIError("Could not find confirm button in delete dialog")
 
-        await confirm_btn.mouse_click()
-        await asyncio.sleep(1)
+        await asyncio.sleep(1 * d)  # Wait for deletion to complete
 
         return True
 
