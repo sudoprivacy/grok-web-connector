@@ -41,8 +41,8 @@ Factory Functions
 get_client(browser_host, browser_port, ...)  -> SmartGrokClient (recommended)
 get_sync_client(...)                         -> PlaywrightClient or GrokClient
 
-10 Core APIs
-============
+Core APIs
+=========
 Read APIs (via HTTP - fast):
 1. list_posts()              - List liked posts (default) or all public posts
 2. get_post_details()        - Get full details for a specific post
@@ -55,7 +55,15 @@ Write APIs:
 7. unlike_post()             - Remove post from favorites
 8. create_video()            - Generate video (HTTP first, browser fallback)
 9. create_video_from_image() - Direct API call (may be blocked with 403)
-10. delete_video()           - Delete a child video (browser UI only)
+
+UI Menu Operations (NodriverClient only):
+10. delete_video_via_ui()    - Delete a video via UI click
+11. save_post_via_ui()       - Save post to favorites (toggle)
+12. unsave_post_via_ui()     - Remove from favorites
+13. like_post_via_ui()       - Like a post
+14. dislike_post_via_ui()    - Dislike a post
+15. upgrade_video_via_ui()   - Convert non-HD video to HD
+16. get_menu_items()         - List available menu options
 
 Parallel Processing
 ===================
