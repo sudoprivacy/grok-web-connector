@@ -364,3 +364,186 @@ class TestNodriverClientGetStatsigId:
         result = await client._get_statsig_id_from_page()
 
         assert result is None
+
+
+class TestNodriverClientUIMenuOperations:
+    """Tests for NodriverClient UI menu operations."""
+
+    @pytest.fixture
+    def client(self, mock_cookies: GrokCookies) -> NodriverClient:
+        """Create NodriverClient with mocked tab."""
+        client = NodriverClient(cookies=mock_cookies)
+        client._tab = AsyncMock()
+        client._ui_delay = 0.01  # Fast for tests
+        return client
+
+    @pytest.mark.asyncio
+    async def test_open_post_menu_success(self, client: NodriverClient):
+        """_open_post_menu navigates and clicks menu button."""
+        mock_btn = AsyncMock()
+        client._tab.get = AsyncMock()
+        client._tab.evaluate = AsyncMock(return_value="Normal page content")
+        client._tab.find = AsyncMock(return_value=mock_btn)
+
+        result = await client._open_post_menu("post-123")
+
+        assert result is True
+        client._tab.get.assert_called_once()
+        mock_btn.scroll_into_view.assert_called_once()
+        mock_btn.mouse_click.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_open_post_menu_raises_on_404(self, client: NodriverClient):
+        """_open_post_menu raises GrokAPIError on 404 page."""
+        from grok_web.exceptions import GrokAPIError
+
+        client._tab.get = AsyncMock()
+        client._tab.evaluate = AsyncMock(return_value="Page not found - 404")
+
+        with pytest.raises(GrokAPIError, match="404"):
+            await client._open_post_menu("nonexistent-post")
+
+    @pytest.mark.asyncio
+    async def test_open_post_menu_raises_when_button_not_found(self, client: NodriverClient):
+        """_open_post_menu raises GrokAPIError when menu button not found."""
+        from grok_web.exceptions import GrokAPIError
+
+        client._tab.get = AsyncMock()
+        client._tab.evaluate = AsyncMock(return_value="Normal page")
+        client._tab.find = AsyncMock(side_effect=Exception("Not found"))
+
+        with pytest.raises(GrokAPIError, match="menu button"):
+            await client._open_post_menu("post-123")
+
+    @pytest.mark.asyncio
+    async def test_click_menu_item_success(self, client: NodriverClient):
+        """_click_menu_item clicks menu item by text."""
+        client._tab.evaluate = AsyncMock(return_value="Save")
+
+        result = await client._click_menu_item("Save", "保存")
+
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_click_menu_item_raises_when_not_found(self, client: NodriverClient):
+        """_click_menu_item raises GrokAPIError when item not found."""
+        from grok_web.exceptions import GrokAPIError
+
+        client._tab.evaluate = AsyncMock(return_value=None)
+
+        with pytest.raises(GrokAPIError, match="Could not find menu item"):
+            await client._click_menu_item("NonExistent")
+
+    @pytest.mark.asyncio
+    async def test_click_confirm_button_success(self, client: NodriverClient):
+        """_click_confirm_button clicks confirm button."""
+        client._tab.evaluate = AsyncMock(return_value="Delete")
+
+        result = await client._click_confirm_button("Delete", "删除")
+
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_click_confirm_button_raises_when_not_found(self, client: NodriverClient):
+        """_click_confirm_button raises GrokAPIError when button not found."""
+        from grok_web.exceptions import GrokAPIError
+
+        client._tab.evaluate = AsyncMock(return_value=None)
+
+        with pytest.raises(GrokAPIError, match="Could not find confirm button"):
+            await client._click_confirm_button("NonExistent")
+
+    @pytest.mark.asyncio
+    async def test_delete_video_via_ui_success(self, client: NodriverClient):
+        """delete_video_via_ui deletes video through menu."""
+        client._open_post_menu = AsyncMock()
+        client._click_menu_item = AsyncMock()
+        client._click_confirm_button = AsyncMock()
+
+        result = await client.delete_video_via_ui("video-123")
+
+        assert result is True
+        client._open_post_menu.assert_called_once_with("video-123")
+        client._click_menu_item.assert_called_once()
+        client._click_confirm_button.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_delete_video_via_ui_returns_true_on_404(self, client: NodriverClient):
+        """delete_video_via_ui returns True when video already deleted (404)."""
+        from grok_web.exceptions import GrokAPIError
+
+        client._open_post_menu = AsyncMock(side_effect=GrokAPIError("Post not found (404)"))
+
+        result = await client.delete_video_via_ui("deleted-video")
+
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_save_post_via_ui_success(self, client: NodriverClient):
+        """save_post_via_ui saves post through menu."""
+        client._open_post_menu = AsyncMock()
+        client._click_menu_item = AsyncMock()
+
+        result = await client.save_post_via_ui("post-123")
+
+        assert result is True
+        client._click_menu_item.assert_called_once_with("保存", "Save")
+
+    @pytest.mark.asyncio
+    async def test_unsave_post_via_ui_success(self, client: NodriverClient):
+        """unsave_post_via_ui unsaves post through menu."""
+        client._open_post_menu = AsyncMock()
+        client._click_menu_item = AsyncMock()
+
+        result = await client.unsave_post_via_ui("post-123")
+
+        assert result is True
+        client._click_menu_item.assert_called_once_with("取消保存", "Unsave")
+
+    @pytest.mark.asyncio
+    async def test_like_post_via_ui_success(self, client: NodriverClient):
+        """like_post_via_ui likes post through menu."""
+        client._open_post_menu = AsyncMock()
+        client._click_menu_item = AsyncMock()
+
+        result = await client.like_post_via_ui("post-123")
+
+        assert result is True
+        client._click_menu_item.assert_called_once_with("赞", "Like")
+
+    @pytest.mark.asyncio
+    async def test_dislike_post_via_ui_success(self, client: NodriverClient):
+        """dislike_post_via_ui dislikes post through menu."""
+        client._open_post_menu = AsyncMock()
+        client._click_menu_item = AsyncMock()
+
+        result = await client.dislike_post_via_ui("post-123")
+
+        assert result is True
+        client._click_menu_item.assert_called_once_with("踩", "Dislike")
+
+    @pytest.mark.asyncio
+    async def test_upgrade_video_via_ui_success(self, client: NodriverClient):
+        """upgrade_video_via_ui upgrades video through menu."""
+        client._open_post_menu = AsyncMock()
+        client._click_menu_item = AsyncMock()
+
+        result = await client.upgrade_video_via_ui("video-123")
+
+        assert result is True
+        client._click_menu_item.assert_called_once_with("升级视频", "Upgrade video")
+
+    @pytest.mark.asyncio
+    async def test_get_menu_items_returns_list(self, client: NodriverClient):
+        """get_menu_items returns list of menu item texts."""
+        client._open_post_menu = AsyncMock()
+        client._tab.evaluate = AsyncMock(
+            side_effect=[
+                '["Save", "Delete", "Like"]',  # JSON from querySelectorAll
+                None,  # body.click() to close menu
+            ]
+        )
+
+        result = await client.get_menu_items("post-123")
+
+        assert result == ["Save", "Delete", "Like"]

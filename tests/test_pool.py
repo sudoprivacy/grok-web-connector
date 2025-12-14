@@ -5,6 +5,7 @@ import json
 import tempfile
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -613,3 +614,107 @@ class TestBrowserWorkerPoolStatePersistence:
             assert path.exists()
             loaded = load_state(path)
             assert "r1" in loaded.completed
+
+
+class TestBrowserWorkerPoolExecuteJob:
+    """Tests for BrowserWorkerPool._execute_job method."""
+
+    @pytest.fixture
+    def pool(self):
+        """Create pool instance."""
+        from grok_web.pool import BrowserWorkerPool
+
+        return BrowserWorkerPool()
+
+    @pytest.fixture
+    def mock_worker(self) -> Worker:
+        """Create worker with mock client."""
+        worker = Worker(worker_id=0, port=9222)
+        worker.client = MagicMock()
+        return worker
+
+    @pytest.mark.asyncio
+    async def test_execute_delete_video_via_ui(self, pool, mock_worker):
+        """_execute_job handles delete_video_via_ui task."""
+        mock_worker.client.delete_video_via_ui = AsyncMock(return_value=True)
+        job = Job(task_type="delete_video_via_ui", args=("video-123",))
+
+        result = await pool._execute_job(mock_worker, job)
+
+        assert result is True
+        mock_worker.client.delete_video_via_ui.assert_called_once_with("video-123")
+
+    @pytest.mark.asyncio
+    async def test_execute_save_post_via_ui(self, pool, mock_worker):
+        """_execute_job handles save_post_via_ui task."""
+        mock_worker.client.save_post_via_ui = AsyncMock(return_value=True)
+        job = Job(task_type="save_post_via_ui", args=("post-123",))
+
+        result = await pool._execute_job(mock_worker, job)
+
+        assert result is True
+        mock_worker.client.save_post_via_ui.assert_called_once_with("post-123")
+
+    @pytest.mark.asyncio
+    async def test_execute_unsave_post_via_ui(self, pool, mock_worker):
+        """_execute_job handles unsave_post_via_ui task."""
+        mock_worker.client.unsave_post_via_ui = AsyncMock(return_value=True)
+        job = Job(task_type="unsave_post_via_ui", args=("post-123",))
+
+        result = await pool._execute_job(mock_worker, job)
+
+        assert result is True
+        mock_worker.client.unsave_post_via_ui.assert_called_once_with("post-123")
+
+    @pytest.mark.asyncio
+    async def test_execute_like_post_via_ui(self, pool, mock_worker):
+        """_execute_job handles like_post_via_ui task."""
+        mock_worker.client.like_post_via_ui = AsyncMock(return_value=True)
+        job = Job(task_type="like_post_via_ui", args=("post-123",))
+
+        result = await pool._execute_job(mock_worker, job)
+
+        assert result is True
+        mock_worker.client.like_post_via_ui.assert_called_once_with("post-123")
+
+    @pytest.mark.asyncio
+    async def test_execute_dislike_post_via_ui(self, pool, mock_worker):
+        """_execute_job handles dislike_post_via_ui task."""
+        mock_worker.client.dislike_post_via_ui = AsyncMock(return_value=True)
+        job = Job(task_type="dislike_post_via_ui", args=("post-123",))
+
+        result = await pool._execute_job(mock_worker, job)
+
+        assert result is True
+        mock_worker.client.dislike_post_via_ui.assert_called_once_with("post-123")
+
+    @pytest.mark.asyncio
+    async def test_execute_upgrade_video_via_ui(self, pool, mock_worker):
+        """_execute_job handles upgrade_video_via_ui task."""
+        mock_worker.client.upgrade_video_via_ui = AsyncMock(return_value=True)
+        job = Job(task_type="upgrade_video_via_ui", args=("video-123",))
+
+        result = await pool._execute_job(mock_worker, job)
+
+        assert result is True
+        mock_worker.client.upgrade_video_via_ui.assert_called_once_with("video-123")
+
+    @pytest.mark.asyncio
+    async def test_execute_unknown_task_raises(self, pool, mock_worker):
+        """_execute_job raises ValueError for unknown task type."""
+        job = Job(task_type="unknown_task")
+
+        with pytest.raises(ValueError, match="Unknown task type"):
+            await pool._execute_job(mock_worker, job)
+
+    @pytest.mark.asyncio
+    async def test_execute_with_ui_delay(self, pool, mock_worker):
+        """_execute_job applies ui_delay and restores it after."""
+        mock_worker.client._ui_delay = 1.0
+        mock_worker.client.delete_video_via_ui = AsyncMock(return_value=True)
+        job = Job(task_type="delete_video_via_ui", args=("video-123",), kwargs={"ui_delay": 2.0})
+
+        await pool._execute_job(mock_worker, job)
+
+        # ui_delay should be restored to original
+        assert mock_worker.client._ui_delay == 1.0

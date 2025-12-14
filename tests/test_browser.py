@@ -254,3 +254,175 @@ class TestDefaultConstants:
     def test_default_debug_host(self):
         """Default debug host is 127.0.0.1."""
         assert DEFAULT_DEBUG_HOST == "127.0.0.1"
+
+
+class TestFindNodriverChromes:
+    """Tests for find_nodriver_chromes function."""
+
+    def test_finds_nodriver_chromes_in_range(self):
+        """Finds nodriver Chrome instances in port range."""
+        from grok_web.browser import find_nodriver_chromes
+
+        # Mock is_temp_chrome_on_port to return True for specific ports
+        def mock_is_temp(port):
+            if port in [9223, 9225]:
+                return (True, port * 10)  # fake PID
+            return (False, None)
+
+        with patch("grok_web.browser.is_temp_chrome_on_port", side_effect=mock_is_temp):
+            result = find_nodriver_chromes(port_range=(9222, 9227))
+            assert result == [9223, 9225]
+
+    def test_returns_empty_list_when_no_nodriver_chromes(self):
+        """Returns empty list when no nodriver Chromes found."""
+        from grok_web.browser import find_nodriver_chromes
+
+        with patch("grok_web.browser.is_temp_chrome_on_port", return_value=(False, None)):
+            result = find_nodriver_chromes(port_range=(9222, 9225))
+            assert result == []
+
+    def test_uses_default_port_range(self):
+        """Uses default port range when not specified."""
+        from grok_web.browser import find_nodriver_chromes
+
+        call_count = 0
+
+        def mock_is_temp(port):
+            nonlocal call_count
+            call_count += 1
+            return (False, None)
+
+        with patch("grok_web.browser.is_temp_chrome_on_port", side_effect=mock_is_temp):
+            find_nodriver_chromes()
+            # Default range is 9222-9300, so 78 calls
+            assert call_count == 78
+
+
+class TestGetAvailablePort:
+    """Tests for get_available_port function."""
+
+    def test_returns_first_available_port(self):
+        """Returns first available port in range."""
+        from grok_web.browser import get_available_port
+
+        # Port 9222 in use, 9223 free
+        def mock_port_in_use(host, port):
+            return port == 9222
+
+        with patch("grok_web.browser.is_port_in_use", side_effect=mock_port_in_use):
+            result = get_available_port(start=9222, end=9230)
+            assert result == 9223
+
+    def test_skips_excluded_ports(self):
+        """Skips ports in exclude set."""
+        from grok_web.browser import get_available_port
+
+        with patch("grok_web.browser.is_port_in_use", return_value=False):
+            result = get_available_port(start=9222, end=9230, exclude={9222, 9223})
+            assert result == 9224
+
+    def test_raises_when_no_port_available(self):
+        """Raises RuntimeError when no port available in range."""
+        from grok_web.browser import get_available_port
+
+        with patch("grok_web.browser.is_port_in_use", return_value=True):
+            with pytest.raises(RuntimeError, match="No available port found"):
+                get_available_port(start=9222, end=9225)
+
+    def test_returns_first_port_when_all_free(self):
+        """Returns first port when all are free."""
+        from grok_web.browser import get_available_port
+
+        with patch("grok_web.browser.is_port_in_use", return_value=False):
+            result = get_available_port(start=9222, end=9230)
+            assert result == 9222
+
+
+class TestIsTempChromeOnPort:
+    """Tests for is_temp_chrome_on_port function."""
+
+    def test_returns_false_when_no_process_on_port(self):
+        """Returns (False, None) when no process on port."""
+        from grok_web.browser import is_temp_chrome_on_port
+
+        with patch("grok_web.browser.get_pid_on_port", return_value=None):
+            is_temp, pid = is_temp_chrome_on_port(9222)
+            assert is_temp is False
+            assert pid is None
+
+    def test_returns_false_when_not_chrome(self):
+        """Returns (False, pid) when process is not Chrome."""
+        from grok_web.browser import is_temp_chrome_on_port
+
+        with patch("grok_web.browser.get_pid_on_port", return_value=12345):
+            with patch("grok_web.browser.get_process_cmdline", return_value="python server.py"):
+                is_temp, pid = is_temp_chrome_on_port(9222)
+                assert is_temp is False
+                assert pid == 12345
+
+    def test_returns_false_when_user_chrome(self):
+        """Returns (False, pid) when Chrome without temp profile prefix."""
+        from grok_web.browser import is_temp_chrome_on_port
+
+        with patch("grok_web.browser.get_pid_on_port", return_value=12345):
+            with patch(
+                "grok_web.browser.get_process_cmdline",
+                return_value="/Applications/Chrome.app --user-data-dir=/Users/me/Library/Chrome",
+            ):
+                is_temp, pid = is_temp_chrome_on_port(9222)
+                assert is_temp is False
+                assert pid == 12345
+
+    def test_returns_true_when_temp_chrome(self):
+        """Returns (True, pid) when Chrome with grok_chrome_ prefix."""
+        from grok_web.browser import is_temp_chrome_on_port
+
+        with patch("grok_web.browser.get_pid_on_port", return_value=12345):
+            with patch(
+                "grok_web.browser.get_process_cmdline",
+                return_value="/Applications/Chrome.app --user-data-dir=/tmp/grok_chrome_abc123",
+            ):
+                is_temp, pid = is_temp_chrome_on_port(9222)
+                assert is_temp is True
+                assert pid == 12345
+
+    def test_returns_false_when_cmdline_none(self):
+        """Returns (False, pid) when cmdline cannot be retrieved."""
+        from grok_web.browser import is_temp_chrome_on_port
+
+        with patch("grok_web.browser.get_pid_on_port", return_value=12345):
+            with patch("grok_web.browser.get_process_cmdline", return_value=None):
+                is_temp, pid = is_temp_chrome_on_port(9222)
+                assert is_temp is False
+                assert pid == 12345
+
+
+class TestKillStaleTempChrome:
+    """Tests for kill_stale_temp_chrome function."""
+
+    def test_returns_false_when_not_temp_chrome(self):
+        """Returns False when process is not a temp Chrome."""
+        from grok_web.browser import kill_stale_temp_chrome
+
+        with patch("grok_web.browser.is_temp_chrome_on_port", return_value=(False, None)):
+            result = kill_stale_temp_chrome(9222)
+            assert result is False
+
+    def test_kills_temp_chrome_and_returns_true(self):
+        """Kills temp Chrome and returns True."""
+        from grok_web.browser import kill_stale_temp_chrome
+
+        with patch("grok_web.browser.is_temp_chrome_on_port", return_value=(True, 12345)):
+            with patch("grok_web.browser.os.kill") as mock_kill:
+                result = kill_stale_temp_chrome(9222)
+                assert result is True
+                mock_kill.assert_called_once()
+
+    def test_returns_false_on_kill_error(self):
+        """Returns False when kill fails."""
+        from grok_web.browser import kill_stale_temp_chrome
+
+        with patch("grok_web.browser.is_temp_chrome_on_port", return_value=(True, 12345)):
+            with patch("grok_web.browser.os.kill", side_effect=ProcessLookupError()):
+                result = kill_stale_temp_chrome(9222)
+                assert result is False
