@@ -1098,6 +1098,83 @@ class NodriverClient(AsyncClientBase):
         # Parse using shared utility
         return parse_video_ndjson_response(response_text, parent_post_id, statsig_id)
 
+    async def delete_video_via_ui(self, video_id: str) -> bool:
+        """
+        Delete a child video by clicking the UI "Delete post" button.
+
+        Navigates to the video page, clicks "..." menu, then "Delete post",
+        and confirms in the dialog. Only deletes the specific child video.
+
+        Args:
+            video_id: The child video UUID to delete
+
+        Returns:
+            True if deletion was successful
+
+        Raises:
+            GrokAPIError: If delete button not found or deletion fails
+        """
+        import asyncio
+
+        # Navigate to the video page
+        await self._tab.get(f"{self.BASE_URL}/imagine/post/{video_id}")
+        await asyncio.sleep(3)
+
+        # Step 1: Click the "..." menu button using mouse_click (JS click doesn't work)
+        buttons = await self._tab.find_all("button")
+        menu_btn = None
+        for btn in buttons:
+            label = btn.attrs.get("aria-label", "")
+            if label in ("更多选项", "More options"):
+                menu_btn = btn
+                break
+
+        if menu_btn is None:
+            raise GrokAPIError("Could not find '...' menu button (更多选项)")
+
+        await menu_btn.mouse_click()
+        await asyncio.sleep(0.8)
+
+        # Step 2: Click "删除帖子" (Delete post) in the dropdown menu
+        # Menu items have role="menuitem"
+        delete_item = None
+        menu_items = await self._tab.find_all("[role='menuitem']")
+        for item in menu_items:
+            try:
+                text = item.text.strip() if hasattr(item, "text") and item.text else ""
+                if text in ("删除帖子", "Delete post"):
+                    delete_item = item
+                    break
+            except Exception:
+                continue
+
+        if delete_item is None:
+            raise GrokAPIError("Could not find 'Delete post' (删除帖子) in menu")
+
+        await delete_item.mouse_click()
+        await asyncio.sleep(0.8)
+
+        # Step 3: Click "Delete post" button in confirmation dialog
+        # Dialog shows: "Are you sure you want to delete?" with "Delete post" and "Cancel"
+        confirm_btn = None
+        all_buttons = await self._tab.find_all("button")
+        for btn in all_buttons:
+            try:
+                text = btn.text.strip() if hasattr(btn, "text") and btn.text else ""
+                if text in ("Delete post", "删除帖子"):
+                    confirm_btn = btn
+                    break
+            except Exception:
+                continue
+
+        if confirm_btn is None:
+            raise GrokAPIError("Could not find confirm button in delete dialog")
+
+        await confirm_btn.mouse_click()
+        await asyncio.sleep(1)
+
+        return True
+
     async def create_video_via_ui(
         self,
         parent_post_id: str,
@@ -1519,6 +1596,22 @@ class SmartGrokClient:
                 raise
             browser = await self._get_browser_client()
             return await browser.unlike_post(post_id)
+
+    async def delete_video(self, video_id: str) -> bool:
+        """
+        Delete a child video via browser UI.
+
+        This method always uses browser (NodriverClient) because there's no
+        safe REST API for deleting individual videos.
+
+        Args:
+            video_id: The child video UUID to delete
+
+        Returns:
+            True if deletion was successful
+        """
+        browser = await self._get_browser_client()
+        return await browser.delete_video_via_ui(video_id)
 
     async def create_video(
         self,
