@@ -1102,6 +1102,141 @@ class NodriverClient(AsyncClientBase):
         # Parse using shared utility
         return parse_video_ndjson_response(response_text, parent_post_id, statsig_id)
 
+    # =========================================================================
+    # UI Menu Operations (shared helper + specific actions)
+    # =========================================================================
+
+    async def _open_post_menu(self, post_id: str) -> bool:
+        """
+        Navigate to a post and open its "..." menu.
+
+        This is a shared helper for all post menu operations.
+
+        Args:
+            post_id: The post UUID to navigate to
+
+        Returns:
+            True if menu was opened successfully
+
+        Raises:
+            GrokAPIError: If post is 404 or menu button not found
+        """
+        import asyncio
+
+        d = self._ui_delay
+
+        # Navigate to the post page
+        await self._tab.get(f"{self.BASE_URL}/imagine/post/{post_id}")
+        await asyncio.sleep(3 * d)
+
+        # Check if page is 404
+        page_text = await self._tab.evaluate("document.body.innerText")
+        if "Page not found" in page_text or "404" in page_text:
+            raise GrokAPIError(f"Post {post_id} not found (404)")
+
+        # Find and click the "..." menu button
+        menu_btn = None
+        for _ in range(3):
+            try:
+                menu_btn = await self._tab.find(
+                    'button[aria-label="更多选项"][aria-haspopup="menu"], '
+                    'button[aria-label="More options"][aria-haspopup="menu"]'
+                )
+                if menu_btn:
+                    break
+            except Exception:
+                pass
+            await asyncio.sleep(2 * d)
+
+        if menu_btn is None:
+            raise GrokAPIError("Could not find '...' menu button (更多选项)")
+
+        await menu_btn.scroll_into_view()
+        await asyncio.sleep(0.5 * d)
+        await menu_btn.mouse_click()
+        await asyncio.sleep(1 * d)
+
+        return True
+
+    async def _click_menu_item(self, *text_options: str) -> bool:
+        """
+        Click a menu item by its text (supports multiple language options).
+
+        Args:
+            *text_options: One or more text strings to match (e.g., "Save", "保存")
+
+        Returns:
+            True if item was clicked
+
+        Raises:
+            GrokAPIError: If menu item not found
+        """
+        import asyncio
+
+        d = self._ui_delay
+        text_list = list(text_options)
+
+        # Use JS to find and click the menu item
+        for _ in range(3):
+            result = await self._tab.evaluate(f"""
+                (function() {{
+                    const textOptions = {text_list};
+                    const items = document.querySelectorAll('[role="menuitem"]');
+                    for (const item of items) {{
+                        const text = item.innerText.trim();
+                        if (textOptions.includes(text)) {{
+                            item.click();
+                            return text;
+                        }}
+                    }}
+                    return null;
+                }})()
+            """)
+            if result:
+                return True
+            await asyncio.sleep(1 * d)
+
+        raise GrokAPIError(f"Could not find menu item: {text_options}")
+
+    async def _click_confirm_button(self, *text_options: str) -> bool:
+        """
+        Click a confirmation button in a dialog.
+
+        Args:
+            *text_options: One or more text strings to match
+
+        Returns:
+            True if button was clicked
+
+        Raises:
+            GrokAPIError: If confirm button not found
+        """
+        import asyncio
+
+        d = self._ui_delay
+        text_list = list(text_options)
+
+        for _ in range(3):
+            result = await self._tab.evaluate(f"""
+                (function() {{
+                    const textOptions = {text_list};
+                    const buttons = document.querySelectorAll('button');
+                    for (const btn of buttons) {{
+                        const text = btn.innerText.trim();
+                        if (textOptions.includes(text)) {{
+                            btn.click();
+                            return text;
+                        }}
+                    }}
+                    return null;
+                }})()
+            """)
+            if result:
+                return True
+            await asyncio.sleep(1 * d)
+
+        raise GrokAPIError(f"Could not find confirm button: {text_options}")
+
     async def delete_video_via_ui(self, video_id: str) -> bool:
         """
         Delete a child video by clicking the UI "Delete post" button.
@@ -1122,97 +1257,187 @@ class NodriverClient(AsyncClientBase):
         """
         import asyncio
 
-        d = self._ui_delay  # Shorthand for delay multiplier
+        d = self._ui_delay
 
-        # Navigate to the video page
-        await self._tab.get(f"{self.BASE_URL}/imagine/post/{video_id}")
-        await asyncio.sleep(3 * d)  # Wait for page to fully load
+        # Try to open menu (will raise if 404)
+        try:
+            await self._open_post_menu(video_id)
+        except GrokAPIError as e:
+            if "404" in str(e):
+                return True  # Already deleted
+            raise
 
-        # Check if page is 404 (video already deleted)
-        page_text = await self._tab.evaluate("document.body.innerText")
-        if "Page not found" in page_text or "404" in page_text:
-            return True  # Video already doesn't exist, consider it deleted
+        # Click "Delete video" menu item (button text varies)
+        await self._click_menu_item("删除视频", "删除帖子", "Delete video", "Delete post")
+        await asyncio.sleep(1 * d)
 
-        # Step 1: Click the "..." menu button using mouse_click (JS click doesn't work)
-        # Use specific selector to avoid clicking video player's menu
-        menu_btn = None
-        for _ in range(3):
-            try:
-                # Find button with both aria-label AND aria-haspopup to get post menu
-                menu_btn = await self._tab.find(
-                    'button[aria-label="更多选项"][aria-haspopup="menu"], '
-                    'button[aria-label="More options"][aria-haspopup="menu"]'
-                )
-                if menu_btn:
-                    break
-            except Exception:
-                pass
-            await asyncio.sleep(2 * d)
-
-        if menu_btn is None:
-            raise GrokAPIError("Could not find '...' menu button (更多选项)")
-
-        await menu_btn.scroll_into_view()
-        await asyncio.sleep(0.5 * d)
-        await menu_btn.mouse_click()
-        await asyncio.sleep(1 * d)  # Wait for menu to open
-
-        # Step 2: Click "删除帖子" (Delete post) in the dropdown menu
-        # Use JS to find and click since nodriver find_all may return video player items
-        clicked = False
-        for _ in range(3):
-            result = await self._tab.evaluate("""
-                (function() {
-                    const items = document.querySelectorAll('[role="menuitem"]');
-                    for (const item of items) {
-                        const text = item.innerText.trim();
-                        if (text === '删除帖子' || text === 'Delete post') {
-                            item.click();
-                            return true;
-                        }
-                    }
-                    return false;
-                })()
-            """)
-            if result:
-                clicked = True
-                break
-            await asyncio.sleep(1 * d)
-
-        if not clicked:
-            raise GrokAPIError("Could not find 'Delete post' (删除帖子) in menu")
-
-        await asyncio.sleep(1 * d)  # Wait for dialog to appear
-
-        # Step 3: Click "Delete post" button in confirmation dialog
-        # Dialog shows: "Are you sure you want to delete?" with "Delete post" and "Cancel"
-        # Use JS to click the confirm button
-        confirmed = False
-        for _ in range(3):
-            result = await self._tab.evaluate("""
-                (function() {
-                    const buttons = document.querySelectorAll('button');
-                    for (const btn of buttons) {
-                        const text = btn.innerText.trim();
-                        if (text === 'Delete post' || text === '删除帖子') {
-                            btn.click();
-                            return true;
-                        }
-                    }
-                    return false;
-                })()
-            """)
-            if result:
-                confirmed = True
-                break
-            await asyncio.sleep(1 * d)
-
-        if not confirmed:
-            raise GrokAPIError("Could not find confirm button in delete dialog")
-
-        await asyncio.sleep(1 * d)  # Wait for deletion to complete
+        # Confirm deletion (button text in dialog)
+        await self._click_confirm_button("删除视频", "删除帖子", "Delete video", "Delete post")
+        await asyncio.sleep(1 * d)
 
         return True
+
+    async def save_post_via_ui(self, post_id: str) -> bool:
+        """
+        Save a post to favorites by clicking the UI "Save" button.
+
+        WARNING: If the post is already saved, this will UNSAVE it!
+        The button toggles between Save/Unsave.
+
+        Args:
+            post_id: The post UUID to save
+
+        Returns:
+            True if save was successful
+
+        Raises:
+            GrokAPIError: If post not found or save fails
+        """
+        import asyncio
+
+        d = self._ui_delay
+
+        await self._open_post_menu(post_id)
+
+        # Click "Save" menu item
+        await self._click_menu_item("保存", "Save")
+        await asyncio.sleep(1 * d)
+
+        return True
+
+    async def unsave_post_via_ui(self, post_id: str) -> bool:
+        """
+        Remove a post from favorites by clicking the UI "Unsave" button.
+
+        Note: Only works if the post is currently saved.
+
+        Args:
+            post_id: The post UUID to unsave
+
+        Returns:
+            True if unsave was successful
+
+        Raises:
+            GrokAPIError: If post not found or unsave fails
+        """
+        import asyncio
+
+        d = self._ui_delay
+
+        await self._open_post_menu(post_id)
+
+        # Click "Unsave" menu item
+        await self._click_menu_item("取消保存", "Unsave")
+        await asyncio.sleep(1 * d)
+
+        return True
+
+    async def like_post_via_ui(self, post_id: str) -> bool:
+        """
+        Like a post via the UI menu.
+
+        Args:
+            post_id: The post UUID to like
+
+        Returns:
+            True if like was successful
+
+        Raises:
+            GrokAPIError: If post not found or like fails
+        """
+        import asyncio
+
+        d = self._ui_delay
+
+        await self._open_post_menu(post_id)
+        await self._click_menu_item("赞", "Like")
+        await asyncio.sleep(1 * d)
+
+        return True
+
+    async def dislike_post_via_ui(self, post_id: str) -> bool:
+        """
+        Dislike a post via the UI menu.
+
+        Args:
+            post_id: The post UUID to dislike
+
+        Returns:
+            True if dislike was successful
+
+        Raises:
+            GrokAPIError: If post not found or dislike fails
+        """
+        import asyncio
+
+        d = self._ui_delay
+
+        await self._open_post_menu(post_id)
+        await self._click_menu_item("踩", "Dislike")
+        await asyncio.sleep(1 * d)
+
+        return True
+
+    async def upgrade_video_via_ui(self, video_id: str) -> bool:
+        """
+        Upgrade a video to HD via the UI menu.
+
+        This triggers the "升级视频" (Upgrade video) option which converts
+        a non-HD video to HD quality.
+
+        Args:
+            video_id: The video UUID to upgrade
+
+        Returns:
+            True if upgrade was initiated successfully
+
+        Raises:
+            GrokAPIError: If video not found or upgrade fails
+        """
+        import asyncio
+
+        d = self._ui_delay
+
+        await self._open_post_menu(video_id)
+        await self._click_menu_item("升级视频", "Upgrade video")
+        await asyncio.sleep(1 * d)
+
+        return True
+
+    async def get_menu_items(self, post_id: str) -> list[str]:
+        """
+        Get all available menu items for a post.
+
+        Useful for debugging or checking what actions are available.
+
+        Args:
+            post_id: The post UUID
+
+        Returns:
+            List of menu item text labels
+        """
+        import asyncio
+
+        d = self._ui_delay
+
+        await self._open_post_menu(post_id)
+
+        # Get all menu items (use JSON.stringify to avoid nodriver object wrapping)
+        import json
+
+        items_json = await self._tab.evaluate("""
+            JSON.stringify(
+                Array.from(document.querySelectorAll('[role="menuitem"]'))
+                    .map(item => item.innerText.trim())
+            )
+        """)
+        items = json.loads(items_json)
+
+        # Close menu by clicking elsewhere
+        await self._tab.evaluate("document.body.click()")
+        await asyncio.sleep(0.5 * d)
+
+        return items
 
     async def create_video_via_ui(
         self,

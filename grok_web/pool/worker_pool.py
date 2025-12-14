@@ -630,6 +630,21 @@ class BrowserWorkerPool:
             elif task_type == "delete_video_via_ui":
                 return await client.delete_video_via_ui(*args, **kwargs)
 
+            elif task_type == "save_post_via_ui":
+                return await client.save_post_via_ui(*args, **kwargs)
+
+            elif task_type == "unsave_post_via_ui":
+                return await client.unsave_post_via_ui(*args, **kwargs)
+
+            elif task_type == "like_post_via_ui":
+                return await client.like_post_via_ui(*args, **kwargs)
+
+            elif task_type == "dislike_post_via_ui":
+                return await client.dislike_post_via_ui(*args, **kwargs)
+
+            elif task_type == "upgrade_video_via_ui":
+                return await client.upgrade_video_via_ui(*args, **kwargs)
+
             else:
                 raise ValueError(f"Unknown task type: {task_type}")
         finally:
