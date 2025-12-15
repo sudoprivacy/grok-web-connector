@@ -1237,7 +1237,7 @@ class NodriverClient(AsyncClientBase):
 
         raise GrokAPIError(f"Could not find confirm button: {text_options}")
 
-    async def delete_video_via_ui(self, video_id: str) -> bool:
+    async def delete_video(self, video_id: str) -> bool:
         """
         Delete a child video by clicking the UI "Delete post" button.
 
@@ -1277,64 +1277,43 @@ class NodriverClient(AsyncClientBase):
 
         return True
 
-    async def save_post_via_ui(self, post_id: str) -> bool:
+    async def _favorite_post_browser(self, post_id: str) -> bool:
         """
-        Save a post to favorites by clicking the UI "Save" button.
+        Internal: Add post to favorites via browser UI (fallback for HTTP 403).
 
         WARNING: If the post is already saved, this will UNSAVE it!
         The button toggles between Save/Unsave.
-
-        Args:
-            post_id: The post UUID to save
-
-        Returns:
-            True if save was successful
-
-        Raises:
-            GrokAPIError: If post not found or save fails
         """
         import asyncio
 
         d = self._ui_delay
 
         await self._open_post_menu(post_id)
-
-        # Click "Save" menu item
         await self._click_menu_item("保存", "Save")
         await asyncio.sleep(1 * d)
 
         return True
 
-    async def unsave_post_via_ui(self, post_id: str) -> bool:
+    async def _unfavorite_post_browser(self, post_id: str) -> bool:
         """
-        Remove a post from favorites by clicking the UI "Unsave" button.
-
-        Note: Only works if the post is currently saved.
-
-        Args:
-            post_id: The post UUID to unsave
-
-        Returns:
-            True if unsave was successful
-
-        Raises:
-            GrokAPIError: If post not found or unsave fails
+        Internal: Remove post from favorites via browser UI (fallback for HTTP 403).
         """
         import asyncio
 
         d = self._ui_delay
 
         await self._open_post_menu(post_id)
-
-        # Click "Unsave" menu item
         await self._click_menu_item("取消保存", "Unsave")
         await asyncio.sleep(1 * d)
 
         return True
 
-    async def like_post_via_ui(self, post_id: str) -> bool:
+    async def like_post(self, post_id: str) -> bool:
         """
-        Like a post via the UI menu.
+        Give a thumbs-up to a post via UI menu.
+
+        Note: This is different from favorite_post() which saves to favorites.
+        This is the "赞" (Like/thumbs up) action.
 
         Args:
             post_id: The post UUID to like
@@ -1355,9 +1334,9 @@ class NodriverClient(AsyncClientBase):
 
         return True
 
-    async def dislike_post_via_ui(self, post_id: str) -> bool:
+    async def dislike_post(self, post_id: str) -> bool:
         """
-        Dislike a post via the UI menu.
+        Give a thumbs-down to a post via UI menu.
 
         Args:
             post_id: The post UUID to dislike
@@ -1378,9 +1357,9 @@ class NodriverClient(AsyncClientBase):
 
         return True
 
-    async def upgrade_video_via_ui(self, video_id: str) -> bool:
+    async def upgrade_video(self, video_id: str) -> bool:
         """
-        Upgrade a video to HD via the UI menu.
+        Upgrade a video to HD quality via UI menu.
 
         This triggers the "升级视频" (Upgrade video) option which converts
         a non-HD video to HD quality.
@@ -1439,11 +1418,11 @@ class NodriverClient(AsyncClientBase):
 
         return items
 
-    async def edit_image_via_ui(
+    async def edit_image(
         self, post_id: str, edit_prompt: str, timeout: int = 60
     ) -> ImageEditResult:
         """
-        Edit an image via the UI to generate new variations.
+        Edit an image to generate new variations.
 
         This navigates to the post, clicks "编辑图像", enters the prompt,
         and captures the API response with generated images.
@@ -2008,35 +1987,85 @@ class SmartGrokClient:
             return await browser.match_local_video(local_path)
 
     # =========================================================================
-    # Write APIs - HTTP first, browser fallback on Cloudflare
+    # Favorite APIs - HTTP first, browser fallback on Cloudflare
+    # =========================================================================
+
+    async def favorite_post(self, post_id: str) -> bool:
+        """
+        Add a post to favorites (HTTP first, browser fallback on 403).
+
+        Args:
+            post_id: Post UUID to favorite
+
+        Returns:
+            True if successful
+        """
+        try:
+            return await self._http_client.favorite_post(post_id)
+        except GrokAuthError:
+            if not self._enable_browser_fallback:
+                raise
+            browser = await self._get_browser_client()
+            return await browser._favorite_post_browser(post_id)
+
+    async def unfavorite_post(self, post_id: str) -> bool:
+        """
+        Remove a post from favorites (HTTP first, browser fallback on 403).
+
+        Args:
+            post_id: Post UUID to unfavorite
+
+        Returns:
+            True if successful
+        """
+        try:
+            return await self._http_client.unfavorite_post(post_id)
+        except GrokAuthError:
+            if not self._enable_browser_fallback:
+                raise
+            browser = await self._get_browser_client()
+            return await browser._unfavorite_post_browser(post_id)
+
+    # =========================================================================
+    # Social APIs - Browser only (no HTTP API exists)
     # =========================================================================
 
     async def like_post(self, post_id: str) -> bool:
-        """Like a post (HTTP first, browser fallback on Cloudflare)."""
-        try:
-            return await self._http_client.like_post(post_id)
-        except GrokAuthError:
-            if not self._enable_browser_fallback:
-                raise
-            browser = await self._get_browser_client()
-            return await browser.like_post(post_id)
+        """
+        Give a thumbs-up to a post (browser only).
 
-    async def unlike_post(self, post_id: str) -> bool:
-        """Unlike a post (HTTP first, browser fallback on Cloudflare)."""
-        try:
-            return await self._http_client.unlike_post(post_id)
-        except GrokAuthError:
-            if not self._enable_browser_fallback:
-                raise
-            browser = await self._get_browser_client()
-            return await browser.unlike_post(post_id)
+        Note: This is different from favorite_post() which saves to favorites.
+        This is the "赞" (Like/thumbs up) action.
+
+        Args:
+            post_id: Post UUID to like
+
+        Returns:
+            True if successful
+        """
+        browser = await self._get_browser_client()
+        return await browser.like_post(post_id)
+
+    async def dislike_post(self, post_id: str) -> bool:
+        """
+        Give a thumbs-down to a post (browser only).
+
+        Args:
+            post_id: Post UUID to dislike
+
+        Returns:
+            True if successful
+        """
+        browser = await self._get_browser_client()
+        return await browser.dislike_post(post_id)
+
+    # =========================================================================
+    # Video APIs
+    # =========================================================================
 
     async def delete_video(self, video_id: str) -> bool:
         """
-        Delete a child video via browser UI.
-
-        This method always uses browser (NodriverClient) because there's no
-        safe REST API for deleting individual videos.
+        Delete a child video (browser only).
 
         Args:
             video_id: The child video UUID to delete
@@ -2045,7 +2074,44 @@ class SmartGrokClient:
             True if deletion was successful
         """
         browser = await self._get_browser_client()
-        return await browser.delete_video_via_ui(video_id)
+        return await browser.delete_video(video_id)
+
+    async def upgrade_video(self, video_id: str) -> bool:
+        """
+        Upgrade a video to HD quality (browser only).
+
+        Args:
+            video_id: The video UUID to upgrade
+
+        Returns:
+            True if upgrade was initiated successfully
+        """
+        browser = await self._get_browser_client()
+        return await browser.upgrade_video(video_id)
+
+    # =========================================================================
+    # Image APIs
+    # =========================================================================
+
+    async def edit_image(
+        self, post_id: str, edit_prompt: str, timeout: int = 60
+    ) -> "ImageEditResult":
+        """
+        Edit an image to generate new variations (browser only).
+
+        Each edit generates 2 images. Some may be moderated (blocked).
+
+        Args:
+            post_id: The post UUID (parent image)
+            edit_prompt: The edit instruction (e.g., "add sunglasses")
+            timeout: Max seconds to wait for generation (default 60)
+
+        Returns:
+            ImageEditResult with image URLs and moderation info
+        """
+
+        browser = await self._get_browser_client()
+        return await browser.edit_image(post_id, edit_prompt, timeout)
 
     async def create_video(
         self,

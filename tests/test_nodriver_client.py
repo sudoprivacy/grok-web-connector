@@ -454,13 +454,13 @@ class TestNodriverClientUIMenuOperations:
             await client._click_confirm_button("NonExistent")
 
     @pytest.mark.asyncio
-    async def test_delete_video_via_ui_success(self, client: NodriverClient):
-        """delete_video_via_ui deletes video through menu."""
+    async def test_delete_video_success(self, client: NodriverClient):
+        """delete_video deletes video through menu."""
         client._open_post_menu = AsyncMock()
         client._click_menu_item = AsyncMock()
         client._click_confirm_button = AsyncMock()
 
-        result = await client.delete_video_via_ui("video-123")
+        result = await client.delete_video("video-123")
 
         assert result is True
         client._open_post_menu.assert_called_once_with("video-123")
@@ -468,67 +468,67 @@ class TestNodriverClientUIMenuOperations:
         client._click_confirm_button.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_delete_video_via_ui_returns_true_on_404(self, client: NodriverClient):
-        """delete_video_via_ui returns True when video already deleted (404)."""
+    async def test_delete_video_returns_true_on_404(self, client: NodriverClient):
+        """delete_video returns True when video already deleted (404)."""
         from grok_web.exceptions import GrokAPIError
 
         client._open_post_menu = AsyncMock(side_effect=GrokAPIError("Post not found (404)"))
 
-        result = await client.delete_video_via_ui("deleted-video")
+        result = await client.delete_video("deleted-video")
 
         assert result is True
 
     @pytest.mark.asyncio
-    async def test_save_post_via_ui_success(self, client: NodriverClient):
-        """save_post_via_ui saves post through menu."""
+    async def test_favorite_post_browser_success(self, client: NodriverClient):
+        """_favorite_post_browser saves post through menu."""
         client._open_post_menu = AsyncMock()
         client._click_menu_item = AsyncMock()
 
-        result = await client.save_post_via_ui("post-123")
+        result = await client._favorite_post_browser("post-123")
 
         assert result is True
         client._click_menu_item.assert_called_once_with("保存", "Save")
 
     @pytest.mark.asyncio
-    async def test_unsave_post_via_ui_success(self, client: NodriverClient):
-        """unsave_post_via_ui unsaves post through menu."""
+    async def test_unfavorite_post_browser_success(self, client: NodriverClient):
+        """_unfavorite_post_browser unsaves post through menu."""
         client._open_post_menu = AsyncMock()
         client._click_menu_item = AsyncMock()
 
-        result = await client.unsave_post_via_ui("post-123")
+        result = await client._unfavorite_post_browser("post-123")
 
         assert result is True
         client._click_menu_item.assert_called_once_with("取消保存", "Unsave")
 
     @pytest.mark.asyncio
-    async def test_like_post_via_ui_success(self, client: NodriverClient):
-        """like_post_via_ui likes post through menu."""
+    async def test_like_post_success(self, client: NodriverClient):
+        """like_post gives thumbs-up through menu."""
         client._open_post_menu = AsyncMock()
         client._click_menu_item = AsyncMock()
 
-        result = await client.like_post_via_ui("post-123")
+        result = await client.like_post("post-123")
 
         assert result is True
         client._click_menu_item.assert_called_once_with("赞", "Like")
 
     @pytest.mark.asyncio
-    async def test_dislike_post_via_ui_success(self, client: NodriverClient):
-        """dislike_post_via_ui dislikes post through menu."""
+    async def test_dislike_post_success(self, client: NodriverClient):
+        """dislike_post gives thumbs-down through menu."""
         client._open_post_menu = AsyncMock()
         client._click_menu_item = AsyncMock()
 
-        result = await client.dislike_post_via_ui("post-123")
+        result = await client.dislike_post("post-123")
 
         assert result is True
         client._click_menu_item.assert_called_once_with("踩", "Dislike")
 
     @pytest.mark.asyncio
-    async def test_upgrade_video_via_ui_success(self, client: NodriverClient):
-        """upgrade_video_via_ui upgrades video through menu."""
+    async def test_upgrade_video_success(self, client: NodriverClient):
+        """upgrade_video upgrades video through menu."""
         client._open_post_menu = AsyncMock()
         client._click_menu_item = AsyncMock()
 
-        result = await client.upgrade_video_via_ui("video-123")
+        result = await client.upgrade_video("video-123")
 
         assert result is True
         client._click_menu_item.assert_called_once_with("升级视频", "Upgrade video")

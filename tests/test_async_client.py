@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from grok_web import AsyncClient
+from grok_web.client import AsyncClient
 from grok_web.exceptions import GrokAPIError, GrokAuthError, GrokNotFoundError
 from grok_web.models import GrokCookies, PostDetails, PostSummary
 
@@ -470,8 +470,8 @@ class TestAsyncClientValidateAuth:
         assert result is False
 
 
-class TestAsyncClientLikeUnlike:
-    """Tests for async like_post and unlike_post methods."""
+class TestAsyncClientFavoriteUnfavorite:
+    """Tests for async favorite_post and unfavorite_post methods."""
 
     @pytest.fixture
     def mock_client(self, mock_cookies: GrokCookies):
@@ -482,25 +482,25 @@ class TestAsyncClientLikeUnlike:
         return client
 
     @pytest.mark.asyncio
-    async def test_like_post_success(self, mock_client: AsyncClient):
-        """like_post returns True on success."""
+    async def test_favorite_post_success(self, mock_client: AsyncClient):
+        """favorite_post returns True on success."""
         mock_response = AsyncMock()
         mock_response.status = 200
         mock_response.json = AsyncMock(return_value={})
         mock_client._api_context.post = AsyncMock(return_value=mock_response)
 
-        result = await mock_client.like_post("post-id-123")
+        result = await mock_client.favorite_post("post-id-123")
         assert result is True
 
     @pytest.mark.asyncio
-    async def test_unlike_post_success(self, mock_client: AsyncClient):
-        """unlike_post returns True on success."""
+    async def test_unfavorite_post_success(self, mock_client: AsyncClient):
+        """unfavorite_post returns True on success."""
         mock_response = AsyncMock()
         mock_response.status = 200
         mock_response.json = AsyncMock(return_value={})
         mock_client._api_context.post = AsyncMock(return_value=mock_response)
 
-        result = await mock_client.unlike_post("post-id-123")
+        result = await mock_client.unfavorite_post("post-id-123")
         assert result is True
 
 

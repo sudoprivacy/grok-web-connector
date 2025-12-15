@@ -485,17 +485,17 @@ class SyncClientBase(ResponseParser, ABC):
         )
 
     # =========================================================================
-    # API 6: like_post()
+    # API 6: favorite_post()
     # =========================================================================
 
-    def like_post(self, post_id: str) -> bool:
+    def favorite_post(self, post_id: str) -> bool:
         """
-        Like a post to save it to favorites.
+        Add a post to favorites (save it).
 
         This is the ONLY way to keep posts accessible long-term in Grok Imagine.
 
         Args:
-            post_id: Post UUID to like
+            post_id: Post UUID to favorite
 
         Returns:
             True if successful
@@ -504,17 +504,17 @@ class SyncClientBase(ResponseParser, ABC):
         return True
 
     # =========================================================================
-    # API 7: unlike_post()
+    # API 7: unfavorite_post()
     # =========================================================================
 
-    def unlike_post(self, post_id: str) -> bool:
+    def unfavorite_post(self, post_id: str) -> bool:
         """
-        Unlike a post to remove it from favorites.
+        Remove a post from favorites.
 
-        WARNING: This effectively deletes the post from your view.
+        WARNING: This effectively removes the post from your saved collection.
 
         Args:
-            post_id: Post UUID to unlike
+            post_id: Post UUID to unfavorite
 
         Returns:
             True if successful
@@ -850,15 +850,15 @@ class AsyncClientBase(ResponseParser, ABC):
         )
 
     # =========================================================================
-    # API 6: like_post()
+    # API 6: favorite_post()
     # =========================================================================
 
-    async def like_post(self, post_id: str) -> bool:
+    async def favorite_post(self, post_id: str) -> bool:
         """
-        Like a post to save it to favorites (async).
+        Add a post to favorites (save it).
 
         Args:
-            post_id: Post UUID to like
+            post_id: Post UUID to favorite
 
         Returns:
             True if successful
@@ -867,15 +867,15 @@ class AsyncClientBase(ResponseParser, ABC):
         return True
 
     # =========================================================================
-    # API 7: unlike_post()
+    # API 7: unfavorite_post()
     # =========================================================================
 
-    async def unlike_post(self, post_id: str) -> bool:
+    async def unfavorite_post(self, post_id: str) -> bool:
         """
-        Unlike a post to remove it from favorites (async).
+        Remove a post from favorites.
 
         Args:
-            post_id: Post UUID to unlike
+            post_id: Post UUID to unfavorite
 
         Returns:
             True if successful

@@ -1,104 +1,82 @@
 """
 Grok Web Connector - Python client for Grok Imagine web API.
 
-Quick Start (Recommended)
-=========================
-Use SmartGrokClient via get_client() for best performance:
+Quick Start
+===========
+Use get_client() for all Grok API operations:
 
     from grok_web import get_client
 
-    # All operations work out of the box - Chrome auto-launches if needed!
     async with get_client() as client:
-        posts = await client.list_posts()  # HTTP (fast)
-        video = await client.create_video(post_id, preset="fun")  # Auto browser fallback
+        # Read operations (HTTP - fast)
+        posts = await client.list_posts()
+        details = await client.get_post_details(post_id)
 
-SmartGrokClient advantages:
-- HTTP for read operations (fast, no browser overhead)
-- Auto-launches isolated Chrome when needed (no manual setup!)
-- Browser stays open between calls for maximum speed
-- Lazy browser initialization (only when video creation is blocked)
+        # Favorite operations (HTTP + browser fallback)
+        await client.favorite_post(post_id)
+        await client.unfavorite_post(post_id)
 
-Client Implementations
-======================
-1. SmartGrokClient (Recommended - use via get_client())
-   - HTTP for reads, auto browser fallback when blocked
-   - Best of both worlds: speed + reliability
-   - Chrome auto-launches if needed (isolated profile)
-   - Use: async with get_client() as client:
+        # Social operations (browser)
+        await client.like_post(post_id)      # Thumbs up
+        await client.dislike_post(post_id)   # Thumbs down
 
-2. NodriverClient (Direct browser control)
-   - Full browser automation via Chrome DevTools Protocol
-   - Use when you need direct browser access
-   - Use: async with NodriverClient(port=9222) as client:
+        # Video operations
+        video = await client.create_video(post_id, preset="fun")
+        await client.delete_video(video_id)
+        await client.upgrade_video(video_id)
 
-3. BrowserWorkerPool (Parallel processing)
-   - Multiple concurrent browser workers
-   - Job queue with progress persistence
-   - Use: async with BrowserWorkerPool(num_workers=3) as pool:
+        # Image operations (browser)
+        result = await client.edit_image(post_id, "add sunglasses")
 
-Factory Functions
-=================
-get_client(browser_host, browser_port, ...)  -> SmartGrokClient (recommended)
-get_sync_client(...)                         -> PlaywrightClient or GrokClient
+Unified API
+===========
+All operations available through get_client():
 
-Core APIs
-=========
-Read APIs (via HTTP - fast):
-1. list_posts()              - List liked posts (default) or all public posts
-2. get_post_details()        - Get full details for a specific post
-3. get_asset_file_size()     - Get file size from assets.grok.com URL
-4. validate_auth()           - Check if authentication is valid
-5. match_local_video()       - Match local file to web video
+Read Operations (HTTP - fast):
+- list_posts()           - List saved posts or public feed
+- get_post_details()     - Get full post details with children
+- get_asset_file_size()  - Get file size from assets.grok.com
+- validate_auth()        - Check if authentication is valid
+- match_local_video()    - Match local file to web video
 
-Write APIs:
-6. like_post()               - Save post to favorites
-7. unlike_post()             - Remove post from favorites
-8. create_video()            - Generate video (HTTP first, browser fallback)
-9. create_video_from_image() - Direct API call (may be blocked with 403)
+Favorite Operations (HTTP + browser fallback on 403):
+- favorite_post()        - Add post to favorites (save)
+- unfavorite_post()      - Remove from favorites
 
-UI Menu Operations (NodriverClient only):
-10. delete_video_via_ui()    - Delete a video via UI click
-11. save_post_via_ui()       - Save post to favorites (toggle)
-12. unsave_post_via_ui()     - Remove from favorites
-13. like_post_via_ui()       - Like a post
-14. dislike_post_via_ui()    - Dislike a post
-15. upgrade_video_via_ui()   - Convert non-HD video to HD
-16. edit_image_via_ui()      - Edit image to generate variations (returns ImageEditResult)
-17. get_menu_items()         - List available menu options
+Social Operations (browser only):
+- like_post()            - Give thumbs up
+- dislike_post()         - Give thumbs down
+
+Video Operations:
+- create_video()         - Generate video (HTTP + browser fallback)
+- delete_video()         - Delete a child video (browser)
+- upgrade_video()        - Upgrade to HD quality (browser)
+
+Image Operations (browser only):
+- edit_image()           - Edit image to generate variations
 
 Parallel Processing
 ===================
-BrowserWorkerPool - for concurrent video generation with multiple Chrome instances:
+BrowserWorkerPool for concurrent operations with multiple Chrome instances:
 
-    from grok_web.pool import BrowserWorkerPool
+    from grok_web import BrowserWorkerPool
 
-    async with BrowserWorkerPool(num_workers=3, state_file="progress.json") as pool:
-        # Submit jobs
-        for command in ["Orbit", "Pan Left", "Static Shot"]:
-            await pool.submit("create_video", post_id="abc123", adjustment_prompt=command)
-
-        # Wait for all
+    async with BrowserWorkerPool(num_workers=3) as pool:
+        await pool.submit("create_video", post_id="abc", adjustment_prompt="Orbit")
+        await pool.submit("create_video", post_id="abc", adjustment_prompt="Pan Left")
         results = await pool.wait_all()
 
-Features:
-- Multiple concurrent workers on separate Chrome ports
-- Dynamic scaling: add/remove workers at runtime
-- Progress persistence: resume after restart
-- Graceful shutdown: complete current tasks before exit
+Task types: create_video, favorite_post, unfavorite_post, like_post,
+dislike_post, delete_video, upgrade_video, edit_image, list_posts,
+get_post_details
 
-Last updated: 2025-12-14
+Last updated: 2025-12-15
 """
 
 from pathlib import Path
 
 from .auth import load_cookies, save_cookies
-from .client import (
-    AsyncClient,
-    GrokClient,
-    NodriverClient,
-    PlaywrightClient,
-    SmartGrokClient,
-)
+from .client import SmartGrokClient
 from .exceptions import (
     GrokAPIError,
     GrokAuthError,
@@ -119,7 +97,7 @@ from .models import (
 )
 from .pool import BrowserWorkerPool
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 
 def get_client(
@@ -130,36 +108,27 @@ def get_client(
     headless: bool = False,
 ) -> SmartGrokClient:
     """
-    Get the recommended async client for Grok API.
+    Get the Grok API client.
 
-    Returns SmartGrokClient which uses HTTP for read operations and
-    lazy browser initialization for video creation (when blocked).
+    This is the recommended entry point for all Grok operations.
+    Uses HTTP for fast read operations and automatically falls back
+    to browser when needed (e.g., video creation blocked by 403).
 
     Args:
         cookies: Pre-loaded GrokCookies (optional, loads from config if None)
         config_path: Path to config file (default: ~/.grok-config.json)
-        browser_host: Chrome remote debugging host (e.g., "127.0.0.1")
-                      Required for video creation fallback.
-        browser_port: Chrome remote debugging port (e.g., 9222)
-                      Required for video creation fallback.
+        browser_host: Chrome debugging host (optional, auto-launches if not set)
+        browser_port: Chrome debugging port (optional, auto-launches if not set)
         headless: Run browser in headless mode (default: False)
 
     Returns:
-        SmartGrokClient instance.
+        Client instance with all API methods.
 
-    Example (Read-only operations - no browser needed):
+    Example:
         async with get_client() as client:
-            posts = await client.list_posts()  # HTTP (fast)
-            result = await client.match_local_video(path)  # HTTP (fast)
-
-    Example (Video creation with browser fallback):
-        # Terminal 1: Start Chrome once
-        # /Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome --remote-debugging-port=9222
-
-        # Python: HTTP for reads, browser fallback for video
-        async with get_client(browser_host="127.0.0.1", browser_port=9222) as client:
-            posts = await client.list_posts()  # HTTP (fast)
-            video = await client.create_video(post_id, preset="fun")  # Browser fallback
+            posts = await client.list_posts()
+            await client.favorite_post(posts[0].id)
+            video = await client.create_video(posts[0].id, preset="fun")
     """
     return SmartGrokClient(
         cookies=cookies,
@@ -170,48 +139,10 @@ def get_client(
     )
 
 
-def get_sync_client(
-    cookies: GrokCookies | None = None,
-    config_path: Path | str | None = None,
-) -> PlaywrightClient | GrokClient:
-    """
-    Get the best available sync client for Grok API.
-
-    Args:
-        cookies: Pre-loaded GrokCookies (optional, loads from config if None)
-        config_path: Path to config file (default: ~/.grok-config.json)
-
-    Returns:
-        PlaywrightClient if playwright is available, otherwise GrokClient.
-
-    Example:
-        with get_sync_client() as client:
-            posts = client.list_posts()
-
-    Note:
-        For video generation, prefer get_client() (async) with persistent Chrome
-        for better Cloudflare handling and faster performance.
-    """
-    # Try PlaywrightClient first (more reliable)
-    try:
-        from playwright.sync_api import sync_playwright  # noqa: F401
-
-        return PlaywrightClient(cookies=cookies, config_path=config_path)
-    except ImportError:
-        pass
-
-    # Fall back to GrokClient (curl_cffi)
-    return GrokClient(cookies=cookies, config_path=config_path)
-
-
 __all__ = [
-    # Factory functions (recommended)
+    # Factory function (main entry point)
     "get_client",
-    "get_sync_client",
-    # Clients
-    "SmartGrokClient",  # Recommended: HTTP + browser fallback
-    "NodriverClient",  # Direct browser automation
-    # Worker Pool
+    # Worker Pool (for parallel processing)
     "BrowserWorkerPool",
     # Models
     "PostSummary",
@@ -233,8 +164,3 @@ __all__ = [
     "load_cookies",
     "save_cookies",
 ]
-
-# Internal clients (not recommended for direct use):
-# - AsyncClient: HTTP-only, no browser fallback. Used internally by SmartGrokClient.
-# - PlaywrightClient: Sync HTTP, no fallback. Used by get_sync_client().
-# - GrokClient: Sync curl_cffi, no fallback. Used by get_sync_client().

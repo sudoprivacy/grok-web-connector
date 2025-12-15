@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from grok_web import PlaywrightClient
+from grok_web.client import PlaywrightClient
 from grok_web.exceptions import GrokAPIError, GrokAuthError, GrokNotFoundError
 from grok_web.models import GrokCookies, PostSummary
 

@@ -5,7 +5,7 @@ Python client library for interacting with Grok Imagine web API.
 ## Features
 
 - **SmartGrokClient** - Recommended client with HTTP-first, browser-fallback strategy
-- **9 Core APIs** - list_posts, get_post_details, create_video, like/unlike, and more
+- **12 Core APIs** - list_posts, get_post_details, create_video, favorite/unfavorite, like/dislike, and more
 - **Auto Cloudflare bypass** - Browser fallback handles challenges automatically
 - **Video presets** - Normal, Fun, Spicy modes for video generation
 - Type-safe with Pydantic models
@@ -122,19 +122,45 @@ is_valid = await client.validate_auth()
 match = await client.match_local_video("/path/to/video.mp4")
 ```
 
-### Write APIs
+### Favorite/Unfavorite APIs (save to collection)
 
 ```python
-# Like/unlike posts
-await client.like_post(post_id)
-await client.unlike_post(post_id)
+# Favorite/unfavorite posts (add/remove from favorites)
+await client.favorite_post(post_id)    # HTTP first, browser fallback
+await client.unfavorite_post(post_id)  # HTTP first, browser fallback
+```
 
+### Social APIs (thumbs up/down)
+
+```python
+# Like/dislike posts (thumbs up/down - browser only)
+await client.like_post(post_id)     # Give thumbs up
+await client.dislike_post(post_id)  # Give thumbs down
+```
+
+### Video APIs
+
+```python
 # Create video with preset
 result = await client.create_video(
     parent_post_id="abc-123",
     preset="fun",  # "normal", "fun", or "spicy"
 )
 print(result.video_id)
+
+# Upgrade video to HD (browser only)
+await client.upgrade_video(video_id)
+
+# Delete a video (browser only)
+await client.delete_video(video_id)
+```
+
+### Image APIs
+
+```python
+# Edit image to generate variations (browser only)
+result = await client.edit_image(post_id, "add sunglasses")
+print(result.image_urls)
 ```
 
 ## Video Presets
@@ -174,33 +200,16 @@ See **[grok-imagine-expert/docs/CAMERA_CONTROL.md](https://github.com/user/grok-
 
 ## Client Options
 
-### SmartGrokClient (Recommended)
+### Using get_client() (Recommended)
 
 ```python
-from grok_web import get_client, SmartGrokClient
+from grok_web import get_client
 
-# Via factory function
-client = get_client(browser_host="127.0.0.1", browser_port=9222)
-
-# Or directly
-client = SmartGrokClient(browser_host="127.0.0.1", browser_port=9222)
-```
-
-### Other Clients (Advanced)
-
-```python
-from grok_web import NodriverClient, AsyncClient, GrokClient
-
-# Full browser automation (all ops go through browser)
-async with NodriverClient(host="127.0.0.1", port=9222) as client:
-    ...
-
-# Playwright HTTP client (requires valid cf_clearance)
-async with AsyncClient() as client:
-    ...
-
-# curl_cffi sync client (may get 403)
-client = GrokClient()
+# Via factory function (recommended entry point)
+async with get_client(browser_host="127.0.0.1", browser_port=9222) as client:
+    posts = await client.list_posts()
+    await client.favorite_post(posts[0].id)
+    video = await client.create_video(posts[0].id, preset="fun")
 ```
 
 ## Error Handling

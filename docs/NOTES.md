@@ -11,7 +11,7 @@
 | Layer | What | Automatable? |
 |-------|------|--------------|
 | **WebSocket** | txt2img generation, gallery scroll | ❌ Need Playwright |
-| **REST API** | Post management, img2vid, like/unlike | ✅ Pure Python |
+| **REST API** | Post management, img2vid, favorite/unfavorite | ✅ Pure Python |
 
 **Key insight**: Only `txt2img` requires browser automation. Everything else is REST API.
 
@@ -28,8 +28,8 @@
 | 3 | `get_asset_file_size()` | HEAD `assets.grok.com/...` | ✅ |
 | 4 | `validate_auth()` | (uses list_posts) | ✅ |
 | 5 | `match_local_video()` | (uses get_post_details + HEAD) | ✅ |
-| 6 | `like_post()` | POST `/rest/media/post/like` | ✅ |
-| 7 | `unlike_post()` | POST `/rest/media/post/unlike` | ✅ |
+| 6 | `favorite_post()` | POST `/rest/media/post/like` | ✅ |
+| 7 | `unfavorite_post()` | POST `/rest/media/post/unlike` | ✅ |
 | 8 | `create_video_from_image()` | POST `/rest/app-chat/conversations/new` | ✅ |
 
 ### Not Yet Implemented
@@ -116,14 +116,14 @@ From `get_post_details()` response:
 | `MEDIA_POST_ACTION_TYPE_DELETE` | ✅ | ✅ | 删除 |
 | `MEDIA_POST_ACTION_TYPE_UPSCALE_VIDEO` | ❌ | ✅ | 仅视频有 |
 
-### Child Like 的坑！
+### Child Favorite 的坑！
 
-**Child 没有独立的 like 状态**，点 Child 的 LIKE/UNLIKE 实际操作的是 Parent！
+**Child 没有独立的 favorite 状态**，点 Child 的 LIKE/UNLIKE 实际操作的是 Parent！
 
 | 操作 | 效果 |
 |------|------|
-| 点 Child 的 Unlike | **整个 post（含所有 children）从 favorites 消失！** |
-| 只想删除某个视频 | 应该用 **DELETE**，不是 UNLIKE |
+| 点 Child 的 Unfavorite | **整个 post（含所有 children）从 favorites 消失！** |
+| 只想删除某个视频 | 应该用 **DELETE**，不是 UNFAVORITE |
 
 ### Thumbnail URLs
 
@@ -189,18 +189,18 @@ POST /rest/app-chat/conversations/new
 
 ---
 
-## Favorites = Like System
+## Favorites System
 
-**CRITICAL**: Like/Unlike is the ONLY persistence mechanism.
+**CRITICAL**: Favorite/Unfavorite is the ONLY persistence mechanism.
 
 | Action | Effect |
 |--------|--------|
-| `like_post(id)` | Saves to `/imagine/favorites`, persists indefinitely |
-| `unlike_post(id)` | Removes from all views, **irreversible from UI** |
+| `favorite_post(id)` | Saves to `/imagine/favorites`, persists indefinitely |
+| `unfavorite_post(id)` | Removes from all views, **irreversible from UI** |
 
-- `list_posts()` default returns liked posts only
+- `list_posts()` default returns favorited posts only
 - `list_posts(source=None)` returns all public posts (not just yours)
-- Posts must be liked to appear in favorites
+- Posts must be favorited to appear in favorites
 - `userInteractionStatus.likeStatus` indicates current state
 
 ---

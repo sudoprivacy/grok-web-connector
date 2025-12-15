@@ -634,70 +634,70 @@ class TestBrowserWorkerPoolExecuteJob:
         return worker
 
     @pytest.mark.asyncio
-    async def test_execute_delete_video_via_ui(self, pool, mock_worker):
-        """_execute_job handles delete_video_via_ui task."""
-        mock_worker.client.delete_video_via_ui = AsyncMock(return_value=True)
-        job = Job(task_type="delete_video_via_ui", args=("video-123",))
+    async def test_execute_delete_video(self, pool, mock_worker):
+        """_execute_job handles delete_video task."""
+        mock_worker.client.delete_video = AsyncMock(return_value=True)
+        job = Job(task_type="delete_video", args=("video-123",))
 
         result = await pool._execute_job(mock_worker, job)
 
         assert result is True
-        mock_worker.client.delete_video_via_ui.assert_called_once_with("video-123")
+        mock_worker.client.delete_video.assert_called_once_with("video-123")
 
     @pytest.mark.asyncio
-    async def test_execute_save_post_via_ui(self, pool, mock_worker):
-        """_execute_job handles save_post_via_ui task."""
-        mock_worker.client.save_post_via_ui = AsyncMock(return_value=True)
-        job = Job(task_type="save_post_via_ui", args=("post-123",))
+    async def test_execute_favorite_post(self, pool, mock_worker):
+        """_execute_job handles favorite_post task."""
+        mock_worker.client.favorite_post = AsyncMock(return_value=True)
+        job = Job(task_type="favorite_post", args=("post-123",))
 
         result = await pool._execute_job(mock_worker, job)
 
         assert result is True
-        mock_worker.client.save_post_via_ui.assert_called_once_with("post-123")
+        mock_worker.client.favorite_post.assert_called_once_with("post-123")
 
     @pytest.mark.asyncio
-    async def test_execute_unsave_post_via_ui(self, pool, mock_worker):
-        """_execute_job handles unsave_post_via_ui task."""
-        mock_worker.client.unsave_post_via_ui = AsyncMock(return_value=True)
-        job = Job(task_type="unsave_post_via_ui", args=("post-123",))
+    async def test_execute_unfavorite_post(self, pool, mock_worker):
+        """_execute_job handles unfavorite_post task."""
+        mock_worker.client.unfavorite_post = AsyncMock(return_value=True)
+        job = Job(task_type="unfavorite_post", args=("post-123",))
 
         result = await pool._execute_job(mock_worker, job)
 
         assert result is True
-        mock_worker.client.unsave_post_via_ui.assert_called_once_with("post-123")
+        mock_worker.client.unfavorite_post.assert_called_once_with("post-123")
 
     @pytest.mark.asyncio
-    async def test_execute_like_post_via_ui(self, pool, mock_worker):
-        """_execute_job handles like_post_via_ui task."""
-        mock_worker.client.like_post_via_ui = AsyncMock(return_value=True)
-        job = Job(task_type="like_post_via_ui", args=("post-123",))
+    async def test_execute_like_post(self, pool, mock_worker):
+        """_execute_job handles like_post task (thumbs up)."""
+        mock_worker.client.like_post = AsyncMock(return_value=True)
+        job = Job(task_type="like_post", args=("post-123",))
 
         result = await pool._execute_job(mock_worker, job)
 
         assert result is True
-        mock_worker.client.like_post_via_ui.assert_called_once_with("post-123")
+        mock_worker.client.like_post.assert_called_once_with("post-123")
 
     @pytest.mark.asyncio
-    async def test_execute_dislike_post_via_ui(self, pool, mock_worker):
-        """_execute_job handles dislike_post_via_ui task."""
-        mock_worker.client.dislike_post_via_ui = AsyncMock(return_value=True)
-        job = Job(task_type="dislike_post_via_ui", args=("post-123",))
+    async def test_execute_dislike_post(self, pool, mock_worker):
+        """_execute_job handles dislike_post task (thumbs down)."""
+        mock_worker.client.dislike_post = AsyncMock(return_value=True)
+        job = Job(task_type="dislike_post", args=("post-123",))
 
         result = await pool._execute_job(mock_worker, job)
 
         assert result is True
-        mock_worker.client.dislike_post_via_ui.assert_called_once_with("post-123")
+        mock_worker.client.dislike_post.assert_called_once_with("post-123")
 
     @pytest.mark.asyncio
-    async def test_execute_upgrade_video_via_ui(self, pool, mock_worker):
-        """_execute_job handles upgrade_video_via_ui task."""
-        mock_worker.client.upgrade_video_via_ui = AsyncMock(return_value=True)
-        job = Job(task_type="upgrade_video_via_ui", args=("video-123",))
+    async def test_execute_upgrade_video(self, pool, mock_worker):
+        """_execute_job handles upgrade_video task."""
+        mock_worker.client.upgrade_video = AsyncMock(return_value=True)
+        job = Job(task_type="upgrade_video", args=("video-123",))
 
         result = await pool._execute_job(mock_worker, job)
 
         assert result is True
-        mock_worker.client.upgrade_video_via_ui.assert_called_once_with("video-123")
+        mock_worker.client.upgrade_video.assert_called_once_with("video-123")
 
     @pytest.mark.asyncio
     async def test_execute_unknown_task_raises(self, pool, mock_worker):
@@ -711,8 +711,8 @@ class TestBrowserWorkerPoolExecuteJob:
     async def test_execute_with_ui_delay(self, pool, mock_worker):
         """_execute_job applies ui_delay and restores it after."""
         mock_worker.client._ui_delay = 1.0
-        mock_worker.client.delete_video_via_ui = AsyncMock(return_value=True)
-        job = Job(task_type="delete_video_via_ui", args=("video-123",), kwargs={"ui_delay": 2.0})
+        mock_worker.client.delete_video = AsyncMock(return_value=True)
+        job = Job(task_type="delete_video", args=("video-123",), kwargs={"ui_delay": 2.0})
 
         await pool._execute_job(mock_worker, job)
 

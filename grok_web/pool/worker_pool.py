@@ -621,32 +621,26 @@ class BrowserWorkerPool:
                 post = await client.get_post_details(*args, **kwargs)
                 return post._raw_data if hasattr(post, "_raw_data") else post
 
+            elif task_type == "favorite_post":
+                return await client.favorite_post(*args, **kwargs)
+
+            elif task_type == "unfavorite_post":
+                return await client.unfavorite_post(*args, **kwargs)
+
             elif task_type == "like_post":
                 return await client.like_post(*args, **kwargs)
 
-            elif task_type == "unlike_post":
-                return await client.unlike_post(*args, **kwargs)
+            elif task_type == "dislike_post":
+                return await client.dislike_post(*args, **kwargs)
 
-            elif task_type == "delete_video_via_ui":
-                return await client.delete_video_via_ui(*args, **kwargs)
+            elif task_type == "delete_video":
+                return await client.delete_video(*args, **kwargs)
 
-            elif task_type == "save_post_via_ui":
-                return await client.save_post_via_ui(*args, **kwargs)
+            elif task_type == "upgrade_video":
+                return await client.upgrade_video(*args, **kwargs)
 
-            elif task_type == "unsave_post_via_ui":
-                return await client.unsave_post_via_ui(*args, **kwargs)
-
-            elif task_type == "like_post_via_ui":
-                return await client.like_post_via_ui(*args, **kwargs)
-
-            elif task_type == "dislike_post_via_ui":
-                return await client.dislike_post_via_ui(*args, **kwargs)
-
-            elif task_type == "upgrade_video_via_ui":
-                return await client.upgrade_video_via_ui(*args, **kwargs)
-
-            elif task_type == "edit_image_via_ui":
-                result = await client.edit_image_via_ui(*args, **kwargs)
+            elif task_type == "edit_image":
+                result = await client.edit_image(*args, **kwargs)
                 return {
                     "post_id": result.post_id,
                     "edit_prompt": result.edit_prompt,

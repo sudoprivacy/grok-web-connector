@@ -135,17 +135,17 @@ class TestSmartGrokClientWriteAPIs:
     """Tests for SmartGrokClient write APIs."""
 
     @pytest.mark.asyncio
-    async def test_like_post_uses_http(self, mock_cookies: GrokCookies):
-        """like_post() uses HTTP client."""
+    async def test_favorite_post_uses_http(self, mock_cookies: GrokCookies):
+        """favorite_post() uses HTTP client first."""
         mock_http = AsyncMock()
-        mock_http.like_post = AsyncMock(return_value=True)
+        mock_http.favorite_post = AsyncMock(return_value=True)
 
         client = SmartGrokClient(cookies=mock_cookies)
         client._http_client = mock_http
 
-        result = await client.like_post("test-post-id")
+        result = await client.favorite_post("test-post-id")
 
-        mock_http.like_post.assert_called_once_with("test-post-id")
+        mock_http.favorite_post.assert_called_once_with("test-post-id")
         assert result is True
 
 
