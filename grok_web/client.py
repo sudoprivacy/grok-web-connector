@@ -755,20 +755,50 @@ class NodriverClient(AsyncClientBase):
         endpoint: str,
         json_data: dict | None = None,
     ) -> dict[str, Any]:
-        """Make authenticated request via browser fetch."""
+        """Make authenticated request via browser fetch.
+
+        Includes required headers that Grok expects:
+        - x-xai-request-id: UUID for request tracking
+        - x-statsig-id: for feature flags (from localStorage)
+        """
         import json as json_module
+        import uuid
 
         url = f"{self.BASE_URL}{endpoint}"
         payload_str = json_module.dumps(json_data) if json_data else "null"
 
+        # Generate request ID like the browser does
+        request_id = str(uuid.uuid4())
+
+        # Get statsig ID from localStorage, fallback to default
+        statsig_id = await self._tab.evaluate("""
+            (() => {
+                var keys = ['STATSIG_LOCAL_STORAGE_STABLE_ID', 'statsig_stable_id'];
+                for (var key of keys) {
+                    var val = localStorage.getItem(key);
+                    if (val) return val;
+                }
+                return '';
+            })()
+        """)
+        if not statsig_id:
+            statsig_id = GrokClient.DEFAULT_STATSIG_ID
+
         # Escape the payload for embedding in JS string
         payload_escaped = payload_str.replace("\\", "\\\\").replace("'", "\\'")
+
+        # Build headers matching browser behavior
+        headers_js = f"""{{
+            "Content-Type": "application/json",
+            "x-xai-request-id": "{request_id}",
+            "x-statsig-id": "{statsig_id}"
+        }}"""
 
         js_code = f"""
         (async () => {{
             const resp = await fetch("{url}", {{
                 method: "{method.upper()}",
-                headers: {{"Content-Type": "application/json"}},
+                headers: {headers_js},
                 body: '{payload_escaped}',
                 credentials: "include"
             }});
@@ -1135,21 +1165,30 @@ class NodriverClient(AsyncClientBase):
             raise GrokAPIError(f"Post {post_id} not found (404)")
 
         # Find and click the "..." menu button
+        # Note: aria-label varies by post type and language:
+        # - Image posts: "更多选项" / "More options"
+        # - Video posts: "Options"
         menu_btn = None
+        selectors = [
+            'button[aria-label="更多选项"][aria-haspopup="menu"]',
+            'button[aria-label="More options"][aria-haspopup="menu"]',
+            'button[aria-label="Options"][aria-haspopup="menu"]',
+            'button[aria-label="Options"]',  # fallback without haspopup
+        ]
         for _ in range(3):
-            try:
-                menu_btn = await self._tab.find(
-                    'button[aria-label="更多选项"][aria-haspopup="menu"], '
-                    'button[aria-label="More options"][aria-haspopup="menu"]'
-                )
-                if menu_btn:
-                    break
-            except Exception:
-                pass
+            for selector in selectors:
+                try:
+                    menu_btn = await self._tab.find(selector)
+                    if menu_btn:
+                        break
+                except Exception:
+                    pass
+            if menu_btn:
+                break
             await asyncio.sleep(2 * d)
 
         if menu_btn is None:
-            raise GrokAPIError("Could not find '...' menu button (更多选项)")
+            raise GrokAPIError("Could not find '...' menu button (Options/更多选项)")
 
         await menu_btn.scroll_into_view()
         await asyncio.sleep(0.5 * d)
@@ -1991,16 +2030,29 @@ class SmartGrokClient:
     # =========================================================================
 
     async def list_posts(
-        self, limit: int = 10, source: str = "favorites", include_raw_data: bool = False
+        self, limit: int = 10, source: str | None = "favorites", include_raw_data: bool = False
     ):
-        """List posts (HTTP first, browser fallback on Cloudflare)."""
+        """List posts (HTTP first, browser fallback on Cloudflare).
+
+        Args:
+            limit: Maximum number of posts to return
+            source: Filter by source type:
+                - "favorites": Your saved/favorited posts (default)
+                - None: All public posts
+            include_raw_data: Include raw API response in each PostSummary
+        """
+        # Map user-friendly source names to API values
+        api_source = source
+        if source == "favorites":
+            api_source = "MEDIA_POST_SOURCE_LIKED"
+
         try:
-            return await self._http_client.list_posts(limit, source, include_raw_data)
+            return await self._http_client.list_posts(limit, api_source, include_raw_data)
         except GrokAuthError:
             if not self._enable_browser_fallback:
                 raise
             browser = await self._get_browser_client()
-            return await browser.list_posts(limit, source, include_raw_data)
+            return await browser.list_posts(limit, api_source, include_raw_data)
 
     async def get_post_details(self, post_id: str):
         """Get post details (HTTP first, browser fallback on Cloudflare)."""
@@ -2067,8 +2119,10 @@ class SmartGrokClient:
         except GrokAuthError:
             if not self._enable_browser_fallback:
                 raise
+            # Use API via browser fetch (not UI clicking)
+            # UI method relies on client-side state which may not match server state
             browser = await self._get_browser_client()
-            return await browser._favorite_post_browser(post_id)
+            return await browser.favorite_post(post_id)
 
     async def unfavorite_post(self, post_id: str) -> bool:
         """
@@ -2087,8 +2141,10 @@ class SmartGrokClient:
         except GrokAuthError:
             if not self._enable_browser_fallback:
                 raise
+            # Use API via browser fetch (not UI clicking)
+            # UI method relies on client-side state which may not match server state
             browser = await self._get_browser_client()
-            return await browser._unfavorite_post_browser(post_id)
+            return await browser.unfavorite_post(post_id)
 
     # =========================================================================
     # Social APIs - Browser only (no HTTP API exists)

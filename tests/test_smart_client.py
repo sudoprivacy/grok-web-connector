@@ -89,7 +89,7 @@ class TestSmartGrokClientReadAPIs:
 
     @pytest.mark.asyncio
     async def test_list_posts_uses_http(self, mock_cookies: GrokCookies):
-        """list_posts() uses HTTP client."""
+        """list_posts() uses HTTP client and maps source parameter."""
         mock_http = AsyncMock()
         mock_http.list_posts = AsyncMock(return_value=[])
 
@@ -98,7 +98,8 @@ class TestSmartGrokClientReadAPIs:
 
         result = await client.list_posts(limit=5, source="favorites")
 
-        mock_http.list_posts.assert_called_once_with(5, "favorites", False)
+        # SmartGrokClient maps "favorites" to "MEDIA_POST_SOURCE_LIKED"
+        mock_http.list_posts.assert_called_once_with(5, "MEDIA_POST_SOURCE_LIKED", False)
         assert result == []
 
     @pytest.mark.asyncio
