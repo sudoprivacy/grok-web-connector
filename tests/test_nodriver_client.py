@@ -418,18 +418,26 @@ class TestNodriverClientUIMenuOperations:
     @pytest.mark.asyncio
     async def test_click_menu_item_success(self, client: NodriverClient):
         """_click_menu_item clicks menu item by text."""
-        client._tab.evaluate = AsyncMock(return_value="Save")
+        # Mock menu item element with .text property
+        mock_item = MagicMock()
+        mock_item.text = "Save"
+        mock_item.scroll_into_view = AsyncMock()
+        mock_item.mouse_click = AsyncMock()
+
+        client._tab.find_all = AsyncMock(return_value=[mock_item])
 
         result = await client._click_menu_item("Save", "保存")
 
         assert result is True
+        mock_item.mouse_click.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_click_menu_item_raises_when_not_found(self, client: NodriverClient):
         """_click_menu_item raises GrokAPIError when item not found."""
         from grok_web.exceptions import GrokAPIError
 
-        client._tab.evaluate = AsyncMock(return_value=None)
+        # Return empty list (no menu items found)
+        client._tab.find_all = AsyncMock(return_value=[])
 
         with pytest.raises(GrokAPIError, match="Could not find menu item"):
             await client._click_menu_item("NonExistent")
@@ -482,6 +490,7 @@ class TestNodriverClientUIMenuOperations:
     async def test_favorite_post_browser_success(self, client: NodriverClient):
         """_favorite_post_browser saves post through menu."""
         client._open_post_menu = AsyncMock()
+        client._is_post_favorited = AsyncMock(return_value=False)  # Not favorited
         client._click_menu_item = AsyncMock()
 
         result = await client._favorite_post_browser("post-123")
@@ -490,15 +499,40 @@ class TestNodriverClientUIMenuOperations:
         client._click_menu_item.assert_called_once_with("保存", "Save")
 
     @pytest.mark.asyncio
+    async def test_favorite_post_browser_already_favorited(self, client: NodriverClient):
+        """_favorite_post_browser skips click if already favorited."""
+        client._open_post_menu = AsyncMock()
+        client._is_post_favorited = AsyncMock(return_value=True)  # Already favorited
+        client._tab.evaluate = AsyncMock()  # For closing menu
+
+        result = await client._favorite_post_browser("post-123")
+
+        assert result is True
+        # Should not call _click_menu_item since already favorited
+
+    @pytest.mark.asyncio
     async def test_unfavorite_post_browser_success(self, client: NodriverClient):
         """_unfavorite_post_browser unsaves post through menu."""
         client._open_post_menu = AsyncMock()
+        client._is_post_favorited = AsyncMock(return_value=True)  # Is favorited
         client._click_menu_item = AsyncMock()
 
         result = await client._unfavorite_post_browser("post-123")
 
         assert result is True
         client._click_menu_item.assert_called_once_with("取消保存", "Unsave")
+
+    @pytest.mark.asyncio
+    async def test_unfavorite_post_browser_already_not_favorited(self, client: NodriverClient):
+        """_unfavorite_post_browser skips click if not favorited."""
+        client._open_post_menu = AsyncMock()
+        client._is_post_favorited = AsyncMock(return_value=False)  # Not favorited
+        client._tab.evaluate = AsyncMock()  # For closing menu
+
+        result = await client._unfavorite_post_browser("post-123")
+
+        assert result is True
+        # Should not call _click_menu_item since not favorited
 
     @pytest.mark.asyncio
     async def test_like_post_success(self, client: NodriverClient):

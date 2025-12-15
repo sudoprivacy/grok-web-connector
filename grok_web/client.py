@@ -1162,6 +1162,9 @@ class NodriverClient(AsyncClientBase):
         """
         Click a menu item by its text (supports multiple language options).
 
+        Uses nodriver's mouse_click() which works better than JS click()
+        for React/Radix menu items.
+
         Args:
             *text_options: One or more text strings to match (e.g., "Save", "保存")
 
@@ -1174,26 +1177,22 @@ class NodriverClient(AsyncClientBase):
         import asyncio
 
         d = self._ui_delay
-        text_list = list(text_options)
 
-        # Use JS to find and click the menu item
+        # Try to find and click the matching menu item
         for _ in range(3):
-            result = await self._tab.evaluate(f"""
-                (function() {{
-                    const textOptions = {text_list};
-                    const items = document.querySelectorAll('[role="menuitem"]');
-                    for (const item of items) {{
-                        const text = item.innerText.trim();
-                        if (textOptions.includes(text)) {{
-                            item.click();
-                            return text;
-                        }}
-                    }}
-                    return null;
-                }})()
-            """)
-            if result:
-                return True
+            # Get all menu items
+            items = await self._tab.find_all('[role="menuitem"]')
+
+            for item in items:
+                # Get text property (nodriver elements have a .text property)
+                item_text = item.text.strip() if item.text else ""
+
+                if item_text in text_options:
+                    await item.scroll_into_view()
+                    await asyncio.sleep(0.2 * d)
+                    await item.mouse_click()
+                    return True
+
             await asyncio.sleep(1 * d)
 
         raise GrokAPIError(f"Could not find menu item: {text_options}")
@@ -1277,18 +1276,57 @@ class NodriverClient(AsyncClientBase):
 
         return True
 
+    async def _is_post_favorited(self) -> bool:
+        """
+        Check if the current post is favorited by examining the menu item text.
+
+        Must be called after _open_post_menu().
+
+        Returns:
+            True if post is favorited (shows "取消保存"/"Unsave"), False otherwise
+        """
+        # Check if "Unsave" menu item exists (means post is favorited)
+        is_favorited = await self._tab.evaluate("""
+            (() => {
+                const items = document.querySelectorAll("[role='menuitem']");
+                for (const item of items) {
+                    const text = item.innerText.trim();
+                    if (text.includes('取消保存') || text.includes('Unsave')) {
+                        return true;
+                    }
+                }
+                return false;
+            })()
+        """)
+        return is_favorited
+
     async def _favorite_post_browser(self, post_id: str) -> bool:
         """
         Internal: Add post to favorites via browser UI (fallback for HTTP 403).
 
-        WARNING: If the post is already saved, this will UNSAVE it!
-        The button toggles between Save/Unsave.
+        This method is idempotent - if post is already favorited, it returns True
+        without clicking (which would unfavorite it).
+
+        Menu item states:
+        - Not favorited: "保存" (Save) with ♡
+        - Favorited: "取消保存" (Unsave) with ♥️
         """
         import asyncio
 
         d = self._ui_delay
 
         await self._open_post_menu(post_id)
+        # Wait for menu to fully render
+        await asyncio.sleep(1 * d)
+
+        # Check if already favorited (shows "Unsave")
+        if await self._is_post_favorited():
+            # Already favorited, close menu and return
+            await self._tab.evaluate("document.body.click()")
+            await asyncio.sleep(0.5 * d)
+            return True
+
+        # Not favorited, click "Save" to favorite
         await self._click_menu_item("保存", "Save")
         await asyncio.sleep(1 * d)
 
@@ -1297,12 +1335,30 @@ class NodriverClient(AsyncClientBase):
     async def _unfavorite_post_browser(self, post_id: str) -> bool:
         """
         Internal: Remove post from favorites via browser UI (fallback for HTTP 403).
+
+        This method is idempotent - if post is not favorited, it returns True
+        without clicking (which would favorite it).
+
+        Menu item states:
+        - Not favorited: "保存" (Save) with ♡
+        - Favorited: "取消保存" (Unsave) with ♥️
         """
         import asyncio
 
         d = self._ui_delay
 
         await self._open_post_menu(post_id)
+        # Wait for menu to fully render
+        await asyncio.sleep(1 * d)
+
+        # Check if not favorited (shows "Save" not "Unsave")
+        if not await self._is_post_favorited():
+            # Already not favorited, close menu and return
+            await self._tab.evaluate("document.body.click()")
+            await asyncio.sleep(0.5 * d)
+            return True
+
+        # Currently favorited, click "Unsave" to unfavorite
         await self._click_menu_item("取消保存", "Unsave")
         await asyncio.sleep(1 * d)
 
@@ -1988,11 +2044,17 @@ class SmartGrokClient:
 
     # =========================================================================
     # Favorite APIs - HTTP first, browser fallback on Cloudflare
+    #
+    # Note: The HTTP endpoint /rest/media/post/like is for favorites (Save).
+    # API terminology: "like" = "save/favorite" in UI
+    # This is different from like_post() which is thumbs-up (赞).
     # =========================================================================
 
     async def favorite_post(self, post_id: str) -> bool:
         """
         Add a post to favorites (HTTP first, browser fallback on 403).
+
+        Note: API uses "like" terminology for what UI shows as "Save/保存".
 
         Args:
             post_id: Post UUID to favorite
@@ -2011,6 +2073,8 @@ class SmartGrokClient:
     async def unfavorite_post(self, post_id: str) -> bool:
         """
         Remove a post from favorites (HTTP first, browser fallback on 403).
+
+        Note: API uses "unlike" terminology for what UI shows as "Unsave/取消保存".
 
         Args:
             post_id: Post UUID to unfavorite
