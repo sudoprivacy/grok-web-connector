@@ -1513,6 +1513,88 @@ class NodriverClient(AsyncClientBase):
 
         return items
 
+    async def download_video(self, video_url: str, output_path: Path) -> Path:
+        """
+        Download a video file using the browser's fetch API.
+
+        This method uses the browser context which has proper Cloudflare clearance,
+        making it more reliable than direct HTTP requests.
+
+        Args:
+            video_url: The full URL to the video file (media_url or hd_media_url)
+            output_path: Destination file path
+
+        Returns:
+            Path to the downloaded file
+
+        Raises:
+            GrokAPIError: If download fails
+        """
+        import asyncio
+        import base64
+        import json as json_module
+
+        # Ensure we're on grok.com (required for proper cookie context)
+        current_url = await self._tab.evaluate("window.location.href", await_promise=False)
+        if not current_url or "grok.com" not in str(current_url):
+            await self._tab.get(f"{self.BASE_URL}/imagine")
+            await asyncio.sleep(3)
+
+        # Add dl=1 parameter if not present
+        if "?" in video_url:
+            download_url = f"{video_url}&dl=1"
+        else:
+            download_url = f"{video_url}?dl=1"
+
+        # Use browser fetch to download with proper cookies/clearance
+        # Return as base64 to transfer binary data through evaluate
+        js_code = f"""
+        (async () => {{
+            try {{
+                const response = await fetch("{download_url}", {{
+                    credentials: 'include'
+                }});
+                if (!response.ok) {{
+                    return JSON.stringify({{
+                        "status": response.status,
+                        "error": "HTTP " + response.status + " " + response.statusText
+                    }});
+                }}
+                const buffer = await response.arrayBuffer();
+                const bytes = new Uint8Array(buffer);
+                let binary = '';
+                const chunkSize = 8192;
+                for (let i = 0; i < bytes.length; i += chunkSize) {{
+                    const chunk = bytes.slice(i, i + chunkSize);
+                    binary += String.fromCharCode.apply(null, chunk);
+                }}
+                const base64 = btoa(binary);
+                return JSON.stringify({{
+                    "status": 200,
+                    "data": base64
+                }});
+            }} catch (e) {{
+                return JSON.stringify({{
+                    "status": 0,
+                    "error": e.message
+                }});
+            }}
+        }})()
+        """
+
+        result_str = await self._tab.evaluate(js_code, await_promise=True, return_by_value=True)
+        result = json_module.loads(result_str)
+
+        if result["status"] != 200:
+            raise GrokAPIError(f"Download failed: {result.get('error', 'Unknown error')}")
+
+        # Decode base64 and write to file
+        video_data = base64.b64decode(result["data"])
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(video_data)
+
+        return output_path
+
     async def edit_image(
         self, post_id: str, edit_prompt: str, timeout: int = 60
     ) -> ImageEditResult:
@@ -2222,6 +2304,95 @@ class SmartGrokClient:
         """
         browser = await self._get_browser_client()
         return await browser.upgrade_video(video_id)
+
+    async def download_video(
+        self,
+        video_id: str,
+        output_path: str | Path,
+        *,
+        prefer_hd: bool = True,
+        parent_post_id: str | None = None,
+    ) -> Path:
+        """
+        Download a video to local file.
+
+        Args:
+            video_id: The video UUID to download
+            output_path: Destination file path (will be created/overwritten)
+            prefer_hd: If True (default), download HD version if available
+            parent_post_id: Parent post ID (optional, for faster lookup)
+
+        Returns:
+            Path to the downloaded file
+
+        Raises:
+            GrokNotFoundError: If video not found
+            GrokAPIError: If download fails
+
+        Example:
+            >>> # Download a video (auto-detects HD)
+            >>> path = await client.download_video(video_id, "output.mp4")
+            >>> print(f"Downloaded to {path}")
+
+            >>> # Force standard quality
+            >>> path = await client.download_video(video_id, "output.mp4", prefer_hd=False)
+        """
+        output_path = Path(output_path)
+
+        # Find the video URL
+        video_url = None
+
+        if parent_post_id:
+            # Fast path: we know the parent
+            details = await self.get_post_details(parent_post_id)
+            for child in details.children:
+                if child.id == video_id:
+                    video_url = (child.hd_media_url if prefer_hd else None) or child.media_url
+                    break
+        else:
+            # Slow path: search through favorites
+            posts = await self.list_posts(limit=100, source="favorites")
+            for post in posts:
+                details = await self.get_post_details(post.id)
+                for child in details.children:
+                    if child.id == video_id:
+                        video_url = (child.hd_media_url if prefer_hd else None) or child.media_url
+                        break
+                if video_url:
+                    break
+
+        if not video_url:
+            raise GrokNotFoundError(f"Video {video_id} not found")
+
+        # Add dl=1 parameter to trigger download
+        if "?" in video_url:
+            download_url = f"{video_url}&dl=1"
+        else:
+            download_url = f"{video_url}?dl=1"
+
+        # Try HTTP download first
+        try:
+            context = await self._http_client._get_asset_context()
+            response = await context.get(download_url)
+
+            if response.status == 403:
+                # Cloudflare blocked, fall back to browser
+                raise GrokAuthError("HTTP download blocked (403)")
+
+            if response.status != 200:
+                raise GrokAPIError(f"Download failed with status {response.status}")
+
+            # Write to file
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            body = await response.body()
+            output_path.write_bytes(body)
+
+            return output_path
+
+        except GrokAuthError:
+            # Fall back to browser-based download
+            browser = await self._get_browser_client()
+            return await browser.download_video(video_url, output_path)
 
     # =========================================================================
     # Image APIs
