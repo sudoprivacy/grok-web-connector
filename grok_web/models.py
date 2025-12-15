@@ -282,17 +282,30 @@ class ImageEditResult(BaseModel):
         """Check if at least one image was generated successfully."""
         return self.success_count > 0
 
+    @computed_field
+    @property
+    def post_ids(self) -> list[str]:
+        """Post IDs of successfully generated images (for saving via favorite_post())."""
+        return [
+            img["post_id"] for img in self.images if not img.get("moderated") and img.get("post_id")
+        ]
+
 
 class ImageGenerationResult(BaseModel):
-    """Result of create_image() API call (text-to-image generation)."""
+    """Result of create_image() API call (text-to-image generation).
+
+    IMPORTANT: Generated images are temporary and NOT automatically saved.
+    The gallery disappears on page refresh. To persist an image, you must
+    manually favorite/save it using favorite_post() with the post_id.
+    """
 
     # Source info
     prompt: str = Field(..., description="Text prompt used for generation")
 
-    # Generated images (each with id, url, moderated status)
+    # Generated images (each with id, url, moderated status, and optional post_id for saving)
     images: list[dict[str, Any]] = Field(
         default_factory=list,
-        description="List of generated images with keys: image_id, image_url, moderated",
+        description="List of generated images with keys: image_id, image_url, moderated, post_id",
     )
 
     # Conversation info (for debugging)
@@ -334,3 +347,11 @@ class ImageGenerationResult(BaseModel):
     def success(self) -> bool:
         """Check if at least one image was generated successfully."""
         return self.success_count > 0
+
+    @computed_field
+    @property
+    def post_ids(self) -> list[str]:
+        """Post IDs of successfully generated images (for saving via favorite_post())."""
+        return [
+            img["post_id"] for img in self.images if not img.get("moderated") and img.get("post_id")
+        ]

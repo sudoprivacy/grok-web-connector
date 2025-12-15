@@ -1772,18 +1772,26 @@ class NodriverClient(AsyncClientBase):
         )
 
     async def create_image(
-        self, prompt: str, timeout: int = 60, image_count: int = 4
+        self,
+        prompt: str,
+        aspect_ratio: str = "portrait",
+        min_success: int = 1,
+        max_scroll: int = 5,
+        timeout: int = 120,
     ) -> ImageGenerationResult:
         """
         Generate images from a text prompt (txt2img).
 
-        This navigates to grok.com/imagine, enters the prompt,
-        and captures the generated images.
+        This navigates to grok.com/imagine, selects Image mode,
+        enters the prompt, and captures generated images. Will scroll
+        to generate more images if needed to find non-moderated ones.
 
         Args:
             prompt: Text description of the image to generate
-            timeout: Max seconds to wait for generation (default 60)
-            image_count: Expected number of images (default 4, Grok generates 4)
+            aspect_ratio: "portrait" (2:3), "square" (1:1), or "landscape" (3:2)
+            min_success: Minimum non-moderated images needed (default 1)
+            max_scroll: Maximum scroll attempts to find more images (default 5)
+            timeout: Max seconds to wait for initial generation (default 120)
 
         Returns:
             ImageGenerationResult with image URLs and moderation info
@@ -1795,6 +1803,7 @@ class NodriverClient(AsyncClientBase):
             >>> result = await client.create_image("a cat wearing sunglasses")
             >>> result.success_count  # Number of non-moderated images
             >>> result.image_urls  # URLs of successful images
+            >>> result.has_enough_success(2)  # Check if got at least 2
         """
         import asyncio
         import json as json_mod
@@ -1810,15 +1819,15 @@ class NodriverClient(AsyncClientBase):
         # Set up network monitoring
         await self._tab.send(cdp.network.enable())
 
-        captured_data = {"conversation_id": None, "images": {}}
+        captured_data: dict = {"conversation_id": None, "images": {}, "request_ids": set()}
 
         async def handle_response(event: cdp.network.ResponseReceived):
             url = event.response.url
             if "conversations/new" in url or "app-chat" in url:
-                captured_data["request_id"] = event.request_id
+                captured_data["request_ids"].add(event.request_id)
 
         async def handle_loading_finished(event: cdp.network.LoadingFinished):
-            if captured_data.get("request_id") == event.request_id:
+            if event.request_id in captured_data.get("request_ids", set()):
                 try:
                     body_result = await self._tab.send(
                         cdp.network.get_response_body(request_id=event.request_id)
@@ -1845,12 +1854,12 @@ class NodriverClient(AsyncClientBase):
                                 img_resp = response["streamingImageGenerationResponse"]
                                 image_id = img_resp.get("imageId")
                                 if image_id:
-                                    # Update image data (later responses have final status)
                                     captured_data["images"][image_id] = {
                                         "image_id": image_id,
                                         "image_url": img_resp.get("imageUrl", ""),
                                         "moderated": img_resp.get("moderated", False),
                                         "progress": img_resp.get("progress", 0),
+                                        "post_id": img_resp.get("postId", ""),
                                     }
                         except json_mod.JSONDecodeError:
                             continue
@@ -1860,16 +1869,88 @@ class NodriverClient(AsyncClientBase):
         self._tab.add_handler(cdp.network.ResponseReceived, handle_response)
         self._tab.add_handler(cdp.network.LoadingFinished, handle_loading_finished)
 
-        # Find and fill the prompt textarea
+        # Step 1: Click the mode dropdown and select "Image" (might default to Video)
+        await self._tab.evaluate("""
+            (function() {
+                // Find and click the dropdown button (shows "Image" or "Video")
+                const dropdownBtn = document.querySelector('button[aria-haspopup="menu"]');
+                if (dropdownBtn && (dropdownBtn.innerText.includes('Video') ||
+                                    dropdownBtn.innerText.includes('Image'))) {
+                    dropdownBtn.click();
+                    return true;
+                }
+                return false;
+            })()
+        """)
+        await asyncio.sleep(0.5 * d)
+
+        # Select "Image" from dropdown menu
+        await self._tab.evaluate("""
+            (function() {
+                const menuItems = document.querySelectorAll('[role="menuitem"]');
+                for (const item of menuItems) {
+                    if (item.innerText.includes('Image') ||
+                        item.innerText.includes('图像') ||
+                        item.innerText.includes('图片')) {
+                        item.click();
+                        return true;
+                    }
+                }
+                // Also try clicking outside to close if no Image option
+                document.body.click();
+                return false;
+            })()
+        """)
+        await asyncio.sleep(0.5 * d)
+
+        # Step 2: Select aspect ratio if needed
+        aspect_map = {"portrait": 0, "square": 1, "landscape": 2}
+        aspect_index = aspect_map.get(aspect_ratio, 0)
+
+        # Open dropdown again to select aspect ratio
+        await self._tab.evaluate("""
+            (function() {
+                const dropdownBtn = document.querySelector('button[aria-haspopup="menu"]');
+                if (dropdownBtn) {
+                    dropdownBtn.click();
+                    return true;
+                }
+                return false;
+            })()
+        """)
+        await asyncio.sleep(0.5 * d)
+
+        # Click the aspect ratio option (the buttons with aspect ratio icons)
+        await self._tab.evaluate(f"""
+            (function() {{
+                // Find aspect ratio buttons in the dropdown
+                const buttons = document.querySelectorAll('[role="menu"] button');
+                if (buttons.length > {aspect_index}) {{
+                    buttons[{aspect_index}].click();
+                    return true;
+                }}
+                // Close menu if aspect ratio selection failed
+                document.body.click();
+                return false;
+            }})()
+        """)
+        await asyncio.sleep(0.5 * d)
+
+        # Close dropdown
+        await self._tab.evaluate("document.body.click()")
+        await asyncio.sleep(0.5 * d)
+
+        # Step 3: Fill the prompt textarea
         escaped_prompt = prompt.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
         fill_result = await self._tab.evaluate(f"""
             (function() {{
-                // Find the main textarea for image generation
-                const textarea = document.querySelector('textarea[placeholder*="想象"]') ||
+                // Find the main textarea (placeholder might be "Type to imagine")
+                const textarea = document.querySelector('textarea[placeholder*="imagine"]') ||
                                document.querySelector('textarea[placeholder*="Imagine"]') ||
-                               document.querySelector('textarea[placeholder*="imagine"]') ||
-                               document.querySelector('textarea[aria-label*="想象"]') ||
-                               document.querySelector('main textarea');
+                               document.querySelector('textarea[placeholder*="想象"]') ||
+                               document.querySelector('textarea[placeholder*="Type"]') ||
+                               document.querySelector('main textarea') ||
+                               document.querySelector('textarea');
                 if (!textarea) return 'not found';
 
                 textarea.focus();
@@ -1887,44 +1968,77 @@ class NodriverClient(AsyncClientBase):
 
         await asyncio.sleep(1 * d)
 
-        # Click the submit/generate button
+        # Step 4: Click the submit button (the arrow button on the right)
         submit_clicked = await self._tab.evaluate("""
             (function() {
-                // Look for the generate button (usually has specific aria-label or text)
+                // Find submit button - usually has an arrow icon or aria-label
                 const buttons = Array.from(document.querySelectorAll('button'));
                 for (const btn of buttons) {
-                    const text = btn.innerText.toLowerCase();
                     const label = (btn.getAttribute('aria-label') || '').toLowerCase();
-                    // Match common generate button patterns
-                    if (text.includes('生成') || text.includes('generate') ||
-                        text.includes('imagine') || text.includes('创建') ||
-                        label.includes('生成') || label.includes('submit')) {
+                    // The submit button is usually near the textarea, might have arrow icon
+                    if (label.includes('submit') || label.includes('send') ||
+                        label.includes('发送') || label.includes('提交')) {
                         btn.click();
-                        return true;
+                        return 'found by label';
                     }
                 }
-                // Fallback: find submit button by type
-                const submitBtn = document.querySelector('button[type="submit"]');
-                if (submitBtn) {
-                    submitBtn.click();
-                    return true;
+                // Try finding by position - button right after textarea
+                const textarea = document.querySelector('textarea');
+                if (textarea) {
+                    const container = textarea.closest('form') || textarea.parentElement?.parentElement;
+                    if (container) {
+                        const btn = container.querySelector('button[type="submit"]') ||
+                                   container.querySelector('button:last-of-type');
+                        if (btn) {
+                            btn.click();
+                            return 'found by position';
+                        }
+                    }
+                }
+                // Last resort: find any button that looks like submit
+                for (const btn of buttons) {
+                    if (btn.querySelector('svg') && btn.offsetParent !== null) {
+                        const rect = btn.getBoundingClientRect();
+                        // Usually on the right side of the page
+                        if (rect.right > window.innerWidth * 0.7) {
+                            btn.click();
+                            return 'found by position heuristic';
+                        }
+                    }
                 }
                 return false;
             })()
         """)
         if not submit_clicked:
-            raise GrokAPIError("Could not find generate button")
+            raise GrokAPIError("Could not find submit button")
 
-        # Wait for response with timeout
+        # Step 5: Wait for initial batch of images
         start_time = asyncio.get_event_loop().time()
         while asyncio.get_event_loop().time() - start_time < timeout:
-            # Check if we have completed images (progress=100)
             completed = [
                 img for img in captured_data["images"].values() if img.get("progress") == 100
             ]
-            if len(completed) >= image_count:
+            # Wait for at least 4 images (one batch) or success count met
+            success_count = sum(1 for img in completed if not img.get("moderated"))
+            if len(completed) >= 4 or success_count >= min_success:
                 break
             await asyncio.sleep(1)
+
+        # Step 6: Scroll down to generate more if needed
+        scroll_count = 0
+        while scroll_count < max_scroll:
+            completed = [
+                img for img in captured_data["images"].values() if img.get("progress") == 100
+            ]
+            success_count = sum(1 for img in completed if not img.get("moderated"))
+
+            if success_count >= min_success:
+                break
+
+            # Scroll down to trigger more generation
+            await self._tab.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await asyncio.sleep(3 * d)  # Wait for new images to load
+            scroll_count += 1
 
         # Build result
         images = list(captured_data["images"].values())
@@ -2589,18 +2703,26 @@ class SmartGrokClient:
         return await browser.edit_image(post_id, edit_prompt, timeout)
 
     async def create_image(
-        self, prompt: str, timeout: int = 60, image_count: int = 4
+        self,
+        prompt: str,
+        aspect_ratio: str = "portrait",
+        min_success: int = 1,
+        max_scroll: int = 5,
+        timeout: int = 120,
     ) -> "ImageGenerationResult":
         """
         Generate images from a text prompt (browser only, txt2img).
 
-        This navigates to grok.com/imagine, enters the prompt,
-        and captures the generated images.
+        This navigates to grok.com/imagine, selects Image mode,
+        enters the prompt, and captures generated images. Will scroll
+        to generate more images if needed to find non-moderated ones.
 
         Args:
             prompt: Text description of the image to generate
-            timeout: Max seconds to wait for generation (default 60)
-            image_count: Expected number of images (default 4)
+            aspect_ratio: "portrait" (2:3), "square" (1:1), or "landscape" (3:2)
+            min_success: Minimum non-moderated images needed (default 1)
+            max_scroll: Maximum scroll attempts to find more images (default 5)
+            timeout: Max seconds to wait for initial generation (default 120)
 
         Returns:
             ImageGenerationResult with image URLs and moderation info
@@ -2609,9 +2731,10 @@ class SmartGrokClient:
             >>> result = await client.create_image("a cat wearing sunglasses")
             >>> print(result.image_urls)  # List of generated image URLs
             >>> print(result.success_count)  # Non-moderated images count
+            >>> result.has_enough_success(2)  # Check if got at least 2
         """
         browser = await self._get_browser_client()
-        return await browser.create_image(prompt, timeout, image_count)
+        return await browser.create_image(prompt, aspect_ratio, min_success, max_scroll, timeout)
 
     async def create_video(
         self,
