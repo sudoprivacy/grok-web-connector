@@ -20,10 +20,23 @@ Use get_client() for all Grok API operations:
         await client.like_post(post_id)      # Thumbs up
         await client.dislike_post(post_id)   # Thumbs down
 
-        # Video operations
+        # Video generation - two approaches:
+        # 1. Simple: use presets (normal/fun/spicy)
         video = await client.create_video(post_id, preset="fun")
+
+        # 2. Full control: use adjustment_prompt for ANY video adjustments
+        #    Camera: "Static Shot", "Orbit", "Pan Left", "Dolly In"
+        #    Motion: "she turns her head", "wind blowing hair"
+        #    Combined: "camera zooms in while he walks forward"
+        #    Formula: "Subject + Motion + Camera, Style..."
+        video = await client.create_video(
+            post_id,
+            adjustment_prompt="Woman walks forward, Pan Left, cinematic"
+        )
+
+        # Video management
+        await client.upgrade_video(video_id)  # Adds hd_media_url to video
         await client.delete_video(video_id)
-        await client.upgrade_video(video_id)
 
         # Image operations (browser)
         result = await client.edit_image(post_id, "add sunglasses")
@@ -48,9 +61,12 @@ Social Operations (browser only):
 - dislike_post()         - Give thumbs down
 
 Video Operations:
-- create_video()         - Generate video (HTTP + browser fallback)
+- create_video()         - Generate video from image
+                          Use preset='fun' for simple mode, or
+                          adjustment_prompt="..." for full control over
+                          camera movement, subject motion, and style
+- upgrade_video()        - Upgrade to HD quality (adds hd_media_url)
 - delete_video()         - Delete a child video (browser)
-- upgrade_video()        - Upgrade to HD quality (browser)
 
 Image Operations (browser only):
 - edit_image()           - Edit image to generate variations
@@ -62,8 +78,10 @@ BrowserWorkerPool for concurrent operations with multiple Chrome instances:
     from grok_web import BrowserWorkerPool
 
     async with BrowserWorkerPool(num_workers=3) as pool:
+        # Test different camera movements on same image
         await pool.submit("create_video", post_id="abc", adjustment_prompt="Orbit")
         await pool.submit("create_video", post_id="abc", adjustment_prompt="Pan Left")
+        await pool.submit("create_video", post_id="abc", adjustment_prompt="Static Shot")
         results = await pool.wait_all()
 
 Task types: create_video, favorite_post, unfavorite_post, like_post,

@@ -2080,11 +2080,25 @@ class SmartGrokClient:
         """
         Upgrade a video to HD quality (browser only).
 
+        After upgrading, the video's PostDetails will include an `hd_media_url` field
+        pointing to the higher quality version (~2x file size). Both URLs remain
+        available - use `media_url` for preview, `hd_media_url` for final output.
+
+        This is useful for MCTS workflows: generate many videos at normal quality,
+        then upgrade only the selected ones to HD before final export.
+
         Args:
-            video_id: The video UUID to upgrade
+            video_id: The child video UUID to upgrade
 
         Returns:
             True if upgrade was initiated successfully
+
+        Example:
+            >>> # Check if video has HD, upgrade if not
+            >>> post = await client.get_post_details(parent_id)
+            >>> for video in post.children:
+            ...     if not video.hd_media_url:
+            ...         await client.upgrade_video(video.id)
         """
         browser = await self._get_browser_client()
         return await browser.upgrade_video(video_id)
@@ -2125,23 +2139,42 @@ class SmartGrokClient:
         """
         Create video with auto-fallback: try HTTP first, browser if blocked.
 
+        There are two ways to control video generation:
+
+        1. **Presets** (simple): Use `preset` parameter for predefined styles
+           - 'normal': Default balanced style
+           - 'fun': More dynamic/playful motion
+           - 'spicy': More dramatic effects
+
+        2. **Adjustment Prompt** (full control): Use `adjustment_prompt` for custom instructions.
+           This is the same as typing in the Grok UI text box after selecting an image.
+           You can specify ANY video adjustments, not just camera movement:
+
+           - Camera: "Static Shot", "Orbit", "Pan Left", "Dolly In", "Zoom Out"
+           - Motion: "she turns her head", "wind blowing hair", "waves crashing"
+           - Combined: "camera zooms in while he walks forward"
+           - Style: "slow motion", "cinematic lighting"
+
+           Best practice formula: "Subject + Motion + Camera, Style..."
+           Example: "Woman walks through forest, Pan Left, cinematic lighting"
+
+           When adjustment_prompt is provided, it overrides preset and uses 'custom' mode.
+
         Args:
             parent_post_id: Image post ID to generate video from
             image_url: Optional image URL (fetched from post if not provided)
-            preset: Video style - 'normal', 'fun', or 'spicy'
+            preset: Video style - 'normal', 'fun', or 'spicy' (ignored if adjustment_prompt set)
             aspect_ratio: Video aspect ratio (default "2:3")
             video_length: Video length in seconds (default 6)
-            adjustment_prompt: Video generation prompt (same as typing in Grok UI after image).
-                      Can include any instructions: camera movement, character actions, or both.
-                      Examples: "Static Shot", "she turns her head", "camera zooms in while he walks".
-                      Overrides preset and uses 'custom' mode.
+            adjustment_prompt: Custom video generation instructions (see above for examples)
 
         Returns:
             VideoGenerationResult with video_id
 
         Note:
-            If HTTP API returns 403, automatically falls back to browser UI.
-            Browser fallback requires browser_host and browser_port to be set.
+            - If HTTP API returns 403, automatically falls back to browser UI
+            - adjustment_prompt requires browser (no HTTP API support)
+            - Videos may be moderated; check result.moderated flag
         """
         # If adjustment_prompt is provided, must use browser UI (HTTP API doesn't support it)
         if adjustment_prompt:

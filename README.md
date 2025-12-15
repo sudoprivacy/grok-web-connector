@@ -141,14 +141,18 @@ await client.dislike_post(post_id)  # Give thumbs down
 ### Video APIs
 
 ```python
-# Create video with preset
-result = await client.create_video(
-    parent_post_id="abc-123",
-    preset="fun",  # "normal", "fun", or "spicy"
-)
-print(result.video_id)
+# Simple: Create video with preset
+result = await client.create_video(post_id, preset="fun")  # "normal", "fun", or "spicy"
 
-# Upgrade video to HD (browser only)
+# Full control: Use adjustment_prompt for custom instructions
+# (camera movement, character actions, style - anything!)
+result = await client.create_video(
+    post_id,
+    adjustment_prompt="she slowly turns her head, Dolly In, cinematic"
+)
+
+# Upgrade to HD - adds hd_media_url field to video (~2x file size)
+# Useful: generate many videos, upgrade only the best ones
 await client.upgrade_video(video_id)
 
 # Delete a video (browser only)
@@ -171,30 +175,38 @@ print(result.image_urls)
 | `fun` | More dynamic, playful |
 | `spicy` | Most dramatic effects |
 
-## Adjustment Prompt (Video Generation Prompt)
+## Adjustment Prompt (Video Generation)
 
-The `adjustment_prompt` parameter is the prompt used to generate child videos from a parent image. This is the same prompt you would type in the Grok Imagine web UI after an image is generated.
+The `adjustment_prompt` parameter controls how videos are generated from images. This is the same as typing in the Grok Imagine UI text box after selecting an image.
 
-**Generation flow:**
-1. Initial image prompt → generates parent image
-2. `adjustment_prompt` → generates child video from that image
+**You can specify ANY video adjustments**, not just camera movement:
 
-You can use it for **any video generation instruction**, not just camera control:
+| Category | Examples |
+|----------|----------|
+| **Camera** | "Static Shot", "Orbit", "Pan Left", "Dolly In", "Zoom Out" |
+| **Motion** | "she turns her head", "wind blowing hair", "waves crashing" |
+| **Combined** | "camera zooms in while he walks forward" |
+| **Style** | "slow motion", "cinematic lighting" |
+
+**Best practice formula**: `"Subject + Motion + Camera, Style..."`
 
 ```python
 # Camera control
 await client.create_video(post_id, adjustment_prompt="Static Shot")
-await client.create_video(post_id, adjustment_prompt="Pan Left")
-await client.create_video(post_id, adjustment_prompt="Dolly Out")
+await client.create_video(post_id, adjustment_prompt="slow orbit")
 
 # Character actions
 await client.create_video(post_id, adjustment_prompt="she slowly turns her head")
-await client.create_video(post_id, adjustment_prompt="he reaches for the object")
 await client.create_video(post_id, adjustment_prompt="the character walks forward")
 
-# Combined instructions
-await client.create_video(post_id, adjustment_prompt="camera zooms in while she smiles")
+# Combined (recommended)
+await client.create_video(
+    post_id,
+    adjustment_prompt="Woman walks through forest, Pan Left, cinematic lighting"
+)
 ```
+
+When `adjustment_prompt` is provided, it overrides `preset` and uses 'custom' mode.
 
 See **[grok-imagine-expert/docs/CAMERA_CONTROL.md](https://github.com/user/grok-imagine-expert/blob/main/docs/CAMERA_CONTROL.md)** for camera-specific examples with tested demo URLs.
 
