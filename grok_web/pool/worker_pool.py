@@ -603,6 +603,8 @@ class BrowserWorkerPool:
                     "video_id": result.video_id,
                     "moderated": result.moderated,
                     "parent_post_id": result.parent_post_id,
+                    "progress": result.progress,
+                    "mode": result.mode,
                 }
 
             elif task_type == "create_video_via_ui":
@@ -646,6 +648,27 @@ class BrowserWorkerPool:
                     "edit_prompt": result.edit_prompt,
                     "image_urls": result.image_urls,
                     "moderated_count": result.moderated_count,
+                    "success_count": result.success_count,
+                    "total_count": result.total_count,
+                }
+
+            elif task_type == "create_video_from_text":
+                result = await client.create_video_from_text(*args, **kwargs)
+                return {
+                    "video_id": result.video_id,
+                    "parent_post_id": result.parent_post_id,
+                    "moderated": result.moderated,
+                    "progress": result.progress,
+                    "mode": result.mode,
+                }
+
+            elif task_type == "create_image":
+                result = await client.create_image(*args, **kwargs)
+                return {
+                    "prompt": result.prompt,
+                    "image_urls": result.image_urls,
+                    "moderated_count": result.moderated_count,
+                    "r_rated_count": result.r_rated_count,
                     "success_count": result.success_count,
                     "total_count": result.total_count,
                 }

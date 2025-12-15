@@ -1,29 +1,24 @@
 """
 Grok Web Connector - API Clients
 
-Three client implementations for different use cases:
-
-GrokClient (recommended)
-    - Uses curl_cffi with Chrome TLS fingerprint impersonation
-    - Best for macOS/Linux
-    - Lightweight, fast startup
-
-PlaywrightClient
-    - Uses Playwright's native Chromium TLS
-    - Reliable Cloudflare bypass on all platforms
-    - Use when GrokClient fails with 403 errors
-    - Must be used as context manager: with PlaywrightClient() as client:
+Two internal client implementations:
 
 AsyncClient
-    - Async version using Playwright
-    - For async contexts (MCP servers, asyncio applications)
-    - Must be used as async context manager: async with AsyncClient() as client:
+    - Async HTTP client using Playwright
+    - Used internally by SmartGrokClient for API requests
+
+NodriverClient
+    - Browser automation client using nodriver
+    - Used internally by SmartGrokClient for UI operations
+
+Public API:
+    Use get_client() from grok_web package - returns SmartGrokClient
+    which automatically routes to the appropriate internal client.
 """
 
 from pathlib import Path
-from typing import Any
+from typing import Any, overload
 
-from curl_cffi import requests
 from playwright.async_api import (
     APIRequestContext as AsyncAPIRequestContext,
 )
@@ -33,17 +28,15 @@ from playwright.async_api import (
 from playwright.async_api import (
     async_playwright,
 )
-from playwright.sync_api import APIRequestContext, Playwright, sync_playwright
 
 from ._internal import (
     AsyncClientBase,
-    SyncClientBase,
     build_video_payload,
     generate_statsig_id,
     parse_video_ndjson_response,
     resolve_preset,
 )
-from .auth import DEFAULT_IMPERSONATE, get_platform_headers, load_config
+from .auth import load_config
 from .exceptions import GrokAPIError, GrokAuthError, GrokNotFoundError
 from .models import (
     GrokCookies,
@@ -52,6 +45,18 @@ from .models import (
     VideoGenerationResult,
     VideoPreset,
 )
+
+# =============================================================================
+# Constants
+# =============================================================================
+
+# x-statsig-id is required for chat API (create_video_from_image)
+# This appears to be a Statsig SDK client ID, reusable across requests
+DEFAULT_STATSIG_ID = (
+    "W6IFgVSv2YSVxFj5Yt971KvAL1ldD75XJoGIR285iLdGPIiPNM7S1C9An8vmKsYb"
+    "R9N5sF963w2iXoRhwSHYizPczaEUWA"
+)
+
 
 # =============================================================================
 # Helper functions
@@ -74,345 +79,6 @@ def _get_browser_headers() -> dict[str, str]:
         "Sec-Fetch-Site": "same-origin",
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
     }
-
-
-# =============================================================================
-# GrokClient - Default client using curl_cffi
-# =============================================================================
-
-
-class GrokClient(SyncClientBase):
-    """
-    Default Grok API client using curl_cffi.
-
-    Uses Chrome TLS fingerprint impersonation to bypass Cloudflare.
-    Best for macOS/Linux. If you get 403 errors, try PlaywrightClient.
-
-    Example:
-        >>> client = GrokClient()
-        >>> posts = client.list_posts(limit=10)
-        >>> details = client.get_post_details(posts[0].id)
-    """
-
-    # x-statsig-id is required for chat API (create_video_from_image)
-    # This appears to be a Statsig SDK client ID, reusable across requests
-    DEFAULT_STATSIG_ID = (
-        "W6IFgVSv2YSVxFj5Yt971KvAL1ldD75XJoGIR285iLdGPIiPNM7S1C9An8vmKsYb"
-        "R9N5sF963w2iXoRhwSHYizPczaEUWA"
-    )
-
-    BASE_API_HEADERS = {
-        "accept": "*/*",
-        "accept-language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
-        "content-type": "application/json",
-        "origin": "https://grok.com",
-        "referer": "https://grok.com/",
-        "sec-ch-ua-mobile": "?0",
-        "sec-fetch-dest": "empty",
-        "sec-fetch-mode": "cors",
-        "sec-fetch-site": "same-origin",
-        "x-statsig-id": DEFAULT_STATSIG_ID,
-    }
-
-    BASE_ASSET_HEADERS = {
-        "referer": "https://grok.com/",
-        "origin": "https://grok.com",
-    }
-
-    def __init__(
-        self,
-        cookies: GrokCookies | None = None,
-        config_path: Path | str | None = None,
-    ):
-        """
-        Initialize Grok client.
-
-        Args:
-            cookies: GrokCookies instance. If None, loads from config file.
-            config_path: Path to config file. Defaults to ~/.grok-config.json
-        """
-        if cookies is None:
-            config = load_config(config_path)
-            cookies = config["cookies"]
-            custom_headers = config["headers"]
-            impersonate = config["impersonate"]
-        else:
-            custom_headers = {}
-            impersonate = DEFAULT_IMPERSONATE
-
-        self.cookies = cookies
-        self._impersonate = impersonate
-
-        platform_headers = get_platform_headers()
-
-        self._api_headers = {
-            **self.BASE_API_HEADERS,
-            **platform_headers,
-            **custom_headers,
-        }
-
-        self._asset_headers = {
-            **self.BASE_ASSET_HEADERS,
-            "user-agent": platform_headers["user-agent"],
-            **{k: v for k, v in custom_headers.items() if k == "user-agent"},
-        }
-
-        self._session = requests.Session(impersonate=impersonate)
-        self._session.headers.update(self._api_headers)
-        self._session.cookies.update(cookies.to_dict())
-
-    def _api_request(
-        self,
-        method: str,
-        endpoint: str,
-        json_data: dict | None = None,
-    ) -> dict[str, Any]:
-        """Make authenticated request to Grok API."""
-        url = f"{self.BASE_URL}{endpoint}"
-
-        try:
-            response = self._session.request(method, url, json=json_data)
-        except Exception as e:
-            raise GrokAPIError(f"Request failed: {e}") from e
-
-        if response.status_code in (401, 403):
-            raise GrokAuthError(
-                "Request blocked (401/403). Try PlaywrightClient instead, "
-                "or update ~/.grok-config.json cookies."
-            )
-
-        if response.status_code == 404:
-            raise GrokNotFoundError("Resource not found")
-
-        if response.status_code >= 400:
-            raise GrokAPIError(f"API error: {response.status_code}")
-
-        try:
-            return response.json()
-        except ValueError:
-            return {}
-
-    def _api_request_text(
-        self,
-        method: str,
-        endpoint: str,
-        json_data: dict | None = None,
-        extra_headers: dict | None = None,
-    ) -> str:
-        """Make authenticated request and return raw text response.
-
-        Used for streaming endpoints that return NDJSON (like create_video_from_image).
-
-        Args:
-            extra_headers: Additional headers to include (overrides session headers)
-        """
-        url = f"{self.BASE_URL}{endpoint}"
-
-        try:
-            response = self._session.request(
-                method, url, json=json_data, headers=extra_headers, timeout=120
-            )
-        except Exception as e:
-            raise GrokAPIError(f"Request failed: {e}") from e
-
-        if response.status_code in (401, 403):
-            raise GrokAuthError(
-                "Request blocked (401/403). Try PlaywrightClient instead, "
-                "or update ~/.grok-config.json cookies."
-            )
-
-        if response.status_code == 404:
-            raise GrokNotFoundError("Resource not found")
-
-        if response.status_code >= 400:
-            raise GrokAPIError(f"API error: {response.status_code}")
-
-        return response.text
-
-    def _asset_request_head(self, asset_url: str) -> int:
-        """Make HEAD request to asset URL and return Content-Length."""
-        try:
-            response = requests.head(
-                asset_url,
-                headers=self._asset_headers,
-                cookies=self.cookies.to_dict(),
-                timeout=15,
-                impersonate=self._impersonate,
-            )
-        except Exception as e:
-            raise GrokAPIError(f"Asset request failed: {e}") from e
-
-        if response.status_code == 403:
-            raise GrokAuthError("Asset access denied (403). Try PlaywrightClient.")
-
-        if response.status_code != 200:
-            raise GrokAPIError(f"Asset request failed: {response.status_code}")
-
-        content_length = response.headers.get("content-length")
-        if not content_length:
-            raise GrokAPIError("No Content-Length header in response")
-
-        return int(content_length)
-
-
-# =============================================================================
-# PlaywrightClient - Sync client using Playwright
-# =============================================================================
-
-
-class PlaywrightClient(SyncClientBase):
-    """
-    Playwright-based Grok API client (sync).
-
-    Uses native Chromium TLS for reliable Cloudflare bypass.
-    Works on all platforms. Must be used as a context manager.
-
-    Example:
-        >>> with PlaywrightClient() as client:
-        ...     posts = client.list_posts(limit=10)
-    """
-
-    def __init__(
-        self,
-        cookies: GrokCookies | None = None,
-        config_path: Path | str | None = None,
-    ):
-        """Initialize (use as context manager to start Playwright)."""
-        if cookies is None:
-            config = load_config(config_path)
-            cookies = config["cookies"]
-
-        self.cookies = cookies
-        self._cookie_str = "; ".join([f"{k}={v}" for k, v in cookies.to_dict().items()])
-
-        browser_headers = _get_browser_headers()
-        browser_headers["Cookie"] = self._cookie_str
-        self._headers = browser_headers
-
-        self._playwright: Playwright | None = None
-        self._api_context: APIRequestContext | None = None
-        self._asset_context: APIRequestContext | None = None
-
-    def __enter__(self):
-        self._playwright = sync_playwright().start()
-        self._api_context = self._playwright.request.new_context(
-            base_url=self.BASE_URL,
-            extra_http_headers=self._headers,
-        )
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if self._api_context:
-            self._api_context.dispose()
-        if self._asset_context:
-            self._asset_context.dispose()
-        if self._playwright:
-            self._playwright.stop()
-
-    def _get_asset_context(self) -> APIRequestContext:
-        """Get or create asset context (lazy initialization)."""
-        if self._asset_context is None:
-            self._asset_context = self._playwright.request.new_context(
-                extra_http_headers={
-                    "Origin": "https://grok.com",
-                    "Referer": "https://grok.com/",
-                    "User-Agent": self._headers["User-Agent"],
-                    "Cookie": self._cookie_str,
-                }
-            )
-        return self._asset_context
-
-    def _api_request(
-        self,
-        method: str,
-        endpoint: str,
-        json_data: dict | None = None,
-    ) -> dict[str, Any]:
-        """Make authenticated request to Grok API."""
-        try:
-            if method.upper() == "POST":
-                response = self._api_context.post(endpoint, data=json_data)
-            elif method.upper() == "GET":
-                response = self._api_context.get(endpoint)
-            else:
-                raise GrokAPIError(f"Unsupported HTTP method: {method}")
-        except Exception as e:
-            raise GrokAPIError(f"Request failed: {e}") from e
-
-        if response.status in (401, 403):
-            text = response.text()
-            if "Just a moment" in text:
-                raise GrokAuthError("Cloudflare challenge detected. Refresh cf_clearance cookie.")
-            raise GrokAuthError("Request blocked (401/403). Check cookies.")
-
-        if response.status == 404:
-            raise GrokNotFoundError("Resource not found")
-
-        if response.status >= 400:
-            raise GrokAPIError(f"API error: {response.status}")
-
-        try:
-            return response.json()
-        except ValueError:
-            return {}
-
-    def _api_request_text(
-        self,
-        method: str,
-        endpoint: str,
-        json_data: dict | None = None,
-        extra_headers: dict | None = None,
-    ) -> str:
-        """Make authenticated request and return raw text response.
-
-        Args:
-            extra_headers: Additional headers to include (e.g., x-statsig-id)
-        """
-        try:
-            if method.upper() == "POST":
-                response = self._api_context.post(
-                    endpoint, data=json_data, headers=extra_headers, timeout=120000
-                )
-            elif method.upper() == "GET":
-                response = self._api_context.get(endpoint, headers=extra_headers, timeout=120000)
-            else:
-                raise GrokAPIError(f"Unsupported HTTP method: {method}")
-        except Exception as e:
-            raise GrokAPIError(f"Request failed: {e}") from e
-
-        if response.status in (401, 403):
-            text = response.text()
-            if "Just a moment" in text:
-                raise GrokAuthError("Cloudflare challenge detected. Refresh cf_clearance cookie.")
-            raise GrokAuthError("Request blocked (401/403). Check cookies.")
-
-        if response.status == 404:
-            raise GrokNotFoundError("Resource not found")
-
-        if response.status >= 400:
-            raise GrokAPIError(f"API error: {response.status}")
-
-        return response.text()
-
-    def _asset_request_head(self, asset_url: str) -> int:
-        """Make HEAD request to asset URL and return Content-Length."""
-        try:
-            context = self._get_asset_context()
-            response = context.head(asset_url)
-        except Exception as e:
-            raise GrokAPIError(f"Asset request failed: {e}") from e
-
-        if response.status == 403:
-            raise GrokAuthError("Asset access denied (403). Refresh cf_clearance.")
-
-        if response.status != 200:
-            raise GrokAPIError(f"Asset request failed: {response.status}")
-
-        content_length = response.headers.get("content-length")
-        if not content_length:
-            raise GrokAPIError("No Content-Length header in response")
-
-        return int(content_length)
 
 
 # =============================================================================
@@ -788,7 +454,7 @@ class NodriverClient(AsyncClientBase):
             })()
         """)
         if not statsig_id:
-            statsig_id = GrokClient.DEFAULT_STATSIG_ID
+            statsig_id = DEFAULT_STATSIG_ID
 
         # Escape the payload for embedding in JS string
         payload_escaped = payload_str.replace("\\", "\\\\").replace("'", "\\'")
@@ -1783,27 +1449,32 @@ class NodriverClient(AsyncClientBase):
         Generate images from a text prompt (txt2img).
 
         This navigates to grok.com/imagine, selects Image mode,
-        enters the prompt, and captures generated images. Will scroll
-        to generate more images if needed to find non-moderated ones.
+        enters the prompt, and captures generated images via WebSocket.
+        Will scroll to generate more images if needed.
+
+        IMPORTANT: Generated images are temporary! They're displayed on screen
+        but NOT automatically saved. The gallery disappears on page refresh.
+        To save an image, click the save/heart icon in the UI.
 
         Args:
             prompt: Text description of the image to generate
             aspect_ratio: "portrait" (2:3), "square" (1:1), or "landscape" (3:2)
-            min_success: Minimum non-moderated images needed (default 1)
-            max_scroll: Maximum scroll attempts to find more images (default 5)
+            min_success: Minimum completed images needed (default 1)
+            max_scroll: Maximum scroll attempts to generate more images (default 5)
             timeout: Max seconds to wait for initial generation (default 120)
 
         Returns:
-            ImageGenerationResult with image URLs and moderation info
+            ImageGenerationResult with job IDs and generation info.
+            Note: image_urls and post_ids will be empty since images are temporary.
+            Use success_count to check how many images were generated.
 
         Raises:
             GrokAPIError: If generation fails or times out
 
         Example:
             >>> result = await client.create_image("a cat wearing sunglasses")
-            >>> result.success_count  # Number of non-moderated images
-            >>> result.image_urls  # URLs of successful images
-            >>> result.has_enough_success(2)  # Check if got at least 2
+            >>> result.success_count  # Number of completed images
+            >>> result.total_count    # Total images generated
         """
         import asyncio
         import json as json_mod
@@ -1816,237 +1487,501 @@ class NodriverClient(AsyncClientBase):
         await self._tab.get(f"{self.BASE_URL}/imagine")
         await asyncio.sleep(3 * d)
 
-        # Set up network monitoring
+        # Set up WebSocket monitoring (imagine page uses wss://grok.com/ws/imagine/listen)
         await self._tab.send(cdp.network.enable())
 
-        captured_data: dict = {"conversation_id": None, "images": {}, "request_ids": set()}
+        captured_data: dict = {"jobs": {}}  # job_id -> job info
 
-        async def handle_response(event: cdp.network.ResponseReceived):
-            url = event.response.url
-            if "conversations/new" in url or "app-chat" in url:
-                captured_data["request_ids"].add(event.request_id)
+        async def handle_ws_frame(event: cdp.network.WebSocketFrameReceived):
+            """Capture WebSocket frames from imagine/listen endpoint."""
+            try:
+                payload = event.response.payload_data
+                if not payload:
+                    return
 
-        async def handle_loading_finished(event: cdp.network.LoadingFinished):
-            if event.request_id in captured_data.get("request_ids", set()):
-                try:
-                    body_result = await self._tab.send(
-                        cdp.network.get_response_body(request_id=event.request_id)
-                    )
-                    body = body_result[0] if isinstance(body_result, tuple) else str(body_result)
+                data = json_mod.loads(payload)
+                msg_type = data.get("type")
 
-                    # Parse NDJSON response
-                    for line in body.strip().split("\n"):
-                        if not line:
-                            continue
-                        try:
-                            data = json_mod.loads(line)
-                            result = data.get("result", {})
+                if msg_type == "json":
+                    # Job status update
+                    job_id = data.get("job_id")
+                    if job_id:
+                        # Update or create job entry
+                        if job_id not in captured_data["jobs"]:
+                            captured_data["jobs"][job_id] = {
+                                "image_id": job_id,
+                                "image_url": "",
+                                "moderated": False,
+                                "r_rated": False,
+                                "progress": 0,
+                                "post_id": "",  # Gallery images are temp, no post_id
+                                "prompt": data.get("prompt", ""),
+                                "full_prompt": data.get("full_prompt", ""),
+                                "model_name": data.get("model_name", ""),
+                            }
 
-                            # Capture conversation ID
-                            if "conversation" in result:
-                                captured_data["conversation_id"] = result["conversation"].get(
-                                    "conversationId"
-                                )
+                        # Update progress
+                        progress = data.get("percentage_complete", 0)
+                        captured_data["jobs"][job_id]["progress"] = int(progress)
 
-                            # Capture image generation responses
-                            response = result.get("response", {})
-                            if "streamingImageGenerationResponse" in response:
-                                img_resp = response["streamingImageGenerationResponse"]
-                                image_id = img_resp.get("imageId")
-                                if image_id:
-                                    captured_data["images"][image_id] = {
-                                        "image_id": image_id,
-                                        "image_url": img_resp.get("imageUrl", ""),
-                                        "moderated": img_resp.get("moderated", False),
-                                        "progress": img_resp.get("progress", 0),
-                                        "post_id": img_resp.get("postId", ""),
-                                    }
-                        except json_mod.JSONDecodeError:
-                            continue
-                except Exception:
+                        # Check for moderation and r_rated
+                        if data.get("moderated"):
+                            captured_data["jobs"][job_id]["moderated"] = True
+                        if data.get("r_rated"):
+                            captured_data["jobs"][job_id]["r_rated"] = True
+
+                        # When completed, construct the image URL
+                        if data.get("current_status") == "completed":
+                            image_id = data.get("image_id", job_id)
+                            # Grok uses this URL format for generated images
+                            captured_data["jobs"][job_id]["image_url"] = (
+                                f"https://imagine-public.x.ai/imagine-public/images/{image_id}.png?cache=1"
+                            )
+                            captured_data["jobs"][job_id]["model_name"] = data.get("model_name", "")
+                            captured_data["jobs"][job_id]["full_prompt"] = data.get(
+                                "full_prompt", ""
+                            )
+
+                elif msg_type == "image":
+                    # Image blob received - we don't store the blob (too large)
                     pass
 
-        self._tab.add_handler(cdp.network.ResponseReceived, handle_response)
-        self._tab.add_handler(cdp.network.LoadingFinished, handle_loading_finished)
+            except json_mod.JSONDecodeError:
+                pass
+            except Exception:
+                pass
 
-        # Step 1: Click the mode dropdown and select "Image" (might default to Video)
+        self._tab.add_handler(cdp.network.WebSocketFrameReceived, handle_ws_frame)
+
+        # Step 1: Click the mode dropdown button (aria-label="模型选择")
+        model_btn = await self._tab.select('button[aria-label="模型选择"]')
+        if model_btn:
+            await model_btn.mouse_click()
+            await asyncio.sleep(1 * d)
+
+        # Step 2: Select "Image/图片" mode from the Radix dropdown menu
         await self._tab.evaluate("""
             (function() {
-                // Find and click the dropdown button (shows "Image" or "Video")
-                const dropdownBtn = document.querySelector('button[aria-haspopup="menu"]');
-                if (dropdownBtn && (dropdownBtn.innerText.includes('Video') ||
-                                    dropdownBtn.innerText.includes('Image'))) {
-                    dropdownBtn.click();
-                    return true;
-                }
-                return false;
-            })()
-        """)
-        await asyncio.sleep(0.5 * d)
+                const popper = document.querySelector('[data-radix-popper-content-wrapper]');
+                if (!popper) return 'no menu';
 
-        # Select "Image" from dropdown menu
-        await self._tab.evaluate("""
-            (function() {
-                const menuItems = document.querySelectorAll('[role="menuitem"]');
+                const menuItems = popper.querySelectorAll('[role="menuitem"]');
                 for (const item of menuItems) {
-                    if (item.innerText.includes('Image') ||
-                        item.innerText.includes('图像') ||
-                        item.innerText.includes('图片')) {
+                    if (item.innerText.includes('图片') ||
+                        item.innerText.includes('Image') ||
+                        item.innerText.includes('图像')) {
                         item.click();
-                        return true;
+                        return 'clicked image';
                     }
                 }
-                // Also try clicking outside to close if no Image option
-                document.body.click();
-                return false;
+                return 'not found';
             })()
         """)
-        await asyncio.sleep(0.5 * d)
+        await asyncio.sleep(1 * d)
 
-        # Step 2: Select aspect ratio if needed
+        # Step 3: Select aspect ratio if needed (reopen menu)
         aspect_map = {"portrait": 0, "square": 1, "landscape": 2}
         aspect_index = aspect_map.get(aspect_ratio, 0)
 
-        # Open dropdown again to select aspect ratio
-        await self._tab.evaluate("""
-            (function() {
-                const dropdownBtn = document.querySelector('button[aria-haspopup="menu"]');
-                if (dropdownBtn) {
-                    dropdownBtn.click();
-                    return true;
-                }
-                return false;
-            })()
-        """)
-        await asyncio.sleep(0.5 * d)
+        model_btn = await self._tab.select('button[aria-label="模型选择"]')
+        if model_btn:
+            await model_btn.mouse_click()
+            await asyncio.sleep(1 * d)
 
-        # Click the aspect ratio option (the buttons with aspect ratio icons)
         await self._tab.evaluate(f"""
             (function() {{
-                // Find aspect ratio buttons in the dropdown
-                const buttons = document.querySelectorAll('[role="menu"] button');
+                const popper = document.querySelector('[data-radix-popper-content-wrapper]');
+                if (!popper) return 'no menu';
+
+                const buttons = popper.querySelectorAll('button');
                 if (buttons.length > {aspect_index}) {{
                     buttons[{aspect_index}].click();
-                    return true;
+                    return 'clicked aspect ' + {aspect_index};
                 }}
-                // Close menu if aspect ratio selection failed
-                document.body.click();
-                return false;
+                return 'no aspect buttons';
             }})()
         """)
         await asyncio.sleep(0.5 * d)
 
-        # Close dropdown
+        # Close menu
         await self._tab.evaluate("document.body.click()")
         await asyncio.sleep(0.5 * d)
 
-        # Step 3: Fill the prompt textarea
+        # Step 4: Fill the prompt input (TipTap/ProseMirror contenteditable div)
         escaped_prompt = prompt.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
         fill_result = await self._tab.evaluate(f"""
             (function() {{
-                // Find the main textarea (placeholder might be "Type to imagine")
-                const textarea = document.querySelector('textarea[placeholder*="imagine"]') ||
-                               document.querySelector('textarea[placeholder*="Imagine"]') ||
-                               document.querySelector('textarea[placeholder*="想象"]') ||
-                               document.querySelector('textarea[placeholder*="Type"]') ||
-                               document.querySelector('main textarea') ||
-                               document.querySelector('textarea');
-                if (!textarea) return 'not found';
+                const editor = document.querySelector('.tiptap.ProseMirror') ||
+                               document.querySelector('[contenteditable="true"]') ||
+                               document.querySelector('.ProseMirror');
+                if (!editor) return 'not found';
 
-                textarea.focus();
-                const setter = Object.getOwnPropertyDescriptor(
-                    window.HTMLTextAreaElement.prototype, 'value'
-                ).set;
-                setter.call(textarea, "{escaped_prompt}");
-                textarea.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                textarea.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                editor.focus();
+                editor.innerHTML = '<p>{escaped_prompt}</p>';
+                editor.dispatchEvent(new Event('input', {{ bubbles: true }}));
                 return 'ok';
             }})()
         """)
         if fill_result == "not found":
-            raise GrokAPIError("Could not find prompt textarea on imagine page")
+            raise GrokAPIError("Could not find prompt editor on imagine page")
 
         await asyncio.sleep(1 * d)
 
-        # Step 4: Click the submit button (the arrow button on the right)
-        submit_clicked = await self._tab.evaluate("""
-            (function() {
-                // Find submit button - usually has an arrow icon or aria-label
-                const buttons = Array.from(document.querySelectorAll('button'));
-                for (const btn of buttons) {
-                    const label = (btn.getAttribute('aria-label') || '').toLowerCase();
-                    // The submit button is usually near the textarea, might have arrow icon
-                    if (label.includes('submit') || label.includes('send') ||
-                        label.includes('发送') || label.includes('提交')) {
-                        btn.click();
-                        return 'found by label';
-                    }
-                }
-                // Try finding by position - button right after textarea
-                const textarea = document.querySelector('textarea');
-                if (textarea) {
-                    const container = textarea.closest('form') || textarea.parentElement?.parentElement;
-                    if (container) {
-                        const btn = container.querySelector('button[type="submit"]') ||
-                                   container.querySelector('button:last-of-type');
-                        if (btn) {
-                            btn.click();
-                            return 'found by position';
-                        }
-                    }
-                }
-                // Last resort: find any button that looks like submit
-                for (const btn of buttons) {
-                    if (btn.querySelector('svg') && btn.offsetParent !== null) {
-                        const rect = btn.getBoundingClientRect();
-                        // Usually on the right side of the page
-                        if (rect.right > window.innerWidth * 0.7) {
-                            btn.click();
-                            return 'found by position heuristic';
-                        }
-                    }
-                }
-                return false;
-            })()
-        """)
-        if not submit_clicked:
+        # Step 5: Click the submit button
+        submit_btn = await self._tab.select('button[aria-label="提交"]')
+        if submit_btn:
+            await submit_btn.mouse_click()
+        else:
             raise GrokAPIError("Could not find submit button")
 
-        # Step 5: Wait for initial batch of images
+        # Step 6: Wait for initial batch of images via WebSocket
         start_time = asyncio.get_event_loop().time()
         while asyncio.get_event_loop().time() - start_time < timeout:
             completed = [
-                img for img in captured_data["images"].values() if img.get("progress") == 100
+                job for job in captured_data["jobs"].values() if job.get("progress") == 100
             ]
-            # Wait for at least 4 images (one batch) or success count met
-            success_count = sum(1 for img in completed if not img.get("moderated"))
-            if len(completed) >= 4 or success_count >= min_success:
+            # Wait for at least 6 images (first batch is usually 6)
+            if len(completed) >= 6:
                 break
             await asyncio.sleep(1)
 
-        # Step 6: Scroll down to generate more if needed
+        # Step 7: Scroll down to generate more if needed
+        # min_success means non-moderated images, so we keep scrolling until we have enough
         scroll_count = 0
         while scroll_count < max_scroll:
             completed = [
-                img for img in captured_data["images"].values() if img.get("progress") == 100
+                job for job in captured_data["jobs"].values() if job.get("progress") == 100
             ]
-            success_count = sum(1 for img in completed if not img.get("moderated"))
+            # Count only non-moderated (successful) images
+            success_count = sum(1 for job in completed if not job.get("moderated"))
 
             if success_count >= min_success:
                 break
 
             # Scroll down to trigger more generation
-            await self._tab.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            await asyncio.sleep(3 * d)  # Wait for new images to load
+            # The imagine page uses a specific scrollable container, not window
+            await self._tab.evaluate("""
+                (function() {
+                    // Find the scrollable container (has overflow-scroll class)
+                    const container = document.querySelector('.overflow-scroll') ||
+                                     document.querySelector('[class*="overflow-scroll"]') ||
+                                     document.querySelector('main');
+                    if (container) {
+                        container.scrollTop = container.scrollHeight;
+                        return 'scrolled container';
+                    }
+                    // Fallback to window scroll
+                    window.scrollTo(0, document.body.scrollHeight);
+                    return 'scrolled window';
+                })()
+            """)
+            await asyncio.sleep(5 * d)  # Wait for new images to generate
             scroll_count += 1
 
         # Build result
-        images = list(captured_data["images"].values())
+        images = list(captured_data["jobs"].values())
 
         return ImageGenerationResult(
             prompt=prompt,
             images=images,
-            conversation_id=captured_data.get("conversation_id"),
+            conversation_id=None,  # Not available via WebSocket
+        )
+
+    async def create_video_from_text(
+        self,
+        prompt: str,
+        aspect_ratio: str = "portrait",
+        timeout: int = 180,
+        wait_for_video: bool = True,
+    ) -> VideoGenerationResult:
+        """
+        Generate video from text prompt (txt2vid).
+
+        This navigates to grok.com/imagine with Video mode (default),
+        enters the prompt, and waits for the video to finish generating.
+
+        Note: txt2vid creates a SINGLE video post, not a gallery.
+        The URL redirects quickly but video takes ~25-30 seconds to render.
+
+        Args:
+            prompt: Text description of the video to generate
+            aspect_ratio: "portrait" (9:16), "square" (1:1), or "landscape" (16:9)
+            timeout: Max seconds to wait for video generation (default 180)
+            wait_for_video: Wait for video element to load (default True).
+                           Set False to return immediately after URL redirect.
+
+        Returns:
+            VideoGenerationResult with video_id (the post ID from redirect URL)
+
+        Raises:
+            GrokAPIError: If generation fails or times out
+
+        Example:
+            >>> result = await client.create_video_from_text("a cat playing with yarn")
+            >>> result.video_id  # Generated video post UUID
+            >>> result.web_url   # URL to view the video
+        """
+        import asyncio
+        import re
+
+        d = self._ui_delay
+
+        # Navigate to imagine page (default is Video mode)
+        await self._tab.get(f"{self.BASE_URL}/imagine")
+        await asyncio.sleep(3 * d)
+
+        # Step 1: Verify we're in Video mode (should be default)
+        model_btn = await self._tab.select('button[aria-label="模型选择"]')
+        if model_btn:
+            mode_text = await self._tab.evaluate(
+                'document.querySelector(\'button[aria-label="模型选择"]\')?.innerText || ""'
+            )
+            # If showing "图片", switch to "视频"
+            if "图片" in mode_text or "Image" in mode_text:
+                await model_btn.mouse_click()
+                await asyncio.sleep(1 * d)
+
+                await self._tab.evaluate("""
+                    (function() {
+                        const popper = document.querySelector('[data-radix-popper-content-wrapper]');
+                        if (!popper) return 'no menu';
+
+                        const menuItems = popper.querySelectorAll('[role="menuitem"]');
+                        for (const item of menuItems) {
+                            if (item.innerText.includes('视频') ||
+                                item.innerText.includes('Video')) {
+                                item.click();
+                                return 'clicked video';
+                            }
+                        }
+                        return 'not found';
+                    })()
+                """)
+                await asyncio.sleep(1 * d)
+
+        # Step 2: Select aspect ratio if needed
+        aspect_map = {"portrait": 0, "square": 1, "landscape": 2}
+        aspect_index = aspect_map.get(aspect_ratio, 0)
+
+        model_btn = await self._tab.select('button[aria-label="模型选择"]')
+        if model_btn:
+            await model_btn.mouse_click()
+            await asyncio.sleep(1 * d)
+
+        await self._tab.evaluate(f"""
+            (function() {{
+                const popper = document.querySelector('[data-radix-popper-content-wrapper]');
+                if (!popper) return 'no menu';
+
+                const buttons = popper.querySelectorAll('button');
+                if (buttons.length > {aspect_index}) {{
+                    buttons[{aspect_index}].click();
+                    return 'clicked aspect ' + {aspect_index};
+                }}
+                return 'no aspect buttons';
+            }})()
+        """)
+        await asyncio.sleep(0.5 * d)
+
+        # Close menu
+        await self._tab.evaluate("document.body.click()")
+        await asyncio.sleep(0.5 * d)
+
+        # Step 3: Fill the prompt input
+        escaped_prompt = prompt.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+        fill_result = await self._tab.evaluate(f"""
+            (function() {{
+                const editor = document.querySelector('.tiptap.ProseMirror') ||
+                               document.querySelector('[contenteditable="true"]') ||
+                               document.querySelector('.ProseMirror');
+                if (!editor) return 'not found';
+
+                editor.focus();
+                editor.innerHTML = '<p>{escaped_prompt}</p>';
+                editor.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                return 'ok';
+            }})()
+        """)
+        if fill_result == "not found":
+            raise GrokAPIError("Could not find prompt editor on imagine page")
+
+        await asyncio.sleep(1 * d)
+
+        # Step 4: Click the submit button
+        submit_btn = await self._tab.select('button[aria-label="提交"]')
+        if submit_btn:
+            await submit_btn.mouse_click()
+        else:
+            raise GrokAPIError("Could not find submit button")
+
+        # Step 5: Wait for URL to change to /imagine/post/{id}
+        start_time = asyncio.get_event_loop().time()
+        post_id = None
+
+        while asyncio.get_event_loop().time() - start_time < timeout:
+            current_url = self._tab.target.url
+            # Extract post ID from URL like https://grok.com/imagine/post/{uuid}
+            match = re.search(r"/imagine/post/([a-f0-9-]+)", current_url)
+            if match:
+                post_id = match.group(1)
+                break
+            await asyncio.sleep(1)
+
+        if not post_id:
+            raise GrokAPIError("Timeout waiting for video generation redirect")
+
+        # Step 6: Optionally wait for video element to actually load
+        # (URL redirects quickly but video takes ~25-30s to render)
+        video_ready = False
+        if wait_for_video:
+            remaining_time = timeout - (asyncio.get_event_loop().time() - start_time)
+            wait_start = asyncio.get_event_loop().time()
+
+            while asyncio.get_event_loop().time() - wait_start < remaining_time:
+                video_info = await self._tab.evaluate("""
+                    (function() {
+                        const videos = document.querySelectorAll('video');
+                        if (videos.length === 0) return {found: false};
+
+                        // Check if any video has loaded (readyState >= 2 = HAVE_CURRENT_DATA)
+                        for (const v of videos) {
+                            if (v.readyState >= 2 && v.duration > 0) {
+                                return {
+                                    found: true,
+                                    duration: v.duration,
+                                    src: v.src || ''
+                                };
+                            }
+                        }
+                        return {found: false};
+                    })()
+                """)
+
+                # Handle nodriver list format
+                found = False
+                if isinstance(video_info, dict):
+                    found = video_info.get("found", False)
+                elif isinstance(video_info, list):
+                    for item in video_info:
+                        if item[0] == "found" and item[1].get("value"):
+                            found = True
+                            break
+
+                if found:
+                    video_ready = True
+                    break
+
+                await asyncio.sleep(1)
+
+        # Build result - for txt2vid, the post_id IS the video
+        return VideoGenerationResult(
+            video_id=post_id,
+            parent_post_id=post_id,
+            moderated=False,  # If we got a redirect, it wasn't moderated
+            progress=100 if video_ready or not wait_for_video else 50,
+            mode="text",  # txt2vid mode
+        )
+
+    # =========================================================================
+    # Unified Video Generation API (for pool compatibility)
+    # =========================================================================
+
+    @overload
+    async def create_video(
+        self,
+        prompt: str,
+        *,
+        aspect_ratio: str = ...,
+        timeout: int = ...,
+        wait_for_video: bool = ...,
+    ) -> VideoGenerationResult:
+        """txt2vid: Generate video from text prompt only."""
+        ...
+
+    @overload
+    async def create_video(
+        self,
+        prompt: str,
+        *,
+        source_post_id: str,
+        preset: VideoPreset | str = ...,
+        aspect_ratio: str = ...,
+        timeout: int = ...,
+    ) -> VideoGenerationResult:
+        """img2vid: Generate video from existing Grok image post."""
+        ...
+
+    @overload
+    async def create_video(
+        self,
+        prompt: str,
+        *,
+        source_image_path: str | Path,
+        aspect_ratio: str = ...,
+        timeout: int = ...,
+    ) -> VideoGenerationResult:
+        """upload2vid: Generate video from uploaded local image (not yet implemented)."""
+        ...
+
+    async def create_video(
+        self,
+        prompt: str,
+        *,
+        source_post_id: str | None = None,
+        source_image_path: str | Path | None = None,
+        preset: VideoPreset | str = "normal",
+        aspect_ratio: str = "portrait",
+        timeout: int = 180,
+        wait_for_video: bool = True,
+    ) -> VideoGenerationResult:
+        """
+        Unified video generation API supporting multiple modes.
+
+        The mode is automatically detected based on which source parameter is provided:
+        - No source → txt2vid (generate video from text prompt)
+        - source_post_id → img2vid (generate video from existing Grok image)
+        - source_image_path → upload2vid (upload local image and generate video)
+
+        Args:
+            prompt: For txt2vid: full video description.
+                   For img2vid/upload2vid: adjustment instructions (camera, motion, style).
+
+            source_post_id: (img2vid) Existing Grok image post ID to animate.
+            source_image_path: (upload2vid) Local image path to upload and animate.
+                              NOT YET IMPLEMENTED - raises NotImplementedError.
+
+            preset: Video style preset - 'normal', 'fun', or 'spicy'.
+                   Only used for img2vid mode.
+            aspect_ratio: Video aspect ratio.
+            timeout: Max seconds to wait for video generation (default 180).
+            wait_for_video: (txt2vid only) Wait for video element to load (default True).
+
+        Returns:
+            VideoGenerationResult with video_id and metadata.
+        """
+        # Validate: cannot specify both sources
+        if source_post_id is not None and source_image_path is not None:
+            raise ValueError("Cannot specify both source_post_id and source_image_path.")
+
+        # Mode: upload2vid (not yet implemented)
+        if source_image_path is not None:
+            raise NotImplementedError("upload2vid mode (source_image_path) is not yet implemented.")
+
+        # Mode: img2vid (from existing Grok image post)
+        if source_post_id is not None:
+            return await self.create_video_via_ui(
+                parent_post_id=source_post_id,
+                preset=preset,
+                timeout=timeout,
+                adjustment_prompt=prompt if prompt else None,
+            )
+
+        # Mode: txt2vid (from text prompt only)
+        return await self.create_video_from_text(
+            prompt=prompt,
+            aspect_ratio=aspect_ratio,
+            timeout=timeout,
+            wait_for_video=wait_for_video,
         )
 
     async def create_video_via_ui(
@@ -2736,82 +2671,146 @@ class SmartGrokClient:
         browser = await self._get_browser_client()
         return await browser.create_image(prompt, aspect_ratio, min_success, max_scroll, timeout)
 
+    # =========================================================================
+    # Unified Video Generation API
+    # =========================================================================
+
+    @overload
     async def create_video(
         self,
-        parent_post_id: str,
-        image_url: str | None = None,
+        prompt: str,
+        *,
+        aspect_ratio: str = ...,
+        timeout: int = ...,
+        wait_for_video: bool = ...,
+    ) -> VideoGenerationResult:
+        """txt2vid: Generate video from text prompt only."""
+        ...
+
+    @overload
+    async def create_video(
+        self,
+        prompt: str,
+        *,
+        source_post_id: str,
+        preset: VideoPreset | str = ...,
+        aspect_ratio: str = ...,
+        timeout: int = ...,
+    ) -> VideoGenerationResult:
+        """img2vid: Generate video from existing Grok image post."""
+        ...
+
+    @overload
+    async def create_video(
+        self,
+        prompt: str,
+        *,
+        source_image_path: str | Path,
+        aspect_ratio: str = ...,
+        timeout: int = ...,
+    ) -> VideoGenerationResult:
+        """upload2vid: Generate video from uploaded local image (not yet implemented)."""
+        ...
+
+    async def create_video(
+        self,
+        prompt: str,
+        *,
+        source_post_id: str | None = None,
+        source_image_path: str | Path | None = None,
         preset: VideoPreset | str = "normal",
-        aspect_ratio: str = "2:3",
-        video_length: int = 6,
-        adjustment_prompt: str | None = None,
+        aspect_ratio: str = "portrait",
+        timeout: int = 180,
+        wait_for_video: bool = True,
     ) -> VideoGenerationResult:
         """
-        Create video with auto-fallback: try HTTP first, browser if blocked.
+        Unified video generation API supporting multiple modes.
 
-        There are two ways to control video generation:
-
-        1. **Presets** (simple): Use `preset` parameter for predefined styles
-           - 'normal': Default balanced style
-           - 'fun': More dynamic/playful motion
-           - 'spicy': More dramatic effects
-
-        2. **Adjustment Prompt** (full control): Use `adjustment_prompt` for custom instructions.
-           This is the same as typing in the Grok UI text box after selecting an image.
-           You can specify ANY video adjustments, not just camera movement:
-
-           - Camera: "Static Shot", "Orbit", "Pan Left", "Dolly In", "Zoom Out"
-           - Motion: "she turns her head", "wind blowing hair", "waves crashing"
-           - Combined: "camera zooms in while he walks forward"
-           - Style: "slow motion", "cinematic lighting"
-
-           Best practice formula: "Subject + Motion + Camera, Style..."
-           Example: "Woman walks through forest, Pan Left, cinematic lighting"
-
-           When adjustment_prompt is provided, it overrides preset and uses 'custom' mode.
+        The mode is automatically detected based on which source parameter is provided:
+        - No source → txt2vid (generate video from text prompt)
+        - source_post_id → img2vid (generate video from existing Grok image)
+        - source_image_path → upload2vid (upload local image and generate video)
 
         Args:
-            parent_post_id: Image post ID to generate video from
-            image_url: Optional image URL (fetched from post if not provided)
-            preset: Video style - 'normal', 'fun', or 'spicy' (ignored if adjustment_prompt set)
-            aspect_ratio: Video aspect ratio (default "2:3")
-            video_length: Video length in seconds (default 6)
-            adjustment_prompt: Custom video generation instructions (see above for examples)
+            prompt: For txt2vid: full video description.
+                   For img2vid/upload2vid: adjustment instructions (camera, motion, style).
+
+            source_post_id: (img2vid) Existing Grok image post ID to animate.
+            source_image_path: (upload2vid) Local image path to upload and animate.
+                              NOT YET IMPLEMENTED - raises NotImplementedError.
+
+            preset: Video style preset - 'normal', 'fun', or 'spicy'.
+                   Only used for img2vid mode. Ignored if prompt contains custom instructions.
+            aspect_ratio: Video aspect ratio.
+                         - txt2vid: "portrait" (9:16), "square" (1:1), "landscape" (16:9)
+                         - img2vid: "2:3", "1:1", "3:2"
+            timeout: Max seconds to wait for video generation (default 180).
+            wait_for_video: (txt2vid only) Wait for video element to load (default True).
 
         Returns:
-            VideoGenerationResult with video_id
+            VideoGenerationResult with video_id and metadata.
 
-        Note:
-            - If HTTP API returns 403, automatically falls back to browser UI
-            - adjustment_prompt requires browser (no HTTP API support)
-            - Videos may be moderated; check result.moderated flag
+        Raises:
+            ValueError: If both source_post_id and source_image_path are provided.
+            NotImplementedError: If source_image_path is provided (upload2vid not implemented).
+            GrokAuthError: If API is blocked and browser fallback is disabled.
+
+        Examples:
+            # txt2vid - Generate video from text description
+            >>> video = await client.create_video("a cat playing with yarn")
+
+            # img2vid - Animate existing image with preset
+            >>> video = await client.create_video(
+            ...     "zoom in slowly",
+            ...     source_post_id="abc-123-def",
+            ...     preset="fun"
+            ... )
+
+            # img2vid - Animate with custom camera/motion instructions
+            >>> video = await client.create_video(
+            ...     "she turns her head, Pan Left, cinematic lighting",
+            ...     source_post_id="abc-123-def"
+            ... )
+
+            # upload2vid - Upload local image and animate (NOT YET IMPLEMENTED)
+            >>> video = await client.create_video(
+            ...     "make him smile",
+            ...     source_image_path="/path/to/photo.jpg"
+            ... )
         """
-        # If adjustment_prompt is provided, must use browser UI (HTTP API doesn't support it)
-        if adjustment_prompt:
-            browser = await self._get_browser_client()
-            return await browser.create_video_via_ui(
-                parent_post_id, preset=preset, adjustment_prompt=adjustment_prompt
-            )
+        # Validate parameters
+        if source_post_id is not None and source_image_path is not None:
+            raise ValueError("Cannot specify both source_post_id and source_image_path.")
 
-        # Get image URL if not provided
-        if image_url is None:
-            post = await self.get_post_details(parent_post_id)
-            image_url = post.media_url
+        if source_image_path is not None:
+            raise NotImplementedError("upload2vid mode (source_image_path) is not yet implemented.")
 
-        # Try HTTP API first (only when no adjustment_prompt)
-        try:
-            return await self._http_client.create_video_from_image(
-                image_url=image_url,
-                parent_post_id=parent_post_id,
-                preset=preset,
-                aspect_ratio=aspect_ratio,
-                video_length=video_length,
-            )
-        except GrokAuthError:
-            # API blocked (403) - fallback to browser UI
-            if not self._enable_browser_fallback:
-                raise GrokAuthError(
-                    "Video API blocked (403). Enable browser fallback with enable_browser_fallback=True "
-                    "or use NodriverClient directly."
-                ) from None
-            browser = await self._get_browser_client()
-            return await browser.create_video_via_ui(parent_post_id, preset=preset)
+        # For img2vid with non-custom preset, try HTTP API first
+        if source_post_id is not None and (not prompt or preset != "normal"):
+            try:
+                post = await self.get_post_details(source_post_id)
+                return await self._http_client.create_video_from_image(
+                    image_url=post.media_url,
+                    parent_post_id=source_post_id,
+                    preset=preset,
+                    aspect_ratio=aspect_ratio,
+                    video_length=6,
+                )
+            except GrokAuthError:
+                if not self._enable_browser_fallback:
+                    raise GrokAuthError(
+                        "Video API blocked (403). Enable browser fallback or use browser client."
+                    ) from None
+                # Fall through to browser
+
+        # Delegate to NodriverClient.create_video (single source of truth)
+        browser = await self._get_browser_client()
+        return await browser.create_video(
+            prompt=prompt,
+            source_post_id=source_post_id,
+            source_image_path=source_image_path,
+            preset=preset,
+            aspect_ratio=aspect_ratio,
+            timeout=timeout,
+            wait_for_video=wait_for_video,
+        )

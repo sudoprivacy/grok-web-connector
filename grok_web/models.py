@@ -239,7 +239,7 @@ class ImageEditResult(BaseModel):
     # Generated images (each with id, url, moderated status)
     images: list[dict[str, Any]] = Field(
         default_factory=list,
-        description="List of generated images with keys: image_id, image_url, moderated",
+        description="List of generated images with keys: image_id, image_url, moderated, r_rated",
     )
 
     # Conversation info (for debugging)
@@ -249,17 +249,29 @@ class ImageEditResult(BaseModel):
     @property
     def image_urls(self) -> list[str]:
         """URLs of successfully generated (non-moderated) images."""
-        return [
-            f"https://assets.grok.com/{img['image_url']}"
-            for img in self.images
-            if not img.get("moderated") and img.get("image_url")
-        ]
+        urls = []
+        for img in self.images:
+            if img.get("moderated") or not img.get("image_url"):
+                continue
+            url = img["image_url"]
+            # Handle both full URLs and relative paths
+            if url.startswith("http"):
+                urls.append(url)
+            else:
+                urls.append(f"https://assets.grok.com/{url}")
+        return urls
 
     @computed_field
     @property
     def moderated_count(self) -> int:
         """Number of images that were moderated."""
         return sum(1 for img in self.images if img.get("moderated"))
+
+    @computed_field
+    @property
+    def r_rated_count(self) -> int:
+        """Number of images flagged as R-rated (adult content)."""
+        return sum(1 for img in self.images if img.get("r_rated"))
 
     @computed_field
     @property
@@ -302,10 +314,10 @@ class ImageGenerationResult(BaseModel):
     # Source info
     prompt: str = Field(..., description="Text prompt used for generation")
 
-    # Generated images (each with id, url, moderated status, and optional post_id for saving)
+    # Generated images (each with id, url, moderated status, r_rated, etc.)
     images: list[dict[str, Any]] = Field(
         default_factory=list,
-        description="List of generated images with keys: image_id, image_url, moderated, post_id",
+        description="List of generated images with keys: image_id, image_url, moderated, r_rated",
     )
 
     # Conversation info (for debugging)
@@ -315,17 +327,29 @@ class ImageGenerationResult(BaseModel):
     @property
     def image_urls(self) -> list[str]:
         """URLs of successfully generated (non-moderated) images."""
-        return [
-            f"https://assets.grok.com/{img['image_url']}"
-            for img in self.images
-            if not img.get("moderated") and img.get("image_url")
-        ]
+        urls = []
+        for img in self.images:
+            if img.get("moderated") or not img.get("image_url"):
+                continue
+            url = img["image_url"]
+            # Handle both full URLs and relative paths
+            if url.startswith("http"):
+                urls.append(url)
+            else:
+                urls.append(f"https://assets.grok.com/{url}")
+        return urls
 
     @computed_field
     @property
     def moderated_count(self) -> int:
         """Number of images that were moderated."""
         return sum(1 for img in self.images if img.get("moderated"))
+
+    @computed_field
+    @property
+    def r_rated_count(self) -> int:
+        """Number of images flagged as R-rated (adult content)."""
+        return sum(1 for img in self.images if img.get("r_rated"))
 
     @computed_field
     @property

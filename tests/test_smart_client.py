@@ -6,7 +6,14 @@ import pytest
 
 from grok_web.client import SmartGrokClient
 from grok_web.exceptions import GrokAuthError
-from grok_web.models import GrokCookies, PostDetails, VideoGenerationResult
+from grok_web.models import (
+    GrokCookies,
+    ImageEditResult,
+    ImageGenerationResult,
+    PostDetails,
+    VideoGenerationResult,
+    VideoMatchResult,
+)
 
 
 class TestSmartGrokClientInit:
@@ -163,14 +170,15 @@ class TestSmartGrokClientVideoCreation:
         )
         mock_http = AsyncMock()
         mock_http.get_post_details = AsyncMock(
-            return_value=MagicMock(image_url="https://example.com/image.png")
+            return_value=MagicMock(media_url="https://example.com/image.png")
         )
         mock_http.create_video_from_image = AsyncMock(return_value=mock_result)
 
         client = SmartGrokClient(cookies=mock_cookies)
         client._http_client = mock_http
 
-        result = await client.create_video("test-post-id", preset="normal")
+        # Use unified API: empty prompt + source_post_id + preset="fun" to use HTTP path
+        result = await client.create_video("", source_post_id="test-post-id", preset="fun")
 
         mock_http.create_video_from_image.assert_called_once()
         assert result.video_id == "test-video-id"
@@ -186,14 +194,14 @@ class TestSmartGrokClientVideoCreation:
 
         mock_http = AsyncMock()
         mock_http.get_post_details = AsyncMock(
-            return_value=MagicMock(image_url="https://example.com/image.png")
+            return_value=MagicMock(media_url="https://example.com/image.png")
         )
         mock_http.create_video_from_image = AsyncMock(
             side_effect=GrokAuthError("Request blocked (403)")
         )
 
         mock_browser = AsyncMock()
-        mock_browser.create_video_via_ui = AsyncMock(return_value=mock_result)
+        mock_browser.create_video = AsyncMock(return_value=mock_result)
         mock_browser.__aenter__ = AsyncMock(return_value=mock_browser)
 
         with patch("grok_web.client.NodriverClient") as MockNodriver:
@@ -206,10 +214,12 @@ class TestSmartGrokClientVideoCreation:
             )
             client._http_client = mock_http
 
-            result = await client.create_video("test-post-id", preset="fun")
+            # Use unified API: empty prompt + source_post_id + preset="fun"
+            result = await client.create_video("", source_post_id="test-post-id", preset="fun")
 
             mock_http.create_video_from_image.assert_called_once()
-            mock_browser.create_video_via_ui.assert_called_once_with("test-post-id", preset="fun")
+            # SmartGrokClient now delegates to browser.create_video (single source of truth)
+            mock_browser.create_video.assert_called_once()
             assert result.video_id == "browser-video-id"
 
     @pytest.mark.asyncio
@@ -228,7 +238,8 @@ class TestSmartGrokClientVideoCreation:
         client._http_client = mock_http
 
         with pytest.raises(GrokAuthError) as exc_info:
-            await client.create_video("test-post-id")
+            # Use unified API: empty prompt + source_post_id
+            await client.create_video("", source_post_id="test-post-id", preset="fun")
 
         assert "Enable browser fallback" in str(exc_info.value)
 
@@ -297,3 +308,276 @@ class TestSmartGrokClientLazyBrowser:
 
             # Still only one initialization
             assert MockNodriver.call_count == 1
+
+
+class TestSmartGrokClientUnfavorite:
+    """Tests for unfavorite_post."""
+
+    @pytest.mark.asyncio
+    async def test_unfavorite_post_uses_http(self, mock_cookies: GrokCookies):
+        """unfavorite_post() uses HTTP client first."""
+        mock_http = AsyncMock()
+        mock_http.unfavorite_post = AsyncMock(return_value=True)
+
+        client = SmartGrokClient(cookies=mock_cookies)
+        client._http_client = mock_http
+
+        result = await client.unfavorite_post("test-post-id")
+
+        mock_http.unfavorite_post.assert_called_once_with("test-post-id")
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_unfavorite_post_falls_back_to_browser(self, mock_cookies: GrokCookies):
+        """unfavorite_post() falls back to browser on 403."""
+        mock_http = AsyncMock()
+        mock_http.unfavorite_post = AsyncMock(side_effect=GrokAuthError("403"))
+
+        mock_browser = AsyncMock()
+        mock_browser.unfavorite_post = AsyncMock(return_value=True)
+        mock_browser.__aenter__ = AsyncMock(return_value=mock_browser)
+
+        with patch("grok_web.client.NodriverClient") as MockNodriver:
+            MockNodriver.return_value = mock_browser
+
+            client = SmartGrokClient(cookies=mock_cookies)
+            client._http_client = mock_http
+
+            result = await client.unfavorite_post("test-post-id")
+
+            mock_browser.unfavorite_post.assert_called_once_with("test-post-id")
+            assert result is True
+
+
+class TestSmartGrokClientBrowserOnlyAPIs:
+    """Tests for browser-only APIs (like, dislike, delete, upgrade)."""
+
+    @pytest.mark.asyncio
+    async def test_like_post_uses_browser(self, mock_cookies: GrokCookies):
+        """like_post() uses browser (no HTTP API exists)."""
+        mock_browser = AsyncMock()
+        mock_browser.like_post = AsyncMock(return_value=True)
+
+        client = SmartGrokClient(cookies=mock_cookies)
+        client._browser_client = mock_browser
+
+        result = await client.like_post("test-post-id")
+
+        mock_browser.like_post.assert_called_once_with("test-post-id")
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_dislike_post_uses_browser(self, mock_cookies: GrokCookies):
+        """dislike_post() uses browser (no HTTP API exists)."""
+        mock_browser = AsyncMock()
+        mock_browser.dislike_post = AsyncMock(return_value=True)
+
+        client = SmartGrokClient(cookies=mock_cookies)
+        client._browser_client = mock_browser
+
+        result = await client.dislike_post("test-post-id")
+
+        mock_browser.dislike_post.assert_called_once_with("test-post-id")
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_delete_video_uses_browser(self, mock_cookies: GrokCookies):
+        """delete_video() uses browser (no HTTP API exists)."""
+        mock_browser = AsyncMock()
+        mock_browser.delete_video = AsyncMock(return_value=True)
+
+        client = SmartGrokClient(cookies=mock_cookies)
+        client._browser_client = mock_browser
+
+        result = await client.delete_video("test-video-id")
+
+        mock_browser.delete_video.assert_called_once_with("test-video-id")
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_upgrade_video_uses_browser(self, mock_cookies: GrokCookies):
+        """upgrade_video() uses browser (no HTTP API exists)."""
+        mock_browser = AsyncMock()
+        mock_browser.upgrade_video = AsyncMock(return_value=True)
+
+        client = SmartGrokClient(cookies=mock_cookies)
+        client._browser_client = mock_browser
+
+        result = await client.upgrade_video("test-video-id")
+
+        mock_browser.upgrade_video.assert_called_once_with("test-video-id")
+        assert result is True
+
+
+class TestSmartGrokClientReadFallback:
+    """Tests for read API browser fallback on 403."""
+
+    @pytest.mark.asyncio
+    async def test_list_posts_falls_back_to_browser(self, mock_cookies: GrokCookies):
+        """list_posts() falls back to browser on 403."""
+        mock_http = AsyncMock()
+        mock_http.list_posts = AsyncMock(side_effect=GrokAuthError("403"))
+
+        mock_browser = AsyncMock()
+        mock_browser.list_posts = AsyncMock(return_value=[])
+        mock_browser.__aenter__ = AsyncMock(return_value=mock_browser)
+
+        with patch("grok_web.client.NodriverClient") as MockNodriver:
+            MockNodriver.return_value = mock_browser
+
+            client = SmartGrokClient(cookies=mock_cookies)
+            client._http_client = mock_http
+
+            result = await client.list_posts(limit=5)
+
+            mock_browser.list_posts.assert_called_once()
+            assert result == []
+
+    @pytest.mark.asyncio
+    async def test_get_post_details_falls_back_to_browser(self, mock_cookies: GrokCookies):
+        """get_post_details() falls back to browser on 403."""
+        mock_details = MagicMock(spec=PostDetails)
+        mock_http = AsyncMock()
+        mock_http.get_post_details = AsyncMock(side_effect=GrokAuthError("403"))
+
+        mock_browser = AsyncMock()
+        mock_browser.get_post_details = AsyncMock(return_value=mock_details)
+        mock_browser.__aenter__ = AsyncMock(return_value=mock_browser)
+
+        with patch("grok_web.client.NodriverClient") as MockNodriver:
+            MockNodriver.return_value = mock_browser
+
+            client = SmartGrokClient(cookies=mock_cookies)
+            client._http_client = mock_http
+
+            result = await client.get_post_details("test-post-id")
+
+            mock_browser.get_post_details.assert_called_once_with("test-post-id")
+            assert result == mock_details
+
+    @pytest.mark.asyncio
+    async def test_get_asset_file_size_uses_http(self, mock_cookies: GrokCookies):
+        """get_asset_file_size() uses HTTP client first."""
+        mock_http = AsyncMock()
+        mock_http.get_asset_file_size = AsyncMock(return_value=12345)
+
+        client = SmartGrokClient(cookies=mock_cookies)
+        client._http_client = mock_http
+
+        result = await client.get_asset_file_size("https://example.com/asset.mp4")
+
+        mock_http.get_asset_file_size.assert_called_once_with("https://example.com/asset.mp4")
+        assert result == 12345
+
+    @pytest.mark.asyncio
+    async def test_match_local_video_uses_http(self, mock_cookies: GrokCookies):
+        """match_local_video() uses HTTP client first."""
+        mock_result = MagicMock(spec=VideoMatchResult)
+        mock_http = AsyncMock()
+        mock_http.match_local_video = AsyncMock(return_value=mock_result)
+
+        client = SmartGrokClient(cookies=mock_cookies)
+        client._http_client = mock_http
+
+        result = await client.match_local_video("/path/to/video.mp4")
+
+        mock_http.match_local_video.assert_called_once_with("/path/to/video.mp4")
+        assert result == mock_result
+
+
+class TestSmartGrokClientImageAPIs:
+    """Tests for image generation APIs."""
+
+    @pytest.mark.asyncio
+    async def test_edit_image_uses_browser(self, mock_cookies: GrokCookies):
+        """edit_image() uses browser (no HTTP API exists)."""
+        mock_result = MagicMock(spec=ImageEditResult)
+        mock_browser = AsyncMock()
+        mock_browser.edit_image = AsyncMock(return_value=mock_result)
+
+        client = SmartGrokClient(cookies=mock_cookies)
+        client._browser_client = mock_browser
+
+        result = await client.edit_image("test-post-id", "add sunglasses", timeout=30)
+
+        mock_browser.edit_image.assert_called_once_with("test-post-id", "add sunglasses", 30)
+        assert result == mock_result
+
+    @pytest.mark.asyncio
+    async def test_create_image_uses_browser(self, mock_cookies: GrokCookies):
+        """create_image() uses browser (no HTTP API exists)."""
+        mock_result = MagicMock(spec=ImageGenerationResult)
+        mock_browser = AsyncMock()
+        mock_browser.create_image = AsyncMock(return_value=mock_result)
+
+        client = SmartGrokClient(cookies=mock_cookies)
+        client._browser_client = mock_browser
+
+        result = await client.create_image(
+            "a cat wearing sunglasses",
+            aspect_ratio="square",
+            min_success=2,
+            max_scroll=3,
+            timeout=60,
+        )
+
+        mock_browser.create_image.assert_called_once_with(
+            "a cat wearing sunglasses", "square", 2, 3, 60
+        )
+        assert result == mock_result
+
+
+class TestSmartGrokClientTxt2Vid:
+    """Tests for txt2vid mode of create_video."""
+
+    @pytest.mark.asyncio
+    async def test_create_video_txt2vid_uses_browser(self, mock_cookies: GrokCookies):
+        """create_video() without source_post_id uses browser directly (txt2vid)."""
+        mock_result = VideoGenerationResult(
+            video_id="txt2vid-video-id",
+            parent_post_id="new-post-id",
+            moderated=False,
+        )
+        mock_browser = AsyncMock()
+        mock_browser.create_video = AsyncMock(return_value=mock_result)
+
+        client = SmartGrokClient(cookies=mock_cookies)
+        client._browser_client = mock_browser
+
+        # txt2vid: prompt only, no source_post_id
+        result = await client.create_video("a cat playing with yarn")
+
+        mock_browser.create_video.assert_called_once()
+        call_kwargs = mock_browser.create_video.call_args.kwargs
+        assert call_kwargs["prompt"] == "a cat playing with yarn"
+        assert call_kwargs["source_post_id"] is None
+        assert result.video_id == "txt2vid-video-id"
+
+    @pytest.mark.asyncio
+    async def test_create_video_validates_mutual_exclusion(self, mock_cookies: GrokCookies):
+        """create_video() raises if both source_post_id and source_image_path provided."""
+        client = SmartGrokClient(cookies=mock_cookies)
+
+        with pytest.raises(ValueError) as exc_info:
+            await client.create_video(
+                "test prompt",
+                source_post_id="post-123",
+                source_image_path="/path/to/image.jpg",
+            )
+
+        assert "Cannot specify both" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_create_video_upload2vid_not_implemented(self, mock_cookies: GrokCookies):
+        """create_video() raises NotImplementedError for upload2vid."""
+        client = SmartGrokClient(cookies=mock_cookies)
+
+        with pytest.raises(NotImplementedError) as exc_info:
+            await client.create_video(
+                "test prompt",
+                source_image_path="/path/to/image.jpg",
+            )
+
+        assert (
+            "upload2vid" in str(exc_info.value).lower() or "not yet" in str(exc_info.value).lower()
+        )

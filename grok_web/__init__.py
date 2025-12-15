@@ -20,25 +20,38 @@ Use get_client() for all Grok API operations:
         await client.like_post(post_id)      # Thumbs up
         await client.dislike_post(post_id)   # Thumbs down
 
-        # Video generation - two approaches:
-        # 1. Simple: use presets (normal/fun/spicy)
-        video = await client.create_video(post_id, preset="fun")
+        # Image generation (browser) - txt2img with infinite scroll gallery
+        images = await client.create_image("a sunset over mountains")
 
-        # 2. Full control: use adjustment_prompt for ANY video adjustments
-        #    Camera: "Static Shot", "Orbit", "Pan Left", "Dolly In"
-        #    Motion: "she turns her head", "wind blowing hair"
-        #    Combined: "camera zooms in while he walks forward"
-        #    Formula: "Subject + Motion + Camera, Style..."
+        # Video generation - unified API with automatic mode detection:
+        #
+        # 1. txt2vid - Generate video from text prompt only
+        video = await client.create_video("a cat playing with yarn")
+
+        # 2. img2vid - Generate video from existing Grok image
         video = await client.create_video(
-            post_id,
-            adjustment_prompt="Woman walks forward, Pan Left, cinematic"
+            "zoom in slowly",
+            source_post_id="abc-123-def",
+            preset="fun"
         )
+
+        # 3. img2vid with custom camera/motion instructions
+        video = await client.create_video(
+            "she turns her head, Pan Left, cinematic",
+            source_post_id="abc-123-def"
+        )
+
+        # 4. upload2vid - Upload local image (NOT YET IMPLEMENTED)
+        # video = await client.create_video(
+        #     "make him smile",
+        #     source_image_path="/path/to/photo.jpg"
+        # )
 
         # Video management
         await client.upgrade_video(video_id)  # Adds hd_media_url to video
         await client.delete_video(video_id)
 
-        # Image operations (browser)
+        # Image editing (browser)
         result = await client.edit_image(post_id, "add sunglasses")
 
 Unified API
@@ -61,15 +74,19 @@ Social Operations (browser only):
 - dislike_post()         - Give thumbs down
 
 Video Operations:
-- create_video()         - Generate video from image
-                          Use preset='fun' for simple mode, or
-                          adjustment_prompt="..." for full control over
-                          camera movement, subject motion, and style
-- upgrade_video()        - Upgrade to HD quality (adds hd_media_url)
-- delete_video()         - Delete a child video (browser)
+- create_video()           - Unified video generation API (auto-detects mode):
+                             * No source → txt2vid (text prompt only)
+                             * source_post_id → img2vid (from Grok image)
+                             * source_image_path → upload2vid (NOT YET IMPLEMENTED)
+                             Use preset='fun' for simple mode, or custom prompt
+                             for camera movement, subject motion, and style
+- upgrade_video()          - Upgrade to HD quality (adds hd_media_url)
+- delete_video()           - Delete a child video (browser)
 
 Image Operations (browser only):
-- edit_image()           - Edit image to generate variations
+- create_image()         - Generate images from text prompt (txt2img)
+                           Returns gallery of images with infinite scroll
+- edit_image()           - Edit existing image to generate variations
 
 Parallel Processing
 ===================
@@ -78,17 +95,17 @@ BrowserWorkerPool for concurrent operations with multiple Chrome instances:
     from grok_web import BrowserWorkerPool
 
     async with BrowserWorkerPool(num_workers=3) as pool:
-        # Test different camera movements on same image
-        await pool.submit("create_video", post_id="abc", adjustment_prompt="Orbit")
-        await pool.submit("create_video", post_id="abc", adjustment_prompt="Pan Left")
-        await pool.submit("create_video", post_id="abc", adjustment_prompt="Static Shot")
+        # Test different camera movements on same image (img2vid)
+        await pool.submit("create_video", prompt="Orbit", source_post_id="abc")
+        await pool.submit("create_video", prompt="Pan Left", source_post_id="abc")
+        await pool.submit("create_video", prompt="Static Shot", source_post_id="abc")
         results = await pool.wait_all()
 
-Task types: create_video, favorite_post, unfavorite_post, like_post,
-dislike_post, delete_video, upgrade_video, edit_image, list_posts,
-get_post_details
+Task types: create_video, create_image, favorite_post, unfavorite_post,
+like_post, dislike_post, delete_video, upgrade_video, edit_image,
+list_posts, get_post_details
 
-Last updated: 2025-12-15
+Last updated: 2025-12-16
 """
 
 from pathlib import Path
@@ -147,7 +164,10 @@ def get_client(
         async with get_client() as client:
             posts = await client.list_posts()
             await client.favorite_post(posts[0].id)
-            video = await client.create_video(posts[0].id, preset="fun")
+            # img2vid with preset
+            video = await client.create_video("zoom in", source_post_id=posts[0].id, preset="fun")
+            # or txt2vid
+            video = await client.create_video("a cat playing with yarn")
     """
     return SmartGrokClient(
         cookies=cookies,
