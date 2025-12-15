@@ -426,3 +426,98 @@ class TestKillStaleTempChrome:
             with patch("grok_web.browser.os.kill", side_effect=ProcessLookupError()):
                 result = kill_stale_temp_chrome(9222)
                 assert result is False
+
+
+class TestGetPidOnPort:
+    """Tests for get_pid_on_port function."""
+
+    def test_unix_lsof_returns_pid(self):
+        """Returns PID from lsof on Unix systems."""
+        from grok_web.browser import get_pid_on_port
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "12345\n"
+
+        with patch("grok_web.browser.platform.system", return_value="Darwin"):
+            with patch("grok_web.browser.subprocess.run", return_value=mock_result):
+                result = get_pid_on_port(9222)
+                assert result == 12345
+
+    def test_unix_lsof_returns_none_on_error(self):
+        """Returns None when lsof fails on Unix."""
+        from grok_web.browser import get_pid_on_port
+
+        mock_result = MagicMock()
+        mock_result.returncode = 1
+        mock_result.stdout = ""
+
+        with patch("grok_web.browser.platform.system", return_value="Linux"):
+            with patch("grok_web.browser.subprocess.run", return_value=mock_result):
+                result = get_pid_on_port(9222)
+                assert result is None
+
+    def test_windows_netstat_returns_pid(self):
+        """Returns PID from netstat on Windows."""
+        from grok_web.browser import get_pid_on_port
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "  TCP    127.0.0.1:9222    0.0.0.0:0    LISTENING    12345\n"
+
+        with patch("grok_web.browser.platform.system", return_value="Windows"):
+            with patch("grok_web.browser.subprocess.run", return_value=mock_result):
+                result = get_pid_on_port(9222)
+                assert result == 12345
+
+    def test_returns_none_on_subprocess_timeout(self):
+        """Returns None on subprocess timeout."""
+        from subprocess import TimeoutExpired
+
+        from grok_web.browser import get_pid_on_port
+
+        with patch("grok_web.browser.platform.system", return_value="Darwin"):
+            with patch("grok_web.browser.subprocess.run", side_effect=TimeoutExpired("cmd", 5)):
+                result = get_pid_on_port(9222)
+                assert result is None
+
+
+class TestGetProcessCmdline:
+    """Tests for get_process_cmdline function."""
+
+    def test_unix_ps_returns_cmdline(self):
+        """Returns cmdline from ps on Unix systems."""
+        from grok_web.browser import get_process_cmdline
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "/Applications/Chrome.app --remote-debugging-port=9222\n"
+
+        with patch("grok_web.browser.platform.system", return_value="Darwin"):
+            with patch("grok_web.browser.subprocess.run", return_value=mock_result):
+                result = get_process_cmdline(12345)
+                assert "Chrome.app" in result
+
+    def test_windows_wmic_returns_cmdline(self):
+        """Returns cmdline from wmic on Windows."""
+        from grok_web.browser import get_process_cmdline
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "CommandLine\nchrome.exe --remote-debugging-port=9222\n"
+
+        with patch("grok_web.browser.platform.system", return_value="Windows"):
+            with patch("grok_web.browser.subprocess.run", return_value=mock_result):
+                result = get_process_cmdline(12345)
+                assert "chrome.exe" in result
+
+    def test_returns_none_on_subprocess_timeout(self):
+        """Returns None on subprocess timeout."""
+        from subprocess import TimeoutExpired
+
+        from grok_web.browser import get_process_cmdline
+
+        with patch("grok_web.browser.platform.system", return_value="Linux"):
+            with patch("grok_web.browser.subprocess.run", side_effect=TimeoutExpired("cmd", 5)):
+                result = get_process_cmdline(12345)
+                assert result is None

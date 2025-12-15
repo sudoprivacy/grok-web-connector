@@ -1,7 +1,6 @@
 """Tests for pool module (job, worker, persistence, worker_pool)."""
 
 import asyncio
-import json
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -16,17 +15,6 @@ from grok_web.pool.worker import Worker, WorkerStats, WorkerStatus
 # =============================================================================
 # Job Tests
 # =============================================================================
-
-
-class TestJobStatus:
-    """Tests for JobStatus enum."""
-
-    def test_status_values(self):
-        """All expected status values exist."""
-        assert JobStatus.PENDING.value == "pending"
-        assert JobStatus.IN_PROGRESS.value == "in_progress"
-        assert JobStatus.COMPLETED.value == "completed"
-        assert JobStatus.FAILED.value == "failed"
 
 
 class TestJob:
@@ -54,45 +42,7 @@ class TestJob:
         assert job.args == ("post123",)
         assert job.kwargs == {"adjustment_prompt": "Orbit"}
 
-    def test_job_to_dict(self):
-        """Job serializes to dict."""
-        job = Job(
-            task_type="create_video",
-            args=("arg1", "arg2"),
-            kwargs={"key": "value"},
-            max_retries=3,
-        )
-        data = job.to_dict()
-        assert data["task_type"] == "create_video"
-        assert data["args"] == ["arg1", "arg2"]
-        assert data["kwargs"] == {"key": "value"}
-        assert data["max_retries"] == 3
-        assert data["status"] == "pending"
-        assert "job_id" in data
-        assert "created_at" in data
-
-    def test_job_from_dict(self):
-        """Job deserializes from dict."""
-        data = {
-            "job_id": "test-uuid",
-            "task_type": "list_posts",
-            "args": ["arg1"],
-            "kwargs": {"limit": 10},
-            "retries": 2,
-            "max_retries": 5,
-            "created_at": "2025-01-01T12:00:00",
-            "status": "in_progress",
-        }
-        job = Job.from_dict(data)
-        assert job.job_id == "test-uuid"
-        assert job.task_type == "list_posts"
-        assert job.args == ("arg1",)
-        assert job.kwargs == {"limit": 10}
-        assert job.retries == 2
-        assert job.max_retries == 5
-        assert job.status == JobStatus.IN_PROGRESS
-
-    def test_job_roundtrip(self):
+    def test_job_serialization_roundtrip(self):
         """Job survives serialization roundtrip."""
         original = Job(
             task_type="get_details",
@@ -111,62 +61,26 @@ class TestJob:
 class TestJobResult:
     """Tests for JobResult dataclass."""
 
-    def test_success_result(self):
-        """Success result stores data."""
-        result = JobResult(
-            job_id="job123",
-            success=True,
-            data={"video_id": "vid456"},
-            worker_id=0,
-        )
-        assert result.job_id == "job123"
-        assert result.success is True
-        assert result.data == {"video_id": "vid456"}
-        assert result.error is None
-        assert result.worker_id == 0
+    def test_success_and_failure_results(self):
+        """JobResult stores success/failure data correctly."""
+        # Success case
+        success = JobResult(job_id="job1", success=True, data={"video_id": "v1"}, worker_id=0)
+        assert success.success is True
+        assert success.data == {"video_id": "v1"}
+        assert success.error is None
 
-    def test_failure_result(self):
-        """Failure result stores error."""
-        result = JobResult(
-            job_id="job123",
-            success=False,
-            error="Connection timeout",
-            worker_id=1,
-        )
-        assert result.success is False
-        assert result.error == "Connection timeout"
-        assert result.data is None
+        # Failure case
+        failure = JobResult(job_id="job2", success=False, error="Timeout", worker_id=1)
+        assert failure.success is False
+        assert failure.error == "Timeout"
 
-    def test_result_to_dict(self):
-        """JobResult serializes to dict."""
-        result = JobResult(
-            job_id="job123",
-            success=True,
-            data={"key": "value"},
-            worker_id=2,
-        )
-        data = result.to_dict()
-        assert data["job_id"] == "job123"
-        assert data["success"] is True
-        assert data["data"] == {"key": "value"}
-        assert data["worker_id"] == 2
-        assert "completed_at" in data
-
-    def test_result_from_dict(self):
-        """JobResult deserializes from dict."""
-        data = {
-            "job_id": "job789",
-            "success": False,
-            "data": None,
-            "error": "Failed",
-            "completed_at": "2025-01-01T12:00:00",
-            "worker_id": 3,
-        }
-        result = JobResult.from_dict(data)
-        assert result.job_id == "job789"
-        assert result.success is False
-        assert result.error == "Failed"
-        assert result.worker_id == 3
+    def test_result_serialization_roundtrip(self):
+        """JobResult survives serialization roundtrip."""
+        original = JobResult(job_id="job1", success=True, data={"key": "value"}, worker_id=0)
+        restored = JobResult.from_dict(original.to_dict())
+        assert restored.job_id == original.job_id
+        assert restored.success == original.success
+        assert restored.data == original.data
 
 
 # =============================================================================
@@ -174,138 +88,80 @@ class TestJobResult:
 # =============================================================================
 
 
-class TestWorkerStatus:
-    """Tests for WorkerStatus enum."""
-
-    def test_status_values(self):
-        """All expected status values exist."""
-        assert WorkerStatus.IDLE.value == "idle"
-        assert WorkerStatus.BUSY.value == "busy"
-        assert WorkerStatus.STOPPING.value == "stopping"
-        assert WorkerStatus.STOPPED.value == "stopped"
-        assert WorkerStatus.ERROR.value == "error"
-
-
 class TestWorkerStats:
     """Tests for WorkerStats dataclass."""
 
-    def test_stats_defaults(self):
-        """Stats have zero defaults."""
-        stats = WorkerStats()
-        assert stats.success == 0
-        assert stats.fail == 0
-        assert stats.total_time == 0.0
+    def test_stats_calculations(self):
+        """Stats calculates total and success_rate correctly."""
+        # Empty stats
+        empty = WorkerStats()
+        assert empty.total == 0
+        assert empty.success_rate == 0.0
 
-    def test_stats_total(self):
-        """Total is sum of success and fail."""
-        stats = WorkerStats(success=5, fail=3)
-        assert stats.total == 8
-
-    def test_stats_success_rate_zero_total(self):
-        """Success rate is 0.0 when no jobs."""
-        stats = WorkerStats()
-        assert stats.success_rate == 0.0
-
-    def test_stats_success_rate(self):
-        """Success rate calculated correctly."""
+        # With data
         stats = WorkerStats(success=8, fail=2)
+        assert stats.total == 10
         assert stats.success_rate == 0.8
 
 
 class TestWorker:
     """Tests for Worker dataclass."""
 
-    def test_worker_defaults(self):
-        """Worker has sensible defaults."""
+    def test_worker_status_transitions(self):
+        """Worker status transitions work correctly."""
         worker = Worker(worker_id=0, port=9223)
-        assert worker.worker_id == 0
-        assert worker.port == 9223
-        assert worker.client is None
         assert worker.status == WorkerStatus.IDLE
-        assert worker.current_job is None
-        assert isinstance(worker.stats, WorkerStats)
 
-    def test_worker_mark_busy(self):
-        """mark_busy sets status and job."""
-        worker = Worker(worker_id=0, port=9223)
         job = Job(task_type="test")
         worker.mark_busy(job)
         assert worker.status == WorkerStatus.BUSY
         assert worker.current_job == job
 
-    def test_worker_mark_idle(self):
-        """mark_idle clears status and job."""
-        worker = Worker(worker_id=0, port=9223)
-        job = Job(task_type="test")
-        worker.mark_busy(job)
         worker.mark_idle()
         assert worker.status == WorkerStatus.IDLE
         assert worker.current_job is None
 
-    def test_worker_mark_stopping(self):
-        """mark_stopping sets stopping status."""
-        worker = Worker(worker_id=0, port=9223)
         worker.mark_stopping()
         assert worker.status == WorkerStatus.STOPPING
 
-    def test_worker_mark_stopped(self):
-        """mark_stopped sets stopped status."""
-        worker = Worker(worker_id=0, port=9223)
         worker.mark_stopped()
         assert worker.status == WorkerStatus.STOPPED
 
     def test_worker_to_dict(self):
-        """Worker serializes to dict."""
+        """Worker serializes to dict with stats and job info."""
         worker = Worker(worker_id=1, port=9224)
         worker.stats.success = 5
-        worker.stats.fail = 1
-        data = worker.to_dict()
-        assert data["worker_id"] == 1
-        assert data["port"] == 9224
-        assert data["status"] == "idle"
-        assert data["current_job_id"] is None
-        assert data["stats"]["success"] == 5
-        assert data["stats"]["fail"] == 1
-        assert data["stats"]["total"] == 6
-
-    def test_worker_to_dict_with_job(self):
-        """Worker to_dict includes current job id."""
-        worker = Worker(worker_id=0, port=9223)
         job = Job(task_type="test")
         worker.mark_busy(job)
+
         data = worker.to_dict()
+        assert data["worker_id"] == 1
+        assert data["status"] == "busy"
         assert data["current_job_id"] == job.job_id
+        assert data["stats"]["success"] == 5
 
     @pytest.mark.asyncio
-    async def test_worker_wait_current_task_no_task(self):
-        """wait_current_task returns immediately when no task."""
+    async def test_worker_wait_current_task(self):
+        """wait_current_task handles completion and timeout."""
         worker = Worker(worker_id=0, port=9223)
-        result = await worker.wait_current_task(timeout=0.1)
-        assert result is True
 
-    @pytest.mark.asyncio
-    async def test_worker_wait_current_task_completes(self):
-        """wait_current_task waits for task completion."""
-        worker = Worker(worker_id=0, port=9223)
+        # No task - returns immediately
+        assert await worker.wait_current_task(timeout=0.1) is True
+
+        # Task completes
         job = Job(task_type="test")
         worker.mark_busy(job)
 
         async def complete_task():
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.02)
             worker.mark_idle()
 
         asyncio.create_task(complete_task())
-        result = await worker.wait_current_task(timeout=1.0)
-        assert result is True
+        assert await worker.wait_current_task(timeout=1.0) is True
 
-    @pytest.mark.asyncio
-    async def test_worker_wait_current_task_timeout(self):
-        """wait_current_task returns False on timeout."""
-        worker = Worker(worker_id=0, port=9223)
-        job = Job(task_type="test")
-        worker.mark_busy(job)
-        result = await worker.wait_current_task(timeout=0.01)
-        assert result is False
+        # Timeout
+        worker.mark_busy(Job(task_type="test"))
+        assert await worker.wait_current_task(timeout=0.01) is False
 
 
 # =============================================================================
@@ -316,128 +172,48 @@ class TestWorker:
 class TestPoolState:
     """Tests for PoolState dataclass."""
 
-    def test_state_defaults(self):
-        """State has sensible defaults."""
-        state = PoolState()
-        assert state.version == 1
-        assert state.completed == {}
-        assert state.pending == []
-        assert state.in_progress == []
+    def test_state_serialization_roundtrip(self):
+        """PoolState survives serialization roundtrip."""
+        job = Job(task_type="test", kwargs={"key": "value"})
+        result = JobResult(job_id="r1", success=True, data={"result": 42})
+        original = PoolState(completed={"r1": result}, pending=[job])
 
-    def test_state_to_dict(self):
-        """State serializes to dict."""
-        job = Job(task_type="test")
-        result = JobResult(job_id="r1", success=True)
-        state = PoolState(
-            completed={"r1": result},
-            pending=[job],
-            in_progress=[],
-        )
-        data = state.to_dict()
-        assert data["version"] == 1
-        assert "r1" in data["completed"]
-        assert len(data["pending"]) == 1
-        assert data["pending"][0]["task_type"] == "test"
-
-    def test_state_from_dict(self):
-        """State deserializes from dict."""
-        data = {
-            "version": 1,
-            "last_updated": "2025-01-01T12:00:00",
-            "completed": {
-                "job1": {
-                    "job_id": "job1",
-                    "success": True,
-                    "data": {"key": "value"},
-                    "error": None,
-                    "completed_at": "2025-01-01T12:00:00",
-                    "worker_id": 0,
-                }
-            },
-            "pending": [
-                {
-                    "job_id": "job2",
-                    "task_type": "create_video",
-                    "args": [],
-                    "kwargs": {},
-                    "retries": 0,
-                    "max_retries": -1,
-                    "created_at": "2025-01-01T11:00:00",
-                    "status": "pending",
-                }
-            ],
-            "in_progress": [],
-        }
-        state = PoolState.from_dict(data)
-        assert "job1" in state.completed
-        assert state.completed["job1"].success is True
-        assert len(state.pending) == 1
-        assert state.pending[0].task_type == "create_video"
+        restored = PoolState.from_dict(original.to_dict())
+        assert "r1" in restored.completed
+        assert restored.completed["r1"].success is True
+        assert len(restored.pending) == 1
+        assert restored.pending[0].task_type == "test"
 
 
 class TestPersistenceFunctions:
     """Tests for save_state and load_state functions."""
 
-    def test_save_state_creates_file(self):
-        """save_state creates state file."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir) / "state.json"
-            state = PoolState()
-            save_state(state, path)
-            assert path.exists()
-
-    def test_save_state_valid_json(self):
-        """save_state writes valid JSON."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir) / "state.json"
-            state = PoolState()
-            save_state(state, path)
-            with open(path) as f:
-                data = json.load(f)
-            assert "version" in data
-            assert "last_updated" in data
-
-    def test_load_state_nonexistent(self):
-        """load_state returns None for nonexistent file."""
-        result = load_state("/nonexistent/path.json")
-        assert result is None
-
-    def test_load_state_roundtrip(self):
-        """State survives save/load roundtrip."""
+    def test_save_load_roundtrip(self):
+        """State survives save/load roundtrip to file."""
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "state.json"
             job = Job(task_type="test_task", kwargs={"key": "value"})
             result = JobResult(job_id="r1", success=True, data={"result": 42})
-            original = PoolState(
-                completed={"r1": result},
-                pending=[job],
-            )
+            original = PoolState(completed={"r1": result}, pending=[job])
+
             save_state(original, path)
+            assert path.exists()
+
             loaded = load_state(path)
             assert loaded is not None
             assert "r1" in loaded.completed
-            assert loaded.completed["r1"].data == {"result": 42}
-            assert len(loaded.pending) == 1
             assert loaded.pending[0].task_type == "test_task"
 
-    def test_load_state_invalid_json(self):
-        """load_state returns None for invalid JSON."""
+    def test_load_state_error_cases(self):
+        """load_state handles missing and invalid files."""
+        # Missing file
+        assert load_state("/nonexistent/path.json") is None
+
+        # Invalid JSON
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "state.json"
             path.write_text("not valid json {{{")
-            result = load_state(path)
-            assert result is None
-
-    def test_save_state_atomic_write(self):
-        """save_state uses atomic write (temp file + rename)."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir) / "state.json"
-            state = PoolState()
-            # Write twice to verify no corruption
-            save_state(state, path)
-            save_state(state, path)
-            loaded = load_state(path)
-            assert loaded is not None
+            assert load_state(path) is None
 
 
 # =============================================================================

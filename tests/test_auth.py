@@ -35,36 +35,37 @@ class TestDefaultConstants:
 class TestGetPlatformHeaders:
     """Tests for get_platform_headers function."""
 
-    def test_returns_dict(self):
-        """Returns a dictionary."""
-        result = get_platform_headers()
-        assert isinstance(result, dict)
-
-    def test_contains_user_agent(self):
-        """Contains user-agent header (lowercase)."""
+    def test_contains_required_headers(self):
+        """Returns dict with required headers."""
         result = get_platform_headers()
         assert "user-agent" in result
-
-    def test_user_agent_contains_chrome(self):
-        """User-Agent contains Chrome."""
-        result = get_platform_headers()
-        assert "Chrome" in result["user-agent"]
-
-    def test_contains_sec_ch_ua(self):
-        """Contains sec-ch-ua header."""
-        result = get_platform_headers()
         assert "sec-ch-ua" in result
-
-    def test_contains_sec_ch_ua_platform(self):
-        """Contains sec-ch-ua-platform header."""
-        result = get_platform_headers()
         assert "sec-ch-ua-platform" in result
+        assert "Chrome" in result["user-agent"]
 
     def test_custom_chrome_version(self):
         """Accepts custom chrome version."""
         result = get_platform_headers("142")
         assert "142" in result["user-agent"]
         assert "142" in result["sec-ch-ua"]
+
+    def test_windows_platform(self):
+        """Returns Windows-specific headers when on Windows."""
+        from unittest.mock import patch
+
+        with patch("grok_web.auth.platform.system", return_value="Windows"):
+            result = get_platform_headers()
+            assert "Windows" in result["user-agent"]
+            assert '"Windows"' in result["sec-ch-ua-platform"]
+
+    def test_linux_platform(self):
+        """Returns Linux-specific headers when on Linux."""
+        from unittest.mock import patch
+
+        with patch("grok_web.auth.platform.system", return_value="Linux"):
+            result = get_platform_headers()
+            assert "Linux" in result["user-agent"]
+            assert '"Linux"' in result["sec-ch-ua-platform"]
 
 
 class TestLoadCookies:
@@ -263,6 +264,37 @@ class TestLoadConfig:
 
         try:
             with pytest.raises(GrokConfigError, match="missing 'cookies' key"):
+                load_config(temp_path)
+        finally:
+            os.unlink(temp_path)
+
+    def test_load_invalid_json_raises(self):
+        """Raise error when config file has invalid JSON."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            f.write("not valid json {{{")
+            temp_path = f.name
+
+        try:
+            with pytest.raises(GrokConfigError, match="Invalid JSON"):
+                load_config(temp_path)
+        finally:
+            os.unlink(temp_path)
+
+    def test_load_invalid_cookie_config_raises(self):
+        """Raise error when cookie fields are invalid."""
+        config_data = {
+            "cookies": {
+                "sso": "test_sso",
+                # Missing required fields
+            }
+        }
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(config_data, f)
+            temp_path = f.name
+
+        try:
+            with pytest.raises(GrokConfigError, match="Invalid cookie"):
                 load_config(temp_path)
         finally:
             os.unlink(temp_path)
