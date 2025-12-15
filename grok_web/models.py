@@ -281,3 +281,56 @@ class ImageEditResult(BaseModel):
     def success(self) -> bool:
         """Check if at least one image was generated successfully."""
         return self.success_count > 0
+
+
+class ImageGenerationResult(BaseModel):
+    """Result of create_image() API call (text-to-image generation)."""
+
+    # Source info
+    prompt: str = Field(..., description="Text prompt used for generation")
+
+    # Generated images (each with id, url, moderated status)
+    images: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="List of generated images with keys: image_id, image_url, moderated",
+    )
+
+    # Conversation info (for debugging)
+    conversation_id: str | None = Field(None, description="Chat conversation UUID")
+
+    @computed_field
+    @property
+    def image_urls(self) -> list[str]:
+        """URLs of successfully generated (non-moderated) images."""
+        return [
+            f"https://assets.grok.com/{img['image_url']}"
+            for img in self.images
+            if not img.get("moderated") and img.get("image_url")
+        ]
+
+    @computed_field
+    @property
+    def moderated_count(self) -> int:
+        """Number of images that were moderated."""
+        return sum(1 for img in self.images if img.get("moderated"))
+
+    @computed_field
+    @property
+    def success_count(self) -> int:
+        """Number of successfully generated (non-moderated) images."""
+        return len(self.images) - self.moderated_count
+
+    @computed_field
+    @property
+    def total_count(self) -> int:
+        """Total images generated (successful + moderated)."""
+        return len(self.images)
+
+    def has_enough_success(self, min_count: int = 1) -> bool:
+        """Check if at least min_count images were generated successfully."""
+        return self.success_count >= min_count
+
+    @property
+    def success(self) -> bool:
+        """Check if at least one image was generated successfully."""
+        return self.success_count > 0

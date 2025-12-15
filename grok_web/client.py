@@ -45,7 +45,13 @@ from ._internal import (
 )
 from .auth import DEFAULT_IMPERSONATE, get_platform_headers, load_config
 from .exceptions import GrokAPIError, GrokAuthError, GrokNotFoundError
-from .models import GrokCookies, ImageEditResult, VideoGenerationResult, VideoPreset
+from .models import (
+    GrokCookies,
+    ImageEditResult,
+    ImageGenerationResult,
+    VideoGenerationResult,
+    VideoPreset,
+)
 
 # =============================================================================
 # Helper functions
@@ -1765,6 +1771,170 @@ class NodriverClient(AsyncClientBase):
             conversation_id=captured_data.get("conversation_id"),
         )
 
+    async def create_image(
+        self, prompt: str, timeout: int = 60, image_count: int = 4
+    ) -> ImageGenerationResult:
+        """
+        Generate images from a text prompt (txt2img).
+
+        This navigates to grok.com/imagine, enters the prompt,
+        and captures the generated images.
+
+        Args:
+            prompt: Text description of the image to generate
+            timeout: Max seconds to wait for generation (default 60)
+            image_count: Expected number of images (default 4, Grok generates 4)
+
+        Returns:
+            ImageGenerationResult with image URLs and moderation info
+
+        Raises:
+            GrokAPIError: If generation fails or times out
+
+        Example:
+            >>> result = await client.create_image("a cat wearing sunglasses")
+            >>> result.success_count  # Number of non-moderated images
+            >>> result.image_urls  # URLs of successful images
+        """
+        import asyncio
+        import json as json_mod
+
+        from nodriver import cdp
+
+        d = self._ui_delay
+
+        # Navigate to imagine page
+        await self._tab.get(f"{self.BASE_URL}/imagine")
+        await asyncio.sleep(3 * d)
+
+        # Set up network monitoring
+        await self._tab.send(cdp.network.enable())
+
+        captured_data = {"conversation_id": None, "images": {}}
+
+        async def handle_response(event: cdp.network.ResponseReceived):
+            url = event.response.url
+            if "conversations/new" in url or "app-chat" in url:
+                captured_data["request_id"] = event.request_id
+
+        async def handle_loading_finished(event: cdp.network.LoadingFinished):
+            if captured_data.get("request_id") == event.request_id:
+                try:
+                    body_result = await self._tab.send(
+                        cdp.network.get_response_body(request_id=event.request_id)
+                    )
+                    body = body_result[0] if isinstance(body_result, tuple) else str(body_result)
+
+                    # Parse NDJSON response
+                    for line in body.strip().split("\n"):
+                        if not line:
+                            continue
+                        try:
+                            data = json_mod.loads(line)
+                            result = data.get("result", {})
+
+                            # Capture conversation ID
+                            if "conversation" in result:
+                                captured_data["conversation_id"] = result["conversation"].get(
+                                    "conversationId"
+                                )
+
+                            # Capture image generation responses
+                            response = result.get("response", {})
+                            if "streamingImageGenerationResponse" in response:
+                                img_resp = response["streamingImageGenerationResponse"]
+                                image_id = img_resp.get("imageId")
+                                if image_id:
+                                    # Update image data (later responses have final status)
+                                    captured_data["images"][image_id] = {
+                                        "image_id": image_id,
+                                        "image_url": img_resp.get("imageUrl", ""),
+                                        "moderated": img_resp.get("moderated", False),
+                                        "progress": img_resp.get("progress", 0),
+                                    }
+                        except json_mod.JSONDecodeError:
+                            continue
+                except Exception:
+                    pass
+
+        self._tab.add_handler(cdp.network.ResponseReceived, handle_response)
+        self._tab.add_handler(cdp.network.LoadingFinished, handle_loading_finished)
+
+        # Find and fill the prompt textarea
+        escaped_prompt = prompt.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+        fill_result = await self._tab.evaluate(f"""
+            (function() {{
+                // Find the main textarea for image generation
+                const textarea = document.querySelector('textarea[placeholder*="想象"]') ||
+                               document.querySelector('textarea[placeholder*="Imagine"]') ||
+                               document.querySelector('textarea[placeholder*="imagine"]') ||
+                               document.querySelector('textarea[aria-label*="想象"]') ||
+                               document.querySelector('main textarea');
+                if (!textarea) return 'not found';
+
+                textarea.focus();
+                const setter = Object.getOwnPropertyDescriptor(
+                    window.HTMLTextAreaElement.prototype, 'value'
+                ).set;
+                setter.call(textarea, "{escaped_prompt}");
+                textarea.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                textarea.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                return 'ok';
+            }})()
+        """)
+        if fill_result == "not found":
+            raise GrokAPIError("Could not find prompt textarea on imagine page")
+
+        await asyncio.sleep(1 * d)
+
+        # Click the submit/generate button
+        submit_clicked = await self._tab.evaluate("""
+            (function() {
+                // Look for the generate button (usually has specific aria-label or text)
+                const buttons = Array.from(document.querySelectorAll('button'));
+                for (const btn of buttons) {
+                    const text = btn.innerText.toLowerCase();
+                    const label = (btn.getAttribute('aria-label') || '').toLowerCase();
+                    // Match common generate button patterns
+                    if (text.includes('生成') || text.includes('generate') ||
+                        text.includes('imagine') || text.includes('创建') ||
+                        label.includes('生成') || label.includes('submit')) {
+                        btn.click();
+                        return true;
+                    }
+                }
+                // Fallback: find submit button by type
+                const submitBtn = document.querySelector('button[type="submit"]');
+                if (submitBtn) {
+                    submitBtn.click();
+                    return true;
+                }
+                return false;
+            })()
+        """)
+        if not submit_clicked:
+            raise GrokAPIError("Could not find generate button")
+
+        # Wait for response with timeout
+        start_time = asyncio.get_event_loop().time()
+        while asyncio.get_event_loop().time() - start_time < timeout:
+            # Check if we have completed images (progress=100)
+            completed = [
+                img for img in captured_data["images"].values() if img.get("progress") == 100
+            ]
+            if len(completed) >= image_count:
+                break
+            await asyncio.sleep(1)
+
+        # Build result
+        images = list(captured_data["images"].values())
+
+        return ImageGenerationResult(
+            prompt=prompt,
+            images=images,
+            conversation_id=captured_data.get("conversation_id"),
+        )
+
     async def create_video_via_ui(
         self,
         parent_post_id: str,
@@ -2417,6 +2587,31 @@ class SmartGrokClient:
 
         browser = await self._get_browser_client()
         return await browser.edit_image(post_id, edit_prompt, timeout)
+
+    async def create_image(
+        self, prompt: str, timeout: int = 60, image_count: int = 4
+    ) -> "ImageGenerationResult":
+        """
+        Generate images from a text prompt (browser only, txt2img).
+
+        This navigates to grok.com/imagine, enters the prompt,
+        and captures the generated images.
+
+        Args:
+            prompt: Text description of the image to generate
+            timeout: Max seconds to wait for generation (default 60)
+            image_count: Expected number of images (default 4)
+
+        Returns:
+            ImageGenerationResult with image URLs and moderation info
+
+        Example:
+            >>> result = await client.create_image("a cat wearing sunglasses")
+            >>> print(result.image_urls)  # List of generated image URLs
+            >>> print(result.success_count)  # Non-moderated images count
+        """
+        browser = await self._get_browser_client()
+        return await browser.create_image(prompt, timeout, image_count)
 
     async def create_video(
         self,
