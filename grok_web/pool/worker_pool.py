@@ -645,6 +645,17 @@ class BrowserWorkerPool:
             elif task_type == "upgrade_video_via_ui":
                 return await client.upgrade_video_via_ui(*args, **kwargs)
 
+            elif task_type == "edit_image_via_ui":
+                result = await client.edit_image_via_ui(*args, **kwargs)
+                return {
+                    "post_id": result.post_id,
+                    "edit_prompt": result.edit_prompt,
+                    "image_urls": result.image_urls,
+                    "moderated_count": result.moderated_count,
+                    "success_count": result.success_count,
+                    "total_count": result.total_count,
+                }
+
             else:
                 raise ValueError(f"Unknown task type: {task_type}")
         finally:

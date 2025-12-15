@@ -63,7 +63,8 @@ UI Menu Operations (NodriverClient only):
 13. like_post_via_ui()       - Like a post
 14. dislike_post_via_ui()    - Dislike a post
 15. upgrade_video_via_ui()   - Convert non-HD video to HD
-16. get_menu_items()         - List available menu options
+16. edit_image_via_ui()      - Edit image to generate variations (returns ImageEditResult)
+17. get_menu_items()         - List available menu options
 
 Parallel Processing
 ===================
@@ -109,6 +110,7 @@ from .models import (
     ChildVideo,
     GenerationMode,
     GrokCookies,
+    ImageEditResult,
     PostDetails,
     PostSummary,
     VideoGenerationResult,
@@ -217,6 +219,7 @@ __all__ = [
     "ChildVideo",
     "GenerationMode",
     "GrokCookies",
+    "ImageEditResult",
     "VideoMatchResult",
     "VideoGenerationResult",
     "VideoPreset",

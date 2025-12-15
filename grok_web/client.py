@@ -45,7 +45,7 @@ from ._internal import (
 )
 from .auth import DEFAULT_IMPERSONATE, get_platform_headers, load_config
 from .exceptions import GrokAPIError, GrokAuthError, GrokNotFoundError
-from .models import GrokCookies, VideoGenerationResult, VideoPreset
+from .models import GrokCookies, ImageEditResult, VideoGenerationResult, VideoPreset
 
 # =============================================================================
 # Helper functions
@@ -1438,6 +1438,176 @@ class NodriverClient(AsyncClientBase):
         await asyncio.sleep(0.5 * d)
 
         return items
+
+    async def edit_image_via_ui(
+        self, post_id: str, edit_prompt: str, timeout: int = 60
+    ) -> ImageEditResult:
+        """
+        Edit an image via the UI to generate new variations.
+
+        This navigates to the post, clicks "编辑图像", enters the prompt,
+        and captures the API response with generated images.
+
+        Each edit generates 2 images. Some may be moderated (blocked).
+
+        Args:
+            post_id: The post UUID (parent image)
+            edit_prompt: The edit instruction (e.g., "add sunglasses", "改成白色丝绸")
+            timeout: Max seconds to wait for generation (default 60)
+
+        Returns:
+            ImageEditResult with image URLs and moderation info
+
+        Raises:
+            GrokAPIError: If edit fails or times out
+
+        Example:
+            >>> result = await client.edit_image_via_ui("abc-123", "add wings")
+            >>> result.success_count  # Number of non-moderated images
+            >>> result.image_urls  # URLs of successful images
+            >>> result.has_enough_success(2)  # Check if got at least 2
+        """
+        import asyncio
+        import json as json_mod
+
+        from nodriver import cdp
+
+        d = self._ui_delay
+
+        # Navigate to the post
+        await self._navigate_to_post(post_id)
+
+        # Set up network monitoring
+        await self._tab.send(cdp.network.enable())
+
+        captured_data = {"conversation_id": None, "images": {}}
+
+        async def handle_response(event: cdp.network.ResponseReceived):
+            url = event.response.url
+            if "conversations/new" in url or "app-chat" in url:
+                captured_data["request_id"] = event.request_id
+
+        async def handle_loading_finished(event: cdp.network.LoadingFinished):
+            if captured_data.get("request_id") == event.request_id:
+                try:
+                    body_result = await self._tab.send(
+                        cdp.network.get_response_body(request_id=event.request_id)
+                    )
+                    body = body_result[0] if isinstance(body_result, tuple) else str(body_result)
+
+                    # Parse NDJSON response
+                    for line in body.strip().split("\n"):
+                        if not line:
+                            continue
+                        try:
+                            data = json_mod.loads(line)
+                            result = data.get("result", {})
+
+                            # Capture conversation ID
+                            if "conversation" in result:
+                                captured_data["conversation_id"] = result["conversation"].get(
+                                    "conversationId"
+                                )
+
+                            # Capture image generation responses
+                            response = result.get("response", {})
+                            if "streamingImageGenerationResponse" in response:
+                                img_resp = response["streamingImageGenerationResponse"]
+                                image_id = img_resp.get("imageId")
+                                if image_id:
+                                    # Update image data (later responses have final status)
+                                    captured_data["images"][image_id] = {
+                                        "image_id": image_id,
+                                        "image_url": img_resp.get("imageUrl", ""),
+                                        "moderated": img_resp.get("moderated", False),
+                                        "progress": img_resp.get("progress", 0),
+                                    }
+                        except json_mod.JSONDecodeError:
+                            continue
+                except Exception:
+                    pass
+
+        self._tab.add_handler(cdp.network.ResponseReceived, handle_response)
+        self._tab.add_handler(cdp.network.LoadingFinished, handle_loading_finished)
+
+        # Wait for page to load
+        await asyncio.sleep(3 * d)
+
+        # Click "编辑图像" button (has aria-label="播放" and text "编辑图像")
+        clicked = await self._tab.evaluate("""
+            (function() {
+                const buttons = Array.from(document.querySelectorAll('button'));
+                for (const btn of buttons) {
+                    if (btn.innerText.includes('编辑图像')) {
+                        btn.click();
+                        return true;
+                    }
+                }
+                return false;
+            })()
+        """)
+        if not clicked:
+            raise GrokAPIError("Could not find '编辑图像' button")
+
+        await asyncio.sleep(2 * d)
+
+        # Fill the edit textarea
+        escaped_prompt = edit_prompt.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+        fill_result = await self._tab.evaluate(f"""
+            (function() {{
+                const textarea = document.querySelector('textarea[placeholder*="编辑"]') ||
+                               document.querySelector('textarea[aria-label*="编辑"]');
+                if (!textarea) return 'not found';
+
+                textarea.focus();
+                const setter = Object.getOwnPropertyDescriptor(
+                    window.HTMLTextAreaElement.prototype, 'value'
+                ).set;
+                setter.call(textarea, "{escaped_prompt}");
+                textarea.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                textarea.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                return 'ok';
+            }})()
+        """)
+        if fill_result == "not found":
+            raise GrokAPIError("Could not find edit textarea")
+
+        await asyncio.sleep(1 * d)
+
+        # Click the submit button (aria-label="生成视频", text becomes "编辑" after filling)
+        submit_clicked = await self._tab.evaluate("""
+            (function() {
+                const btn = document.querySelector('button[aria-label="生成视频"]');
+                if (btn) {
+                    btn.click();
+                    return true;
+                }
+                return false;
+            })()
+        """)
+        if not submit_clicked:
+            raise GrokAPIError("Could not find submit button")
+
+        # Wait for response with timeout
+        start_time = asyncio.get_event_loop().time()
+        while asyncio.get_event_loop().time() - start_time < timeout:
+            # Check if we have completed images (progress=100)
+            completed = [
+                img for img in captured_data["images"].values() if img.get("progress") == 100
+            ]
+            if len(completed) >= 2:  # Edit generates 2 images
+                break
+            await asyncio.sleep(1)
+
+        # Build result
+        images = list(captured_data["images"].values())
+
+        return ImageEditResult(
+            post_id=post_id,
+            edit_prompt=edit_prompt,
+            images=images,
+            conversation_id=captured_data.get("conversation_id"),
+        )
 
     async def create_video_via_ui(
         self,
