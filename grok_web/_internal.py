@@ -1178,17 +1178,21 @@ class AsyncClientBase(ResponseParser, ABC):
     async def _match_by_video_id(
         self, video_id: str, local_size: int, filename: str
     ) -> VideoMatchResult:
-        """Match video by video ID (web format) - O(1) direct lookup.
+        """Match video by video ID (web format) - O(1) direct lookup with fallback.
 
-        Uses direct API call with video_id to get video details and parent info.
-        The API returns originalPostId for child videos, enabling O(1) lookup.
+        Strategy:
+        1. Try direct API call with video_id (O(1) - fast)
+        2. If 404, search recent favorites for parent (O(n) - limited scope)
 
         Uses Bridge Pattern: I/O operations here, business logic in GrokClientLogic.
         """
         # I/O Layer: Fetch post details
         try:
             details = await self.get_post_details(video_id)
-        except (GrokAuthError, GrokNotFoundError):
+        except GrokNotFoundError:
+            # Child video post is 404 - try to find parent by searching favorites
+            return await self._match_by_video_id_via_favorites(video_id, local_size, filename)
+        except GrokAuthError:
             raise
         except Exception as e:
             raise GrokAPIError(
@@ -1208,6 +1212,80 @@ class AsyncClientBase(ResponseParser, ABC):
         self._logic.verify_file_size_match(video_id, filename, local_size, web_size)
         return self._logic.build_video_match_result(
             parent_id, video_id, is_parent_video, details, local_size
+        )
+
+    async def _match_by_video_id_via_favorites(
+        self, video_id: str, local_size: int, filename: str, max_posts: int = 100
+    ) -> VideoMatchResult:
+        """Fallback: Search recent favorites to find parent of orphaned child video.
+
+        This handles the case where child video's post page is 404, but the video
+        still exists in parent's children list.
+
+        Args:
+            video_id: Child video ID to search for
+            local_size: Local file size
+            filename: Local filename
+            max_posts: Maximum number of recent posts to search (default: 100)
+
+        Returns:
+            VideoMatchResult if found
+
+        Raises:
+            GrokAPIError: If video not found in recent favorites
+        """
+        # Search recent favorites for this video
+        posts = await self.list_posts(limit=max_posts, source="MEDIA_POST_SOURCE_LIKED")
+
+        for post_summary in posts:
+            try:
+                # Get full details to check children
+                details = await self.get_post_details(post_summary.id)
+
+                # Check if this video is in children
+                for child in details.children:
+                    if child.id == video_id:
+                        # Found it! Build result
+                        parent_id = post_summary.id
+                        url = child.hd_media_url or child.media_url
+
+                        if not url:
+                            continue
+
+                        # Get file size
+                        try:
+                            web_size = await self.get_asset_file_size(url)
+                        except Exception:
+                            # If we can't get size, skip size verification
+                            web_size = local_size
+
+                        # Verify size match
+                        self._logic.verify_file_size_match(video_id, filename, local_size, web_size)
+
+                        # Build result
+                        return VideoMatchResult(
+                            parent_id=parent_id,
+                            video_id=video_id,
+                            is_parent_video=False,
+                            mode=details.mode,
+                            original_prompt=child.original_prompt,
+                            file_size=local_size,
+                            new_filename=f"grok-video_{parent_id}_{video_id}.mp4",
+                        )
+            except Exception:
+                # Skip posts that fail to load
+                continue
+
+        # Not found in recent favorites
+        raise GrokAPIError(
+            f"Video not found in recent {max_posts} favorites.\n"
+            f"Video ID: {video_id}\n"
+            f"Local file: {filename}\n\n"
+            f"This video's post page is 404, and it wasn't found in your recent favorites.\n"
+            f"Possible solutions:\n"
+            f"1. The video may be in older favorites - increase search limit\n"
+            f"2. Manually provide parent_id if you know it\n"
+            f"3. Visit https://grok.com/imagine/post/{video_id} to check if it exists"
         )
 
     # =========================================================================

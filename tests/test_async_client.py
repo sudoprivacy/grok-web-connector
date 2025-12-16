@@ -548,12 +548,15 @@ class TestAsyncClientMatchLocalVideo:
             f.write(b"x" * 1000)
 
         try:
-            # Mock get_post_details to raise not found (new O(1) approach)
+            # Mock get_post_details to raise not found, then fallback searches favorites
             mock_client.get_post_details = AsyncMock(
                 side_effect=GrokNotFoundError(f"Post not found: {video_id}")
             )
+            # Mock list_posts to return empty (no favorites)
+            mock_client.list_posts = AsyncMock(return_value=[])
 
-            with pytest.raises(GrokNotFoundError, match="Post not found"):
+            # Should raise GrokAPIError saying video not found in recent favorites
+            with pytest.raises(GrokAPIError, match="Video not found in recent"):
                 await mock_client.match_local_video(temp_path)
         finally:
             os.unlink(temp_path)
@@ -569,12 +572,15 @@ class TestAsyncClientMatchLocalVideo:
             f.write(b"x" * 1000)
 
         try:
-            # Mock get_post_details to raise not found (new O(1) approach)
+            # Mock get_post_details to raise not found, then fallback searches favorites
             mock_client.get_post_details = AsyncMock(
                 side_effect=GrokNotFoundError(f"Post not found: {video_id}")
             )
+            # Mock list_posts to return empty (no favorites)
+            mock_client.list_posts = AsyncMock(return_value=[])
 
-            with pytest.raises(GrokNotFoundError, match="Post not found"):
+            # Should raise GrokAPIError saying video not found in recent favorites
+            with pytest.raises(GrokAPIError, match="Video not found in recent"):
                 await mock_client.match_local_video(temp_path)
         finally:
             os.unlink(temp_path)
@@ -590,12 +596,15 @@ class TestAsyncClientMatchLocalVideo:
             f.write(b"x" * 1000)
 
         try:
-            # Mock get_post_details to raise not found (new O(1) approach)
+            # Mock get_post_details to raise not found, then fallback searches favorites
             mock_client.get_post_details = AsyncMock(
                 side_effect=GrokNotFoundError(f"Post not found: {video_id}")
             )
+            # Mock list_posts to return empty (no favorites)
+            mock_client.list_posts = AsyncMock(return_value=[])
 
-            with pytest.raises(GrokNotFoundError, match="Post not found"):
+            # Should raise GrokAPIError saying video not found in recent favorites
+            with pytest.raises(GrokAPIError, match="Video not found in recent"):
                 await mock_client.match_local_video(temp_path)
         finally:
             os.unlink(temp_path)
