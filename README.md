@@ -5,7 +5,8 @@ Python client library for interacting with Grok Imagine web API.
 ## Features
 
 - **SmartGrokClient** - Recommended client with HTTP-first, browser-fallback strategy
-- **12 Core APIs** - list_posts, get_post_details, create_video, favorite/unfavorite, like/dislike, and more
+- **15+ Core APIs** - list_posts, get_post_details, create_video, create_image, upload_image, download_video, and more
+- **3 Video Creation Modes** - img2vid, txt2vid, upload2vid (local image to video)
 - **Auto Cloudflare bypass** - Browser fallback handles challenges automatically
 - **Video presets** - Normal, Fun, Spicy modes for video generation
 - Type-safe with Pydantic models
@@ -70,9 +71,13 @@ async with get_client(browser_host="127.0.0.1", browser_port=9222) as client:
 |-----------|-----------|------------------|
 | list_posts | Playwright fetch | Browser-context fetch() |
 | get_post_details | Playwright fetch | Browser-context fetch() |
-| create_video | API call (often 403) | **Click UI buttons** |
+| create_video (img2vid) | API call (often 403) | **UI automation** |
+| create_video (txt2vid) | N/A | **UI automation** |
+| create_video (upload2vid) | N/A | **UI automation** |
+| create_image | N/A | **UI automation** |
+| upload_image | N/A | **File input injection** |
 
-**Key insight**: Browser fallback for read APIs uses JavaScript `fetch()` inside the browser context, which automatically uses the browser's authenticated session cookies. Only `create_video` actually clicks UI buttons.
+**Key insight**: Browser fallback for read APIs uses JavaScript `fetch()` inside the browser context, which automatically uses the browser's authenticated session cookies. Write operations like `create_video` use UI automation.
 
 ## Authentication Setup
 
@@ -141,19 +146,29 @@ await client.dislike_post(post_id)  # Give thumbs down
 ### Video APIs
 
 ```python
-# Simple: Create video with preset
-result = await client.create_video(post_id, preset="fun")  # "normal", "fun", or "spicy"
+# === Mode 1: img2vid (from existing Grok post) ===
+result = await client.create_video(source_post_id=post_id, preset="fun")
 
-# Full control: Use adjustment_prompt for custom instructions
-# (camera movement, character actions, style - anything!)
+# With custom prompt for camera/motion control
 result = await client.create_video(
-    post_id,
-    adjustment_prompt="she slowly turns her head, Dolly In, cinematic"
+    source_post_id=post_id,
+    prompt="she slowly turns her head, Dolly In, cinematic"
+)
+
+# === Mode 2: txt2vid (text to video, browser only) ===
+result = await client.create_video("a cat wearing sunglasses in space")
+
+# === Mode 3: upload2vid (local image to video, browser only) ===
+result = await client.create_video(
+    "slow zoom in",
+    source_image_path="~/photos/portrait.jpg"
 )
 
 # Upgrade to HD - adds hd_media_url field to video (~2x file size)
-# Useful: generate many videos, upgrade only the best ones
 await client.upgrade_video(video_id)
+
+# Download video to local file
+await client.download_video(video_id, "output.mp4", parent_post_id=post_id)
 
 # Delete a video (browser only)
 await client.delete_video(video_id)
@@ -162,9 +177,16 @@ await client.delete_video(video_id)
 ### Image APIs
 
 ```python
-# Edit image to generate variations (browser only)
+# Create image from text (txt2img, browser only)
+result = await client.create_image("a sunset over mountains")
+print(result.image_urls)  # List of generated image URLs
+
+# Edit existing image to generate variations (browser only)
 result = await client.edit_image(post_id, "add sunglasses")
 print(result.image_urls)
+
+# Upload local image (creates a new post)
+new_post_id = await client.upload_image("~/photos/portrait.jpg")
 ```
 
 ## Video Presets
@@ -175,9 +197,9 @@ print(result.image_urls)
 | `fun` | More dynamic, playful |
 | `spicy` | Most dramatic effects |
 
-## Adjustment Prompt (Video Generation)
+## Prompt Parameter (Video Generation)
 
-The `adjustment_prompt` parameter controls how videos are generated from images. This is the same as typing in the Grok Imagine UI text box after selecting an image.
+The `prompt` parameter controls how videos are generated. For img2vid, this is the same as typing in the Grok Imagine UI text box after selecting an image.
 
 **You can specify ANY video adjustments**, not just camera movement:
 
@@ -191,22 +213,21 @@ The `adjustment_prompt` parameter controls how videos are generated from images.
 **Best practice formula**: `"Subject + Motion + Camera, Style..."`
 
 ```python
-# Camera control
-await client.create_video(post_id, adjustment_prompt="Static Shot")
-await client.create_video(post_id, adjustment_prompt="slow orbit")
+# Camera control (img2vid)
+await client.create_video(source_post_id=post_id, prompt="Static Shot")
+await client.create_video(source_post_id=post_id, prompt="slow orbit")
 
 # Character actions
-await client.create_video(post_id, adjustment_prompt="she slowly turns her head")
-await client.create_video(post_id, adjustment_prompt="the character walks forward")
+await client.create_video(source_post_id=post_id, prompt="she slowly turns her head")
 
 # Combined (recommended)
 await client.create_video(
-    post_id,
-    adjustment_prompt="Woman walks through forest, Pan Left, cinematic lighting"
+    source_post_id=post_id,
+    prompt="Woman walks through forest, Pan Left, cinematic lighting"
 )
 ```
 
-When `adjustment_prompt` is provided, it overrides `preset` and uses 'custom' mode.
+When `prompt` is provided with `source_post_id`, it overrides `preset` and uses 'custom' mode.
 
 See **[grok-imagine-expert/docs/CAMERA_CONTROL.md](https://github.com/user/grok-imagine-expert/blob/main/docs/CAMERA_CONTROL.md)** for camera-specific examples with tested demo URLs.
 
