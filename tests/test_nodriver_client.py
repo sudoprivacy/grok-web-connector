@@ -581,3 +581,151 @@ class TestNodriverClientUIMenuOperations:
         result = await client.get_menu_items("post-123")
 
         assert result == ["Save", "Delete", "Like"]
+
+
+class TestNodriverClientDownloadVideo:
+    """Tests for download_video browser-based download."""
+
+    @pytest.fixture
+    def client(self, mock_cookies: GrokCookies) -> NodriverClient:
+        """Create NodriverClient with mocked tab."""
+        client = NodriverClient(cookies=mock_cookies)
+        client._tab = AsyncMock()
+        return client
+
+    @pytest.mark.asyncio
+    async def test_download_video_success(self, client: NodriverClient):
+        """download_video successfully downloads via browser fetch."""
+        import base64
+        import json
+        from pathlib import Path
+
+        video_data = b"fake_video_content"
+        encoded = base64.b64encode(video_data).decode()
+        client._tab.evaluate = AsyncMock(
+            side_effect=[
+                "https://grok.com/imagine",  # current URL check
+                json.dumps({"status": 200, "data": encoded}),  # fetch result
+            ]
+        )
+
+        with patch("pathlib.Path.write_bytes") as mock_write:
+            with patch("pathlib.Path.mkdir"):
+                result = await client.download_video(
+                    "https://example.com/video.mp4", Path("/tmp/output.mp4")
+                )
+
+        mock_write.assert_called_once_with(video_data)
+        assert result == Path("/tmp/output.mp4")
+
+    @pytest.mark.asyncio
+    async def test_download_video_navigates_if_not_on_grok(self, client: NodriverClient):
+        """download_video navigates to grok.com if not already there."""
+        import base64
+        import json
+        from pathlib import Path
+
+        video_data = b"fake_video_content"
+        encoded = base64.b64encode(video_data).decode()
+        client._tab.evaluate = AsyncMock(
+            side_effect=[
+                "https://other-site.com",  # not on grok.com
+                json.dumps({"status": 200, "data": encoded}),  # fetch result
+            ]
+        )
+        client._tab.get = AsyncMock()
+
+        with patch("pathlib.Path.write_bytes"):
+            with patch("pathlib.Path.mkdir"):
+                with patch("asyncio.sleep", return_value=None):
+                    await client.download_video(
+                        "https://example.com/video.mp4", Path("/tmp/output.mp4")
+                    )
+
+        client._tab.get.assert_called_once_with("https://grok.com/imagine")
+
+    @pytest.mark.asyncio
+    async def test_download_video_raises_on_http_error(self, client: NodriverClient):
+        """download_video raises GrokAPIError on HTTP error."""
+        import json
+        from pathlib import Path
+
+        from grok_web.exceptions import GrokAPIError
+
+        client._tab.evaluate = AsyncMock(
+            side_effect=[
+                "https://grok.com/imagine",  # current URL check
+                json.dumps({"status": 403, "error": "HTTP 403 Forbidden"}),  # fetch error
+            ]
+        )
+
+        with pytest.raises(GrokAPIError) as exc_info:
+            await client.download_video("https://example.com/video.mp4", Path("/tmp/output.mp4"))
+
+        assert "403" in str(exc_info.value)
+
+
+class TestNodriverClientStableId:
+    """Tests for stable_id (A/B testing) management."""
+
+    @pytest.fixture
+    def client(self, mock_cookies: GrokCookies) -> NodriverClient:
+        """Create NodriverClient with mocked tab."""
+        client = NodriverClient(cookies=mock_cookies)
+        client._tab = AsyncMock()
+        return client
+
+    @pytest.mark.asyncio
+    async def test_set_stable_id_success_with_reload(self, client: NodriverClient):
+        """set_stable_id injects and verifies stable_id after reload."""
+        client._tab.evaluate = AsyncMock(
+            side_effect=[
+                "test-stable-id",  # inject result
+                "https://grok.com/imagine",  # current URL for reload
+                "test-stable-id",  # get_stable_id verification
+            ]
+        )
+        client._tab.get = AsyncMock()
+
+        with patch("asyncio.sleep", return_value=None):
+            result = await client.set_stable_id("test-stable-id", reload_page=True)
+
+        assert result is True
+        client._tab.get.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_set_stable_id_without_reload(self, client: NodriverClient):
+        """set_stable_id without reload returns True immediately."""
+        client._tab.evaluate = AsyncMock(return_value="test-stable-id")
+
+        result = await client.set_stable_id("test-stable-id", reload_page=False)
+
+        assert result is True
+        # evaluate should only be called once for inject
+        assert client._tab.evaluate.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_set_stable_id_returns_false_on_mismatch(self, client: NodriverClient):
+        """set_stable_id returns False if verification fails."""
+        client._tab.evaluate = AsyncMock(
+            side_effect=[
+                "test-stable-id",  # inject result
+                "https://grok.com/imagine",  # current URL for reload
+                "different-id",  # get_stable_id returns different value
+            ]
+        )
+        client._tab.get = AsyncMock()
+
+        with patch("asyncio.sleep", return_value=None):
+            result = await client.set_stable_id("test-stable-id", reload_page=True)
+
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_set_stable_id_returns_false_on_exception(self, client: NodriverClient):
+        """set_stable_id returns False on exception."""
+        client._tab.evaluate = AsyncMock(side_effect=Exception("Failed"))
+
+        result = await client.set_stable_id("test-stable-id", reload_page=False)
+
+        assert result is False

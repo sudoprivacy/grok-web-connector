@@ -541,6 +541,97 @@ class TestSmartGrokClientImageAPIs:
         assert result == mock_result
 
 
+class TestSmartGrokClientDownloadVideo:
+    """Tests for download_video functionality."""
+
+    @pytest.mark.asyncio
+    async def test_download_video_with_parent_post_id(self, mock_cookies: GrokCookies):
+        """download_video() with parent_post_id does fast lookup."""
+        from unittest.mock import MagicMock
+
+        mock_http = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_response.body = AsyncMock(return_value=b"video_data")
+        mock_context = AsyncMock()
+        mock_context.get = AsyncMock(return_value=mock_response)
+        mock_http._get_asset_context = AsyncMock(return_value=mock_context)
+
+        mock_child = MagicMock()
+        mock_child.id = "video-123"
+        mock_child.media_url = "https://example.com/video.mp4"
+        mock_child.hd_media_url = "https://example.com/video_hd.mp4"
+        mock_details = MagicMock()
+        mock_details.children = [mock_child]
+        mock_http.get_post_details = AsyncMock(return_value=mock_details)
+
+        client = SmartGrokClient(cookies=mock_cookies)
+        client._http_client = mock_http
+
+        with patch("pathlib.Path.write_bytes"):
+            with patch("pathlib.Path.mkdir"):
+                await client.download_video(
+                    "video-123", "/tmp/output.mp4", parent_post_id="parent-456"
+                )
+
+        mock_http.get_post_details.assert_called_once_with("parent-456")
+        mock_context.get.assert_called_once()
+        assert "video_hd.mp4" in mock_context.get.call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_download_video_falls_back_to_browser_on_403(self, mock_cookies: GrokCookies):
+        """download_video() falls back to browser on 403."""
+        from pathlib import Path
+        from unittest.mock import MagicMock
+
+        mock_http = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.status = 403
+        mock_context = AsyncMock()
+        mock_context.get = AsyncMock(return_value=mock_response)
+        mock_http._get_asset_context = AsyncMock(return_value=mock_context)
+
+        mock_child = MagicMock()
+        mock_child.id = "video-123"
+        mock_child.media_url = "https://example.com/video.mp4"
+        mock_child.hd_media_url = None
+        mock_details = MagicMock()
+        mock_details.children = [mock_child]
+        mock_http.get_post_details = AsyncMock(return_value=mock_details)
+
+        mock_browser = AsyncMock()
+        mock_browser.download_video = AsyncMock(return_value=Path("/tmp/output.mp4"))
+
+        client = SmartGrokClient(cookies=mock_cookies)
+        client._http_client = mock_http
+        client._browser_client = mock_browser
+
+        result = await client.download_video(
+            "video-123", "/tmp/output.mp4", parent_post_id="parent-456"
+        )
+
+        mock_browser.download_video.assert_called_once()
+        assert result == Path("/tmp/output.mp4")
+
+    @pytest.mark.asyncio
+    async def test_download_video_raises_not_found(self, mock_cookies: GrokCookies):
+        """download_video() raises GrokNotFoundError when video not found."""
+        from grok_web.exceptions import GrokNotFoundError
+
+        mock_http = AsyncMock()
+        mock_details = MagicMock()
+        mock_details.children = []  # No children
+        mock_http.get_post_details = AsyncMock(return_value=mock_details)
+
+        client = SmartGrokClient(cookies=mock_cookies)
+        client._http_client = mock_http
+
+        with pytest.raises(GrokNotFoundError):
+            await client.download_video(
+                "nonexistent-video", "/tmp/output.mp4", parent_post_id="parent-456"
+            )
+
+
 class TestSmartGrokClientTxt2Vid:
     """Tests for txt2vid mode of create_video."""
 
