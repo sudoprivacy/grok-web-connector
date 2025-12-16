@@ -2624,6 +2624,12 @@ class SmartGrokClient:
             GrokNotFoundError: If video not found in favorites
             GrokAPIError: If download fails
 
+        Note:
+            If you already have the video_id, you can construct the URL directly:
+            - HD: https://imagine-public.x.ai/imagine-public/share-videos/{video_id}_hd.mp4
+            - SD: https://imagine-public.x.ai/imagine-public/share-videos/{video_id}.mp4
+            Then use NodriverClient.download_video(url, path) for direct download.
+
         Example:
             >>> # Download a video (auto-detects HD)
             >>> path = await client.download_video(video_id, "output.mp4")
