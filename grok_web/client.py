@@ -1437,6 +1437,68 @@ class NodriverClient(AsyncClientBase):
             conversation_id=captured_data.get("conversation_id"),
         )
 
+    async def upload_image(self, image_path: str | Path, timeout: int = 30) -> str:
+        """
+        Upload a local image to Grok Imagine and create a new post.
+
+        This navigates to grok.com/imagine, uploads the image via the hidden
+        file input, and waits for the page to redirect to the new post.
+
+        Args:
+            image_path: Path to the local image file (PNG, JPG, etc.)
+            timeout: Max seconds to wait for upload and redirect (default 30)
+
+        Returns:
+            The post ID of the newly created post.
+
+        Raises:
+            FileNotFoundError: If the image file doesn't exist.
+            GrokAPIError: If upload fails or times out.
+
+        Example:
+            >>> post_id = await client.upload_image("/path/to/photo.jpg")
+            >>> # Now use the post_id for video or image generation
+            >>> video = await client.create_video("zoom in", source_post_id=post_id)
+        """
+        import asyncio
+        import re
+
+        image_path = Path(image_path)
+        if not image_path.exists():
+            raise FileNotFoundError(f"Image not found: {image_path}")
+
+        # Navigate to imagine page
+        await self._tab.get(f"{self.BASE_URL}/imagine")
+        await asyncio.sleep(2)
+
+        # Find the hidden file input
+        file_input = await self._tab.select('input[type="file"][name="files"]')
+        if not file_input:
+            raise GrokAPIError("File input element not found on imagine page")
+
+        # Upload the file
+        await file_input.send_file(str(image_path.absolute()))
+
+        # Wait for page to redirect to the new post
+        start_time = asyncio.get_event_loop().time()
+        post_id = None
+
+        while asyncio.get_event_loop().time() - start_time < timeout:
+            current_url = await self._tab.evaluate("window.location.href")
+            # URL format: https://grok.com/imagine/post/{post_id}
+            match = re.search(r"/imagine/post/([a-f0-9-]+)", current_url)
+            if match:
+                post_id = match.group(1)
+                break
+            await asyncio.sleep(0.5)
+
+        if not post_id:
+            raise GrokAPIError(
+                f"Upload timed out after {timeout}s. " "Page did not redirect to post URL."
+            )
+
+        return post_id
+
     async def create_image(
         self,
         prompt: str,
@@ -1920,7 +1982,7 @@ class NodriverClient(AsyncClientBase):
         aspect_ratio: str = ...,
         timeout: int = ...,
     ) -> VideoGenerationResult:
-        """upload2vid: Generate video from uploaded local image (not yet implemented)."""
+        """upload2vid: Upload local image and generate video from it."""
         ...
 
     async def create_video(
@@ -1948,7 +2010,6 @@ class NodriverClient(AsyncClientBase):
 
             source_post_id: (img2vid) Existing Grok image post ID to animate.
             source_image_path: (upload2vid) Local image path to upload and animate.
-                              NOT YET IMPLEMENTED - raises NotImplementedError.
 
             preset: Video style preset - 'normal', 'fun', or 'spicy'.
                    Only used for img2vid mode.
@@ -1963,9 +2024,17 @@ class NodriverClient(AsyncClientBase):
         if source_post_id is not None and source_image_path is not None:
             raise ValueError("Cannot specify both source_post_id and source_image_path.")
 
-        # Mode: upload2vid (not yet implemented)
+        # Mode: upload2vid (upload local image, then generate video)
         if source_image_path is not None:
-            raise NotImplementedError("upload2vid mode (source_image_path) is not yet implemented.")
+            # Upload the image first to create a post
+            uploaded_post_id = await self.upload_image(source_image_path)
+            # Then generate video from the uploaded post
+            return await self.create_video_via_ui(
+                parent_post_id=uploaded_post_id,
+                preset=preset,
+                timeout=timeout,
+                adjustment_prompt=prompt if prompt else None,
+            )
 
         # Mode: img2vid (from existing Grok image post)
         if source_post_id is not None:
@@ -2671,6 +2740,33 @@ class SmartGrokClient:
         browser = await self._get_browser_client()
         return await browser.create_image(prompt, aspect_ratio, min_success, max_scroll, timeout)
 
+    async def upload_image(self, image_path: str | Path, timeout: int = 30) -> str:
+        """
+        Upload a local image to Grok Imagine and create a new post.
+
+        The uploaded image can then be used for video generation or editing.
+
+        Args:
+            image_path: Path to the local image file (PNG, JPG, etc.)
+            timeout: Max seconds to wait for upload and redirect (default 30)
+
+        Returns:
+            The post ID of the newly created post.
+
+        Raises:
+            FileNotFoundError: If the image file doesn't exist.
+            GrokAPIError: If upload fails or times out.
+
+        Example:
+            >>> post_id = await client.upload_image("/path/to/photo.jpg")
+            >>> # Generate video from uploaded image
+            >>> video = await client.create_video("zoom in", source_post_id=post_id)
+            >>> # Or edit the uploaded image
+            >>> result = await client.edit_image(post_id, "add sunglasses")
+        """
+        browser = await self._get_browser_client()
+        return await browser.upload_image(image_path, timeout)
+
     # =========================================================================
     # Unified Video Generation API
     # =========================================================================
@@ -2709,7 +2805,7 @@ class SmartGrokClient:
         aspect_ratio: str = ...,
         timeout: int = ...,
     ) -> VideoGenerationResult:
-        """upload2vid: Generate video from uploaded local image (not yet implemented)."""
+        """upload2vid: Upload local image and generate video from it."""
         ...
 
     async def create_video(
@@ -2737,7 +2833,6 @@ class SmartGrokClient:
 
             source_post_id: (img2vid) Existing Grok image post ID to animate.
             source_image_path: (upload2vid) Local image path to upload and animate.
-                              NOT YET IMPLEMENTED - raises NotImplementedError.
 
             preset: Video style preset - 'normal', 'fun', or 'spicy'.
                    Only used for img2vid mode. Ignored if prompt contains custom instructions.
@@ -2752,7 +2847,7 @@ class SmartGrokClient:
 
         Raises:
             ValueError: If both source_post_id and source_image_path are provided.
-            NotImplementedError: If source_image_path is provided (upload2vid not implemented).
+            FileNotFoundError: If source_image_path file doesn't exist.
             GrokAuthError: If API is blocked and browser fallback is disabled.
 
         Examples:
@@ -2782,8 +2877,16 @@ class SmartGrokClient:
         if source_post_id is not None and source_image_path is not None:
             raise ValueError("Cannot specify both source_post_id and source_image_path.")
 
+        # upload2vid requires browser (no HTTP API)
         if source_image_path is not None:
-            raise NotImplementedError("upload2vid mode (source_image_path) is not yet implemented.")
+            browser = await self._get_browser_client()
+            return await browser.create_video(
+                prompt=prompt,
+                source_image_path=source_image_path,
+                preset=preset,
+                aspect_ratio=aspect_ratio,
+                timeout=timeout,
+            )
 
         # For img2vid with non-custom preset, try HTTP API first
         if source_post_id is not None and (not prompt or preset != "normal"):

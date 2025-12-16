@@ -408,6 +408,20 @@ class TestSmartGrokClientBrowserOnlyAPIs:
         mock_browser.upgrade_video.assert_called_once_with("test-video-id")
         assert result is True
 
+    @pytest.mark.asyncio
+    async def test_upload_image_uses_browser(self, mock_cookies: GrokCookies):
+        """upload_image() uses browser to upload local image."""
+        mock_browser = AsyncMock()
+        mock_browser.upload_image = AsyncMock(return_value="new-post-uuid")
+
+        client = SmartGrokClient(cookies=mock_cookies)
+        client._browser_client = mock_browser
+
+        result = await client.upload_image("/path/to/image.jpg", timeout=30)
+
+        mock_browser.upload_image.assert_called_once_with("/path/to/image.jpg", 30)
+        assert result == "new-post-uuid"
+
 
 class TestSmartGrokClientReadFallback:
     """Tests for read API browser fallback on 403."""
@@ -568,16 +582,30 @@ class TestSmartGrokClientTxt2Vid:
         assert "Cannot specify both" in str(exc_info.value)
 
     @pytest.mark.asyncio
-    async def test_create_video_upload2vid_not_implemented(self, mock_cookies: GrokCookies):
-        """create_video() raises NotImplementedError for upload2vid."""
-        client = SmartGrokClient(cookies=mock_cookies)
-
-        with pytest.raises(NotImplementedError) as exc_info:
-            await client.create_video(
-                "test prompt",
-                source_image_path="/path/to/image.jpg",
-            )
-
-        assert (
-            "upload2vid" in str(exc_info.value).lower() or "not yet" in str(exc_info.value).lower()
+    async def test_create_video_upload2vid_uses_browser(self, mock_cookies: GrokCookies):
+        """create_video() with source_image_path delegates to browser client."""
+        mock_browser = AsyncMock()
+        mock_browser.create_video.return_value = VideoGenerationResult(
+            parent_post_id="parent-123",
+            video_id="uploaded-video-123",
+            video_url="https://grok.com/video.mp4",
+            moderated=False,
         )
+
+        client = SmartGrokClient(cookies=mock_cookies)
+        client._browser_client = mock_browser
+
+        result = await client.create_video(
+            "test prompt",
+            source_image_path="/path/to/image.jpg",
+            preset="zoom_in",
+        )
+
+        mock_browser.create_video.assert_called_once_with(
+            prompt="test prompt",
+            source_image_path="/path/to/image.jpg",
+            preset="zoom_in",
+            aspect_ratio="portrait",
+            timeout=180,
+        )
+        assert result.video_id == "uploaded-video-123"
