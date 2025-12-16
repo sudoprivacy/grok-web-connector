@@ -407,6 +407,10 @@ class SyncClientBase(ResponseParser, ABC):
         """
         Match a local grok video to its web counterpart.
 
+        Supports two filename formats:
+        - Old format: grok-video-{parent_uuid}.mp4 (extracts parent_id)
+        - Web format: {video_uuid}.mp4 or {video_uuid}_hd.mp4 (extracts video_id)
+
         Args:
             local_path: Path to local video file
 
@@ -422,18 +426,39 @@ class SyncClientBase(ResponseParser, ABC):
             raise GrokAPIError(f"File not found: {local_path}")
 
         filename = local_path.name
-        match = re.match(
+        local_size = local_path.stat().st_size
+
+        # Try old format: grok-video-{parent_uuid}.mp4
+        old_match = re.match(
             r"grok-video-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
             filename,
         )
-        if not match:
+
+        # Try web format: {video_uuid}.mp4 or {video_uuid}_hd.mp4 or {video_uuid}_hd (1).mp4
+        web_match = re.match(
+            r"^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
+            r"(?:_hd)?(?:\s*\(\d+\))?\.mp4$",
+            filename,
+        )
+
+        if old_match:
+            # Old format: we have parent_id, fetch details directly
+            parent_id = old_match.group(1)
+            return self._match_by_parent_id(parent_id, local_size, filename)
+        elif web_match:
+            # Web format: we have video_id, need to search favorites
+            video_id = web_match.group(1)
+            return self._match_by_video_id(video_id, local_size, filename)
+        else:
             raise GrokAPIError(
-                f"Invalid filename format. Expected 'grok-video-{{uuid}}.mp4', got: {filename}"
+                f"Invalid filename format. Expected 'grok-video-{{uuid}}.mp4' or "
+                f"'{{uuid}}.mp4' or '{{uuid}}_hd.mp4', got: {filename}"
             )
 
-        parent_id = match.group(1)
-        local_size = local_path.stat().st_size
-
+    def _match_by_parent_id(
+        self, parent_id: str, local_size: int, filename: str
+    ) -> VideoMatchResult:
+        """Match video by parent ID (old format)."""
         details = self.get_post_details(parent_id)
 
         videos_to_check = []
@@ -482,6 +507,57 @@ class SyncClientBase(ResponseParser, ABC):
             f"Local size: {local_size} bytes\n"
             f"Parent ID: {parent_id}\n"
             f"Videos checked: {len(videos_to_check)}"
+        )
+
+    def _match_by_video_id(self, video_id: str, local_size: int, filename: str) -> VideoMatchResult:
+        """Match video by video ID (web format) - searches favorites."""
+        # Search through favorites to find the parent containing this video_id
+        posts = self.list_posts(source="favorites")
+
+        for post in posts:
+            try:
+                details = self.get_post_details(post.id)
+
+                # Check if parent itself is the video (txt2vid)
+                if details.id == video_id and details.hd_media_url:
+                    web_size = self.get_asset_file_size(details.hd_media_url)
+                    if web_size == local_size:
+                        new_filename = f"grok-video_{details.id}_{details.id}.mp4"
+                        return VideoMatchResult(
+                            parent_id=details.id,
+                            video_id=details.id,
+                            is_parent_video=True,
+                            mode=details.mode,
+                            original_prompt=details.original_prompt,
+                            file_size=local_size,
+                            new_filename=new_filename,
+                        )
+
+                # Check children
+                for child in details.children:
+                    if child.id == video_id:
+                        url = child.hd_media_url or child.media_url
+                        if url:
+                            web_size = self.get_asset_file_size(url)
+                            if web_size == local_size:
+                                new_filename = f"grok-video_{details.id}_{child.id}.mp4"
+                                return VideoMatchResult(
+                                    parent_id=details.id,
+                                    video_id=child.id,
+                                    is_parent_video=False,
+                                    mode=details.mode,
+                                    original_prompt=child.original_prompt,
+                                    file_size=local_size,
+                                    new_filename=new_filename,
+                                )
+            except Exception:
+                continue
+
+        raise GrokAPIError(
+            f"No matching video found in favorites for video ID: {video_id}\n"
+            f"Local file: {filename}\n"
+            f"Local size: {local_size} bytes\n"
+            f"Searched {len(posts)} favorites"
         )
 
     # =========================================================================
@@ -775,6 +851,10 @@ class AsyncClientBase(ResponseParser, ABC):
         """
         Match a local grok video to its web counterpart (async).
 
+        Supports two filename formats:
+        - Old format: grok-video-{parent_uuid}.mp4 (extracts parent_id)
+        - Web format: {video_uuid}.mp4 or {video_uuid}_hd.mp4 (extracts video_id)
+
         Args:
             local_path: Path to local video file
 
@@ -787,18 +867,39 @@ class AsyncClientBase(ResponseParser, ABC):
             raise GrokAPIError(f"File not found: {local_path}")
 
         filename = local_path.name
-        match = re.match(
+        local_size = local_path.stat().st_size
+
+        # Try old format: grok-video-{parent_uuid}.mp4
+        old_match = re.match(
             r"grok-video-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
             filename,
         )
-        if not match:
+
+        # Try web format: {video_uuid}.mp4 or {video_uuid}_hd.mp4 or {video_uuid}_hd (1).mp4
+        web_match = re.match(
+            r"^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
+            r"(?:_hd)?(?:\s*\(\d+\))?\.mp4$",
+            filename,
+        )
+
+        if old_match:
+            # Old format: we have parent_id, fetch details directly
+            parent_id = old_match.group(1)
+            return await self._match_by_parent_id(parent_id, local_size, filename)
+        elif web_match:
+            # Web format: we have video_id, need to search favorites
+            video_id = web_match.group(1)
+            return await self._match_by_video_id(video_id, local_size, filename)
+        else:
             raise GrokAPIError(
-                f"Invalid filename format. Expected 'grok-video-{{uuid}}.mp4', got: {filename}"
+                f"Invalid filename format. Expected 'grok-video-{{uuid}}.mp4' or "
+                f"'{{uuid}}.mp4' or '{{uuid}}_hd.mp4', got: {filename}"
             )
 
-        parent_id = match.group(1)
-        local_size = local_path.stat().st_size
-
+    async def _match_by_parent_id(
+        self, parent_id: str, local_size: int, filename: str
+    ) -> VideoMatchResult:
+        """Match video by parent ID (old format)."""
         details = await self.get_post_details(parent_id)
 
         videos_to_check = []
@@ -847,6 +948,59 @@ class AsyncClientBase(ResponseParser, ABC):
             f"Local size: {local_size} bytes\n"
             f"Parent ID: {parent_id}\n"
             f"Videos checked: {len(videos_to_check)}"
+        )
+
+    async def _match_by_video_id(
+        self, video_id: str, local_size: int, filename: str
+    ) -> VideoMatchResult:
+        """Match video by video ID (web format) - searches favorites."""
+        # Search through favorites to find the parent containing this video_id
+        posts = await self.list_posts(source="favorites")
+
+        for post in posts:
+            try:
+                details = await self.get_post_details(post.id)
+
+                # Check if parent itself is the video (txt2vid)
+                if details.id == video_id and details.hd_media_url:
+                    web_size = await self.get_asset_file_size(details.hd_media_url)
+                    if web_size == local_size:
+                        new_filename = f"grok-video_{details.id}_{details.id}.mp4"
+                        return VideoMatchResult(
+                            parent_id=details.id,
+                            video_id=details.id,
+                            is_parent_video=True,
+                            mode=details.mode,
+                            original_prompt=details.original_prompt,
+                            file_size=local_size,
+                            new_filename=new_filename,
+                        )
+
+                # Check children
+                for child in details.children:
+                    if child.id == video_id:
+                        url = child.hd_media_url or child.media_url
+                        if url:
+                            web_size = await self.get_asset_file_size(url)
+                            if web_size == local_size:
+                                new_filename = f"grok-video_{details.id}_{child.id}.mp4"
+                                return VideoMatchResult(
+                                    parent_id=details.id,
+                                    video_id=child.id,
+                                    is_parent_video=False,
+                                    mode=details.mode,
+                                    original_prompt=child.original_prompt,
+                                    file_size=local_size,
+                                    new_filename=new_filename,
+                                )
+            except Exception:
+                continue
+
+        raise GrokAPIError(
+            f"No matching video found in favorites for video ID: {video_id}\n"
+            f"Local file: {filename}\n"
+            f"Local size: {local_size} bytes\n"
+            f"Searched {len(posts)} favorites"
         )
 
     # =========================================================================
