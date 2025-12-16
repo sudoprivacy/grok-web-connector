@@ -1218,13 +1218,14 @@ class NodriverClient(AsyncClientBase):
         else:
             download_url = f"{video_url}?dl=1"
 
-        # Use browser fetch to download with proper cookies/clearance
-        # Return as base64 to transfer binary data through evaluate
+        # Use browser fetch to download
+        # CDN doesn't need credentials, use 'omit' to avoid CORS issues
         js_code = f"""
         (async () => {{
             try {{
                 const response = await fetch("{download_url}", {{
-                    credentials: 'include'
+                    credentials: 'omit',
+                    mode: 'cors'
                 }});
                 if (!response.ok) {{
                     return JSON.stringify({{
