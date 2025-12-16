@@ -123,7 +123,9 @@ size = await client.get_asset_file_size(asset_url)
 # Validate authentication
 is_valid = await client.validate_auth()
 
-# Match local video to web video
+# Match local video to web video (supports two filename formats)
+# - Old format: grok-video-{parent_uuid}.mp4
+# - Web format: {video_uuid}.mp4 or {video_uuid}_hd.mp4 (Dec 2024+)
 match = await client.match_local_video("/path/to/video.mp4")
 ```
 
@@ -172,6 +174,23 @@ await client.download_video(video_id, "output.mp4", parent_post_id=post_id)
 
 # Delete a video (browser only)
 await client.delete_video(video_id)
+```
+
+### URL Patterns
+
+You can construct URLs directly from `video_id`:
+
+| URL Type | Pattern |
+|----------|---------|
+| Web page | `https://grok.com/imagine/post/{video_id}` |
+| HD video | `https://imagine-public.x.ai/imagine-public/share-videos/{video_id}_hd.mp4` |
+| SD video | `https://imagine-public.x.ai/imagine-public/share-videos/{video_id}.mp4` |
+
+```python
+# Get video_id from various sources:
+video_id = result.video_id              # From create_video()
+video_id = details.children[0].id       # From get_post_details()
+video_id = "b8db4523-..._hd.mp4"[:-7]   # From web download filename
 ```
 
 ### Image APIs
