@@ -145,6 +145,93 @@ def parse_video_ndjson_response(
     )
 
 
+# =============================================================================
+# Bridge Pattern: Separate I/O operations from business logic
+# =============================================================================
+
+
+class IOBridge(ABC):
+    """
+    Bridge interface for I/O operations (Implementor in Bridge Pattern).
+
+    This interface abstracts sync vs async I/O execution, allowing business
+    logic to be written once and reused by both sync and async clients.
+    """
+
+    @abstractmethod
+    def execute_api_request(self, method: str, endpoint: str, json_data: dict | None = None) -> Any:
+        """Execute API request - implementation handles sync/async."""
+        pass
+
+    @abstractmethod
+    def execute_api_request_text(
+        self,
+        method: str,
+        endpoint: str,
+        json_data: dict | None = None,
+        extra_headers: dict | None = None,
+    ) -> Any:
+        """Execute API request returning raw text - implementation handles sync/async."""
+        pass
+
+    @abstractmethod
+    def execute_asset_request_head(self, asset_url: str) -> Any:
+        """Execute HEAD request to asset URL - implementation handles sync/async."""
+        pass
+
+
+class SyncIOBridge(IOBridge):
+    """Concrete implementation for synchronous I/O operations."""
+
+    def __init__(self, client: "SyncClientBase"):
+        self._client = client
+
+    def execute_api_request(self, method: str, endpoint: str, json_data: dict | None = None) -> Any:
+        """Execute sync API request."""
+        return self._client._api_request(method, endpoint, json_data)
+
+    def execute_api_request_text(
+        self,
+        method: str,
+        endpoint: str,
+        json_data: dict | None = None,
+        extra_headers: dict | None = None,
+    ) -> str:
+        """Execute sync API request returning raw text."""
+        return self._client._api_request_text(method, endpoint, json_data, extra_headers)
+
+    def execute_asset_request_head(self, asset_url: str) -> int:
+        """Execute sync HEAD request to asset URL."""
+        return self._client._asset_request_head(asset_url)
+
+
+class AsyncIOBridge(IOBridge):
+    """Concrete implementation for asynchronous I/O operations."""
+
+    def __init__(self, client: "AsyncClientBase"):
+        self._client = client
+
+    async def execute_api_request(
+        self, method: str, endpoint: str, json_data: dict | None = None
+    ) -> Any:
+        """Execute async API request."""
+        return await self._client._api_request(method, endpoint, json_data)
+
+    async def execute_api_request_text(
+        self,
+        method: str,
+        endpoint: str,
+        json_data: dict | None = None,
+        extra_headers: dict | None = None,
+    ) -> str:
+        """Execute async API request returning raw text."""
+        return await self._client._api_request_text(method, endpoint, json_data, extra_headers)
+
+    async def execute_asset_request_head(self, asset_url: str) -> int:
+        """Execute async HEAD request to asset URL."""
+        return await self._client._asset_request_head(asset_url)
+
+
 class ResponseParser:
     """
     Parses Grok API responses into Python objects.
@@ -251,18 +338,175 @@ class ResponseParser:
         )
 
 
+# =============================================================================
+# Business Logic Layer (Abstraction in Bridge Pattern)
+# =============================================================================
+
+
+class GrokClientLogic(ResponseParser):
+    """
+    Pure business logic without I/O coupling (Refined Abstraction in Bridge Pattern).
+
+    This class contains all business logic that doesn't require I/O operations.
+    It works with both sync and async clients through the IOBridge interface.
+
+    Benefits:
+    - Business logic written once, reused by sync and async clients
+    - Easy to test without mocking I/O
+    - Clear separation of concerns
+    """
+
+    BASE_URL = "https://grok.com"
+    ASSETS_URL = "https://assets.grok.com"
+
+    def validate_asset_url(self, asset_url: str) -> None:
+        """
+        Validate asset URL format (pure validation, no I/O).
+
+        Args:
+            asset_url: URL to validate
+
+        Raises:
+            GrokAPIError: If URL is invalid
+        """
+        if not asset_url:
+            raise GrokAPIError("Asset URL is empty")
+
+        # Accept both assets.grok.com and imagine-public.x.ai URLs
+        if not (
+            asset_url.startswith(self.ASSETS_URL)
+            or asset_url.startswith("https://imagine-public.x.ai/")
+        ):
+            raise GrokAPIError(
+                f"Invalid asset URL. Expected {self.ASSETS_URL}/... or "
+                f"https://imagine-public.x.ai/..., got: {asset_url[:50]}..."
+            )
+
+    def extract_parent_info_from_details(
+        self, details: PostDetails, video_id: str
+    ) -> tuple[str, bool]:
+        """
+        Extract parent ID and parent status from PostDetails (pure logic, no I/O).
+
+        Args:
+            details: Post details containing raw API data
+            video_id: Video ID being processed
+
+        Returns:
+            Tuple of (parent_id, is_parent_video)
+        """
+        # Extract parent_id from raw_data (originalPostId field)
+        # For child videos: originalPostId is the parent's ID
+        # For parent videos (txt2vid): originalPostId equals video_id or is missing
+        raw_post = details.raw_data.get("post", details.raw_data) if details.raw_data else {}
+        original_post_id = raw_post.get("originalPostId")
+
+        if original_post_id and original_post_id != video_id:
+            # This is a child video - originalPostId is the parent
+            return original_post_id, False
+        else:
+            # This is a parent video (txt2vid) or originalPostId is same as id
+            return video_id, True
+
+    def verify_file_size_match(
+        self, video_id: str, filename: str, local_size: int, web_size: int
+    ) -> None:
+        """
+        Verify local and web file sizes match (pure validation, no I/O).
+
+        Args:
+            video_id: Video ID for error message
+            filename: Filename for error message
+            local_size: Local file size in bytes
+            web_size: Web file size in bytes
+
+        Raises:
+            GrokAPIError: If sizes don't match
+        """
+        if web_size != local_size:
+            raise GrokAPIError(
+                f"File size mismatch for video: {video_id}\n"
+                f"Local file: {filename}\n"
+                f"Local size: {local_size}, Web size: {web_size}"
+            )
+
+    def build_video_match_result(
+        self,
+        parent_id: str,
+        video_id: str,
+        is_parent_video: bool,
+        details: PostDetails,
+        local_size: int,
+    ) -> VideoMatchResult:
+        """
+        Build VideoMatchResult from components (pure construction, no I/O).
+
+        Args:
+            parent_id: Parent post ID
+            video_id: Video ID
+            is_parent_video: Whether this is a parent video
+            details: Post details
+            local_size: Local file size
+
+        Returns:
+            VideoMatchResult object
+        """
+        new_filename = f"grok-video_{parent_id}_{video_id}.mp4"
+        return VideoMatchResult(
+            parent_id=parent_id,
+            video_id=video_id,
+            is_parent_video=is_parent_video,
+            mode=details.mode,
+            original_prompt=details.original_prompt,
+            file_size=local_size,
+            new_filename=new_filename,
+        )
+
+    def extract_media_url_from_details(
+        self, details: PostDetails, video_id: str, filename: str
+    ) -> str:
+        """
+        Extract media URL from PostDetails (pure extraction, no I/O).
+
+        Args:
+            details: Post details containing media URLs
+            video_id: Video ID for error message
+            filename: Filename for error message
+
+        Returns:
+            Media URL (prefers HD)
+
+        Raises:
+            GrokAPIError: If no media URL found
+        """
+        url = details.hd_media_url or details.media_url
+        if not url:
+            raise GrokAPIError(
+                f"No media URL found for video: {video_id}\n" f"Local file: {filename}"
+            )
+        return url
+
+
 class SyncClientBase(ResponseParser, ABC):
     """
     Abstract base class for synchronous Grok API clients.
 
     Implements all API methods. Subclasses only need to provide:
-    - __init__(): Initialize HTTP client
+    - __init__(): Initialize HTTP client (must call super().__init__())
     - _api_request(): Make authenticated API requests
     - _asset_request_head(): Make HEAD request to assets URL
+
+    Uses Bridge Pattern to separate business logic from I/O operations,
+    eliminating code duplication between sync and async implementations.
     """
 
     BASE_URL = "https://grok.com"
     ASSETS_URL = "https://assets.grok.com"
+
+    def __init__(self):
+        """Initialize client with business logic layer."""
+        super().__init__()
+        self._logic = GrokClientLogic()
 
     # =========================================================================
     # Abstract methods (must be implemented by subclasses)
@@ -368,18 +612,9 @@ class SyncClientBase(ResponseParser, ABC):
         Raises:
             GrokAPIError: If request fails or URL is invalid
         """
-        if not asset_url:
-            raise GrokAPIError("Asset URL is empty")
-
-        # Accept both assets.grok.com and imagine-public.x.ai URLs
-        if not (
-            asset_url.startswith(self.ASSETS_URL)
-            or asset_url.startswith("https://imagine-public.x.ai/")
-        ):
-            raise GrokAPIError(
-                f"Invalid asset URL. Expected {self.ASSETS_URL}/... or https://imagine-public.x.ai/..., got: {asset_url[:50]}..."
-            )
-
+        # Use business logic layer for validation
+        self._logic.validate_asset_url(asset_url)
+        # Execute I/O operation
         return self._asset_request_head(asset_url)
 
     # =========================================================================
@@ -518,11 +753,13 @@ class SyncClientBase(ResponseParser, ABC):
 
         Uses direct API call with video_id to get video details and parent info.
         The API returns originalPostId for child videos, enabling O(1) lookup.
+
+        Uses Bridge Pattern: I/O operations here, business logic in GrokClientLogic.
         """
+        # I/O Layer: Fetch post details
         try:
             details = self.get_post_details(video_id)
         except (GrokAuthError, GrokNotFoundError):
-            # Let auth errors and not-found errors propagate for proper handling
             raise
         except Exception as e:
             raise GrokAPIError(
@@ -531,45 +768,17 @@ class SyncClientBase(ResponseParser, ABC):
                 f"Error: {e}"
             ) from e
 
-        # Extract parent_id from raw_data (originalPostId field)
-        # For child videos: originalPostId is the parent's ID
-        # For parent videos (txt2vid): originalPostId equals video_id or is missing
-        raw_post = details.raw_data.get("post", details.raw_data) if details.raw_data else {}
-        original_post_id = raw_post.get("originalPostId")
+        # Business Logic Layer: Extract media URL
+        url = self._logic.extract_media_url_from_details(details, video_id, filename)
 
-        if original_post_id and original_post_id != video_id:
-            # This is a child video - originalPostId is the parent
-            parent_id = original_post_id
-            is_parent_video = False
-        else:
-            # This is a parent video (txt2vid) or originalPostId is same as id
-            parent_id = video_id
-            is_parent_video = True
-
-        # Verify file size matches
-        url = details.hd_media_url or details.media_url
-        if not url:
-            raise GrokAPIError(
-                f"No media URL found for video: {video_id}\n" f"Local file: {filename}"
-            )
-
+        # I/O Layer: Fetch file size
         web_size = self.get_asset_file_size(url)
-        if web_size != local_size:
-            raise GrokAPIError(
-                f"File size mismatch for video: {video_id}\n"
-                f"Local file: {filename}\n"
-                f"Local size: {local_size}, Web size: {web_size}"
-            )
 
-        new_filename = f"grok-video_{parent_id}_{video_id}.mp4"
-        return VideoMatchResult(
-            parent_id=parent_id,
-            video_id=video_id,
-            is_parent_video=is_parent_video,
-            mode=details.mode,
-            original_prompt=details.original_prompt,
-            file_size=local_size,
-            new_filename=new_filename,
+        # Business Logic Layer: Extract parent info, verify size, build result
+        parent_id, is_parent_video = self._logic.extract_parent_info_from_details(details, video_id)
+        self._logic.verify_file_size_match(video_id, filename, local_size, web_size)
+        return self._logic.build_video_match_result(
+            parent_id, video_id, is_parent_video, details, local_size
         )
 
     # =========================================================================
@@ -712,14 +921,23 @@ class AsyncClientBase(ResponseParser, ABC):
     Abstract base class for asynchronous Grok API clients.
 
     Implements all async API methods. Subclasses only need to provide:
+    - __init__(): Initialize HTTP client (must call super().__init__())
     - __aenter__/__aexit__: Async context manager lifecycle
     - _api_request(): Make authenticated API requests (async)
     - _api_request_text(): Make authenticated request returning raw text (async)
     - _asset_request_head(): Make HEAD request to assets URL (async)
+
+    Uses Bridge Pattern to separate business logic from I/O operations,
+    eliminating code duplication between sync and async implementations.
     """
 
     BASE_URL = "https://grok.com"
     ASSETS_URL = "https://assets.grok.com"
+
+    def __init__(self):
+        """Initialize client with business logic layer."""
+        super().__init__()
+        self._logic = GrokClientLogic()
 
     # =========================================================================
     # Abstract methods (must be implemented by subclasses)
@@ -824,18 +1042,9 @@ class AsyncClientBase(ResponseParser, ABC):
         Returns:
             File size in bytes
         """
-        if not asset_url:
-            raise GrokAPIError("Asset URL is empty")
-
-        # Accept both assets.grok.com and imagine-public.x.ai URLs
-        if not (
-            asset_url.startswith(self.ASSETS_URL)
-            or asset_url.startswith("https://imagine-public.x.ai/")
-        ):
-            raise GrokAPIError(
-                f"Invalid asset URL. Expected {self.ASSETS_URL}/... or https://imagine-public.x.ai/..., got: {asset_url[:50]}..."
-            )
-
+        # Use business logic layer for validation
+        self._logic.validate_asset_url(asset_url)
+        # Execute I/O operation
         return await self._asset_request_head(asset_url)
 
     # =========================================================================
@@ -973,11 +1182,13 @@ class AsyncClientBase(ResponseParser, ABC):
 
         Uses direct API call with video_id to get video details and parent info.
         The API returns originalPostId for child videos, enabling O(1) lookup.
+
+        Uses Bridge Pattern: I/O operations here, business logic in GrokClientLogic.
         """
+        # I/O Layer: Fetch post details
         try:
             details = await self.get_post_details(video_id)
         except (GrokAuthError, GrokNotFoundError):
-            # Let auth errors and not-found errors propagate for proper handling
             raise
         except Exception as e:
             raise GrokAPIError(
@@ -986,45 +1197,17 @@ class AsyncClientBase(ResponseParser, ABC):
                 f"Error: {e}"
             ) from e
 
-        # Extract parent_id from raw_data (originalPostId field)
-        # For child videos: originalPostId is the parent's ID
-        # For parent videos (txt2vid): originalPostId equals video_id or is missing
-        raw_post = details.raw_data.get("post", details.raw_data) if details.raw_data else {}
-        original_post_id = raw_post.get("originalPostId")
+        # Business Logic Layer: Extract media URL
+        url = self._logic.extract_media_url_from_details(details, video_id, filename)
 
-        if original_post_id and original_post_id != video_id:
-            # This is a child video - originalPostId is the parent
-            parent_id = original_post_id
-            is_parent_video = False
-        else:
-            # This is a parent video (txt2vid) or originalPostId is same as id
-            parent_id = video_id
-            is_parent_video = True
-
-        # Verify file size matches
-        url = details.hd_media_url or details.media_url
-        if not url:
-            raise GrokAPIError(
-                f"No media URL found for video: {video_id}\n" f"Local file: {filename}"
-            )
-
+        # I/O Layer: Fetch file size
         web_size = await self.get_asset_file_size(url)
-        if web_size != local_size:
-            raise GrokAPIError(
-                f"File size mismatch for video: {video_id}\n"
-                f"Local file: {filename}\n"
-                f"Local size: {local_size}, Web size: {web_size}"
-            )
 
-        new_filename = f"grok-video_{parent_id}_{video_id}.mp4"
-        return VideoMatchResult(
-            parent_id=parent_id,
-            video_id=video_id,
-            is_parent_video=is_parent_video,
-            mode=details.mode,
-            original_prompt=details.original_prompt,
-            file_size=local_size,
-            new_filename=new_filename,
+        # Business Logic Layer: Extract parent info, verify size, build result
+        parent_id, is_parent_video = self._logic.extract_parent_info_from_details(details, video_id)
+        self._logic.verify_file_size_match(video_id, filename, local_size, web_size)
+        return self._logic.build_video_match_result(
+            parent_id, video_id, is_parent_video, details, local_size
         )
 
     # =========================================================================

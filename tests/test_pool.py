@@ -494,3 +494,167 @@ class TestBrowserWorkerPoolExecuteJob:
 
         # ui_delay should be restored to original
         assert mock_worker.client._ui_delay == 1.0
+
+
+# =============================================================================
+# BrowserWorkerPool Edge Cases Tests
+# =============================================================================
+
+
+class TestBrowserWorkerPoolEdgeCases:
+    """Tests for BrowserWorkerPool edge cases and boundary conditions."""
+
+    @pytest.fixture
+    def pool(self):
+        """Create pool instance."""
+        from grok_web.pool import BrowserWorkerPool
+
+        return BrowserWorkerPool()
+
+    @pytest.mark.asyncio
+    async def test_remove_worker_invalid_id_raises(self, pool):
+        """remove_worker with invalid worker_id raises ValueError."""
+        with pytest.raises(ValueError, match="Worker .* not found"):
+            await pool.remove_worker(999)
+
+    @pytest.mark.asyncio
+    async def test_submit_batch_returns_job_ids(self, pool):
+        """submit_batch returns list of job IDs."""
+        job_ids = await pool.submit_batch(
+            [
+                ("create_video", ("post1",), {}),
+                ("create_video", ("post2",), {}),
+            ]
+        )
+
+        assert len(job_ids) == 2
+        assert all(isinstance(jid, str) for jid in job_ids)
+
+    @pytest.mark.asyncio
+    async def test_submit_batch_empty_list(self, pool):
+        """submit_batch with empty list returns empty list."""
+        job_ids = await pool.submit_batch([])
+
+        assert job_ids == []
+
+    @pytest.mark.asyncio
+    async def test_get_result_nonexistent_job_returns_none(self, pool):
+        """get_result for nonexistent job returns None."""
+        result = pool.get_result("nonexistent-job-id")
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_wait_for_timeout(self, pool):
+        """wait_for with timeout raises TimeoutError."""
+        job_id = await pool.submit("create_video", "post-123")
+
+        with pytest.raises(asyncio.TimeoutError):
+            await pool.wait_for(job_id, timeout=0.1)
+
+    @pytest.mark.asyncio
+    async def test_wait_for_nonexistent_job_raises(self, pool):
+        """wait_for with nonexistent job raises KeyError."""
+        with pytest.raises(KeyError, match="Job .* not found"):
+            await pool.wait_for("nonexistent-job", timeout=0.1)
+
+    @pytest.mark.asyncio
+    async def test_wait_all_empty_pool(self, pool):
+        """wait_all on empty pool returns empty dict."""
+        results = await pool.wait_all(timeout=0.1)
+
+        assert results == {}
+
+    @pytest.mark.asyncio
+    async def test_wait_all_timeout(self, pool):
+        """wait_all with timeout raises TimeoutError when jobs incomplete."""
+        await pool.submit("create_video", "post-123")
+
+        with pytest.raises(asyncio.TimeoutError):
+            await pool.wait_all(timeout=0.1)
+
+    def test_pending_count_empty_pool(self, pool):
+        """pending_count property returns 0 for empty pool."""
+        assert pool.pending_count == 0
+
+    def test_completed_count_empty_pool(self, pool):
+        """completed_count property returns 0 for empty pool."""
+        assert pool.completed_count == 0
+
+    def test_worker_count_before_start(self, pool):
+        """worker_count property returns 0 before pool is started."""
+        assert pool.worker_count == 0
+
+    def test_worker_stats_empty_pool(self, pool):
+        """worker_stats property returns empty dict for unstarted pool."""
+        stats = pool.worker_stats
+
+        assert stats == {}
+
+    def test_get_status_includes_all_fields(self, pool):
+        """get_status returns dict with all status fields."""
+        status = pool.get_status()
+
+        assert "running" in status
+        assert "workers" in status
+        assert "pending_jobs" in status
+        assert "completed_jobs" in status
+        assert status["running"] is False
+        assert len(status["workers"]) == 0
+        assert status["pending_jobs"] == 0
+        assert status["completed_jobs"] == 0
+
+    @pytest.mark.asyncio
+    async def test_submit_with_custom_max_retries(self, pool):
+        """submit with custom max_retries sets job max_retries."""
+        job_id = await pool.submit("create_video", "post-123", max_retries=5)
+
+        # Check that job was created with correct max_retries
+        assert job_id in pool._pending_jobs
+        assert pool._pending_jobs[job_id].max_retries == 5
+
+    @pytest.mark.asyncio
+    async def test_fail_condition_callback(self):
+        """fail_condition callback properly identifies failed jobs."""
+        from grok_web.pool import BrowserWorkerPool
+
+        # Create pool with fail_condition that fails on moderated=True
+        pool = BrowserWorkerPool(fail_condition=lambda r: r.get("moderated", False))
+
+        # Verify fail_condition is set
+        assert pool._fail_condition is not None
+        assert pool._fail_condition({"moderated": True}) is True
+        assert pool._fail_condition({"moderated": False}) is False
+
+    @pytest.mark.asyncio
+    async def test_requeue_position_front(self):
+        """requeue_position='front' creates pool with priority queue."""
+        from grok_web.pool import BrowserWorkerPool
+
+        pool = BrowserWorkerPool(requeue_position="front")
+
+        assert pool._requeue_position == "front"
+
+    @pytest.mark.asyncio
+    async def test_requeue_position_back(self):
+        """requeue_position='back' creates pool with normal queue."""
+        from grok_web.pool import BrowserWorkerPool
+
+        pool = BrowserWorkerPool(requeue_position="back")
+
+        assert pool._requeue_position == "back"
+
+    def test_save_state_without_state_file(self, pool):
+        """save_state does nothing when state_file is None."""
+        pool.save_state()  # Should not raise
+
+    @pytest.mark.asyncio
+    async def test_pending_count_after_submit(self, pool):
+        """pending_count property increases after submitting jobs."""
+        await pool.submit("create_video", "post-123")
+        await pool.submit("create_video", "post-456")
+
+        # pending_count includes both _pending_jobs dict and queue sizes
+        # Each job appears in both _pending_jobs and the queue
+        assert pool.pending_count >= 2
+        assert len(pool._pending_jobs) == 2

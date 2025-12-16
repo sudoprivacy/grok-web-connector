@@ -104,6 +104,8 @@ class AsyncClient(AsyncClientBase):
         config_path: Path | str | None = None,
     ):
         """Initialize (use as async context manager to start Playwright)."""
+        super().__init__()  # Initialize business logic layer
+
         if cookies is None:
             config = load_config(config_path)
             cookies = config["cookies"]
@@ -309,6 +311,8 @@ class NodriverClient(AsyncClientBase):
             ui_delay: Multiplier for UI operation delays (default: 1.0).
                      Increase for slower connections, decrease for faster ones.
         """
+        super().__init__()  # Initialize business logic layer
+
         if cookies is None:
             config = load_config(config_path)
             cookies = config["cookies"]
