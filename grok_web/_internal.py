@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .exceptions import GrokAPIError, GrokAuthError
+from .exceptions import GrokAPIError, GrokAuthError, GrokNotFoundError
 from .models import (
     ChildVideo,
     GenerationMode,
@@ -360,7 +360,7 @@ class SyncClientBase(ResponseParser, ABC):
         Get file size of a Grok asset via HEAD request.
 
         Args:
-            asset_url: Full URL to asset on assets.grok.com
+            asset_url: Full URL to asset on assets.grok.com or imagine-public.x.ai
 
         Returns:
             File size in bytes
@@ -371,9 +371,13 @@ class SyncClientBase(ResponseParser, ABC):
         if not asset_url:
             raise GrokAPIError("Asset URL is empty")
 
-        if not asset_url.startswith(self.ASSETS_URL):
+        # Accept both assets.grok.com and imagine-public.x.ai URLs
+        if not (
+            asset_url.startswith(self.ASSETS_URL)
+            or asset_url.startswith("https://imagine-public.x.ai/")
+        ):
             raise GrokAPIError(
-                f"Invalid asset URL. Expected {self.ASSETS_URL}/..., got: {asset_url[:50]}..."
+                f"Invalid asset URL. Expected {self.ASSETS_URL}/... or https://imagine-public.x.ai/..., got: {asset_url[:50]}..."
             )
 
         return self._asset_request_head(asset_url)
@@ -510,54 +514,62 @@ class SyncClientBase(ResponseParser, ABC):
         )
 
     def _match_by_video_id(self, video_id: str, local_size: int, filename: str) -> VideoMatchResult:
-        """Match video by video ID (web format) - searches favorites."""
-        # Search through favorites to find the parent containing this video_id
-        posts = self.list_posts(source="favorites")
+        """Match video by video ID (web format) - O(1) direct lookup.
 
-        for post in posts:
-            try:
-                details = self.get_post_details(post.id)
+        Uses direct API call with video_id to get video details and parent info.
+        The API returns originalPostId for child videos, enabling O(1) lookup.
+        """
+        try:
+            details = self.get_post_details(video_id)
+        except (GrokAuthError, GrokNotFoundError):
+            # Let auth errors and not-found errors propagate for proper handling
+            raise
+        except Exception as e:
+            raise GrokAPIError(
+                f"Failed to get video details: {video_id}\n"
+                f"Local file: {filename}\n"
+                f"Error: {e}"
+            ) from e
 
-                # Check if parent itself is the video (txt2vid)
-                if details.id == video_id and details.hd_media_url:
-                    web_size = self.get_asset_file_size(details.hd_media_url)
-                    if web_size == local_size:
-                        new_filename = f"grok-video_{details.id}_{details.id}.mp4"
-                        return VideoMatchResult(
-                            parent_id=details.id,
-                            video_id=details.id,
-                            is_parent_video=True,
-                            mode=details.mode,
-                            original_prompt=details.original_prompt,
-                            file_size=local_size,
-                            new_filename=new_filename,
-                        )
+        # Extract parent_id from raw_data (originalPostId field)
+        # For child videos: originalPostId is the parent's ID
+        # For parent videos (txt2vid): originalPostId equals video_id or is missing
+        raw_post = details.raw_data.get("post", details.raw_data) if details.raw_data else {}
+        original_post_id = raw_post.get("originalPostId")
 
-                # Check children
-                for child in details.children:
-                    if child.id == video_id:
-                        url = child.hd_media_url or child.media_url
-                        if url:
-                            web_size = self.get_asset_file_size(url)
-                            if web_size == local_size:
-                                new_filename = f"grok-video_{details.id}_{child.id}.mp4"
-                                return VideoMatchResult(
-                                    parent_id=details.id,
-                                    video_id=child.id,
-                                    is_parent_video=False,
-                                    mode=details.mode,
-                                    original_prompt=child.original_prompt,
-                                    file_size=local_size,
-                                    new_filename=new_filename,
-                                )
-            except Exception:
-                continue
+        if original_post_id and original_post_id != video_id:
+            # This is a child video - originalPostId is the parent
+            parent_id = original_post_id
+            is_parent_video = False
+        else:
+            # This is a parent video (txt2vid) or originalPostId is same as id
+            parent_id = video_id
+            is_parent_video = True
 
-        raise GrokAPIError(
-            f"No matching video found in favorites for video ID: {video_id}\n"
-            f"Local file: {filename}\n"
-            f"Local size: {local_size} bytes\n"
-            f"Searched {len(posts)} favorites"
+        # Verify file size matches
+        url = details.hd_media_url or details.media_url
+        if not url:
+            raise GrokAPIError(
+                f"No media URL found for video: {video_id}\n" f"Local file: {filename}"
+            )
+
+        web_size = self.get_asset_file_size(url)
+        if web_size != local_size:
+            raise GrokAPIError(
+                f"File size mismatch for video: {video_id}\n"
+                f"Local file: {filename}\n"
+                f"Local size: {local_size}, Web size: {web_size}"
+            )
+
+        new_filename = f"grok-video_{parent_id}_{video_id}.mp4"
+        return VideoMatchResult(
+            parent_id=parent_id,
+            video_id=video_id,
+            is_parent_video=is_parent_video,
+            mode=details.mode,
+            original_prompt=details.original_prompt,
+            file_size=local_size,
+            new_filename=new_filename,
         )
 
     # =========================================================================
@@ -807,7 +819,7 @@ class AsyncClientBase(ResponseParser, ABC):
         Get file size of a Grok asset via HEAD request (async).
 
         Args:
-            asset_url: Full URL to asset on assets.grok.com
+            asset_url: Full URL to asset on assets.grok.com or imagine-public.x.ai
 
         Returns:
             File size in bytes
@@ -815,9 +827,13 @@ class AsyncClientBase(ResponseParser, ABC):
         if not asset_url:
             raise GrokAPIError("Asset URL is empty")
 
-        if not asset_url.startswith(self.ASSETS_URL):
+        # Accept both assets.grok.com and imagine-public.x.ai URLs
+        if not (
+            asset_url.startswith(self.ASSETS_URL)
+            or asset_url.startswith("https://imagine-public.x.ai/")
+        ):
             raise GrokAPIError(
-                f"Invalid asset URL. Expected {self.ASSETS_URL}/..., got: {asset_url[:50]}..."
+                f"Invalid asset URL. Expected {self.ASSETS_URL}/... or https://imagine-public.x.ai/..., got: {asset_url[:50]}..."
             )
 
         return await self._asset_request_head(asset_url)
@@ -953,54 +969,62 @@ class AsyncClientBase(ResponseParser, ABC):
     async def _match_by_video_id(
         self, video_id: str, local_size: int, filename: str
     ) -> VideoMatchResult:
-        """Match video by video ID (web format) - searches favorites."""
-        # Search through favorites to find the parent containing this video_id
-        posts = await self.list_posts(source="favorites")
+        """Match video by video ID (web format) - O(1) direct lookup.
 
-        for post in posts:
-            try:
-                details = await self.get_post_details(post.id)
+        Uses direct API call with video_id to get video details and parent info.
+        The API returns originalPostId for child videos, enabling O(1) lookup.
+        """
+        try:
+            details = await self.get_post_details(video_id)
+        except (GrokAuthError, GrokNotFoundError):
+            # Let auth errors and not-found errors propagate for proper handling
+            raise
+        except Exception as e:
+            raise GrokAPIError(
+                f"Failed to get video details: {video_id}\n"
+                f"Local file: {filename}\n"
+                f"Error: {e}"
+            ) from e
 
-                # Check if parent itself is the video (txt2vid)
-                if details.id == video_id and details.hd_media_url:
-                    web_size = await self.get_asset_file_size(details.hd_media_url)
-                    if web_size == local_size:
-                        new_filename = f"grok-video_{details.id}_{details.id}.mp4"
-                        return VideoMatchResult(
-                            parent_id=details.id,
-                            video_id=details.id,
-                            is_parent_video=True,
-                            mode=details.mode,
-                            original_prompt=details.original_prompt,
-                            file_size=local_size,
-                            new_filename=new_filename,
-                        )
+        # Extract parent_id from raw_data (originalPostId field)
+        # For child videos: originalPostId is the parent's ID
+        # For parent videos (txt2vid): originalPostId equals video_id or is missing
+        raw_post = details.raw_data.get("post", details.raw_data) if details.raw_data else {}
+        original_post_id = raw_post.get("originalPostId")
 
-                # Check children
-                for child in details.children:
-                    if child.id == video_id:
-                        url = child.hd_media_url or child.media_url
-                        if url:
-                            web_size = await self.get_asset_file_size(url)
-                            if web_size == local_size:
-                                new_filename = f"grok-video_{details.id}_{child.id}.mp4"
-                                return VideoMatchResult(
-                                    parent_id=details.id,
-                                    video_id=child.id,
-                                    is_parent_video=False,
-                                    mode=details.mode,
-                                    original_prompt=child.original_prompt,
-                                    file_size=local_size,
-                                    new_filename=new_filename,
-                                )
-            except Exception:
-                continue
+        if original_post_id and original_post_id != video_id:
+            # This is a child video - originalPostId is the parent
+            parent_id = original_post_id
+            is_parent_video = False
+        else:
+            # This is a parent video (txt2vid) or originalPostId is same as id
+            parent_id = video_id
+            is_parent_video = True
 
-        raise GrokAPIError(
-            f"No matching video found in favorites for video ID: {video_id}\n"
-            f"Local file: {filename}\n"
-            f"Local size: {local_size} bytes\n"
-            f"Searched {len(posts)} favorites"
+        # Verify file size matches
+        url = details.hd_media_url or details.media_url
+        if not url:
+            raise GrokAPIError(
+                f"No media URL found for video: {video_id}\n" f"Local file: {filename}"
+            )
+
+        web_size = await self.get_asset_file_size(url)
+        if web_size != local_size:
+            raise GrokAPIError(
+                f"File size mismatch for video: {video_id}\n"
+                f"Local file: {filename}\n"
+                f"Local size: {local_size}, Web size: {web_size}"
+            )
+
+        new_filename = f"grok-video_{parent_id}_{video_id}.mp4"
+        return VideoMatchResult(
+            parent_id=parent_id,
+            video_id=video_id,
+            is_parent_video=is_parent_video,
+            mode=details.mode,
+            original_prompt=details.original_prompt,
+            file_size=local_size,
+            new_filename=new_filename,
         )
 
     # =========================================================================
