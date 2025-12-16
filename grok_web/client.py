@@ -2625,10 +2625,11 @@ class SmartGrokClient:
             GrokAPIError: If download fails
 
         Note:
-            If you already have the video_id, you can construct the URL directly:
-            - HD: https://imagine-public.x.ai/imagine-public/share-videos/{video_id}_hd.mp4
-            - SD: https://imagine-public.x.ai/imagine-public/share-videos/{video_id}.mp4
-            Then use NodriverClient.download_video(url, path) for direct download.
+            If you already have the video_id, you can construct URLs directly:
+            - Web page: https://grok.com/imagine/post/{video_id}
+            - HD video: https://imagine-public.x.ai/imagine-public/share-videos/{video_id}_hd.mp4
+            - SD video: https://imagine-public.x.ai/imagine-public/share-videos/{video_id}.mp4
+            Use NodriverClient.download_video(url, path) for direct download.
 
         Example:
             >>> # Download a video (auto-detects HD)
