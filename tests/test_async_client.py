@@ -537,6 +537,62 @@ class TestAsyncClientMatchLocalVideo:
         finally:
             os.unlink(temp_path)
 
+    @pytest.mark.asyncio
+    async def test_match_local_video_web_format_recognized(self, mock_client: AsyncClient):
+        """Web format filenames are recognized (uuid_hd.mp4)."""
+        # Create temp file with web format name
+        temp_dir = tempfile.mkdtemp()
+        video_id = "b8db4523-04f0-496a-b516-6044972bb3fd"
+        temp_path = os.path.join(temp_dir, f"{video_id}_hd.mp4")
+        with open(temp_path, "wb") as f:
+            f.write(b"x" * 1000)
+
+        try:
+            # Mock list_posts to return empty (video not found in favorites)
+            mock_client.list_posts = AsyncMock(return_value=[])
+
+            with pytest.raises(GrokAPIError, match="No matching video found in favorites"):
+                await mock_client.match_local_video(temp_path)
+        finally:
+            os.unlink(temp_path)
+            os.rmdir(temp_dir)
+
+    @pytest.mark.asyncio
+    async def test_match_local_video_web_format_with_copy_number(self, mock_client: AsyncClient):
+        """Web format with copy number is recognized (uuid_hd (1).mp4)."""
+        temp_dir = tempfile.mkdtemp()
+        video_id = "b8db4523-04f0-496a-b516-6044972bb3fd"
+        temp_path = os.path.join(temp_dir, f"{video_id}_hd (1).mp4")
+        with open(temp_path, "wb") as f:
+            f.write(b"x" * 1000)
+
+        try:
+            mock_client.list_posts = AsyncMock(return_value=[])
+
+            with pytest.raises(GrokAPIError, match="No matching video found in favorites"):
+                await mock_client.match_local_video(temp_path)
+        finally:
+            os.unlink(temp_path)
+            os.rmdir(temp_dir)
+
+    @pytest.mark.asyncio
+    async def test_match_local_video_web_format_without_hd(self, mock_client: AsyncClient):
+        """Web format without _hd suffix is recognized (uuid.mp4)."""
+        temp_dir = tempfile.mkdtemp()
+        video_id = "b8db4523-04f0-496a-b516-6044972bb3fd"
+        temp_path = os.path.join(temp_dir, f"{video_id}.mp4")
+        with open(temp_path, "wb") as f:
+            f.write(b"x" * 1000)
+
+        try:
+            mock_client.list_posts = AsyncMock(return_value=[])
+
+            with pytest.raises(GrokAPIError, match="No matching video found in favorites"):
+                await mock_client.match_local_video(temp_path)
+        finally:
+            os.unlink(temp_path)
+            os.rmdir(temp_dir)
+
 
 class TestAsyncClientCreateVideoFromImage:
     """Tests for AsyncClient.create_video_from_image method."""

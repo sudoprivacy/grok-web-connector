@@ -2606,16 +2606,22 @@ class SmartGrokClient:
         Download a video to local file.
 
         Args:
-            video_id: The video UUID to download
+            video_id: The video UUID to download. Can be obtained from:
+                - PostDetails.children[i].id (from get_post_details)
+                - VideoGenerationResult.video_id (from create_video)
+                - Web download filename: "{video_id}_hd.mp4" -> video_id is the UUID part
+                - Grok URL: https://grok.com/imagine/post/{post_id} (post_id is the parent,
+                  use get_post_details to find child video_ids)
             output_path: Destination file path (will be created/overwritten)
             prefer_hd: If True (default), download HD version if available
-            parent_post_id: Parent post ID (optional, for faster lookup)
+            parent_post_id: Parent post ID (optional, for faster lookup).
+                If provided, skips searching through favorites.
 
         Returns:
             Path to the downloaded file
 
         Raises:
-            GrokNotFoundError: If video not found
+            GrokNotFoundError: If video not found in favorites
             GrokAPIError: If download fails
 
         Example:
@@ -2625,6 +2631,11 @@ class SmartGrokClient:
 
             >>> # Force standard quality
             >>> path = await client.download_video(video_id, "output.mp4", prefer_hd=False)
+
+            >>> # With parent_post_id for faster lookup
+            >>> path = await client.download_video(
+            ...     video_id, "output.mp4", parent_post_id=parent_id
+            ... )
         """
         output_path = Path(output_path)
 
