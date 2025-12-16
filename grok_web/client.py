@@ -484,6 +484,15 @@ class NodriverClient(AsyncClientBase):
         """
 
         result_str = await self._tab.evaluate(js_code, await_promise=True, return_by_value=True)
+
+        # Handle ExceptionDetails from nodriver when evaluation fails
+        if not isinstance(result_str, str):
+            raise GrokAPIError(
+                f"Browser evaluation failed for {endpoint}. "
+                f"Received: {type(result_str).__name__}. "
+                f"This may indicate a browser automation error or page navigation issue."
+            )
+
         result = json_module.loads(result_str)
 
         if result["status"] in (401, 403):
@@ -570,6 +579,15 @@ class NodriverClient(AsyncClientBase):
         """
 
         result_str = await self._tab.evaluate(js_code, await_promise=True, return_by_value=True)
+
+        # Handle ExceptionDetails from nodriver when evaluation fails
+        if not isinstance(result_str, str):
+            raise GrokAPIError(
+                f"Browser evaluation failed for {endpoint}. "
+                f"Received: {type(result_str).__name__}. "
+                f"This may indicate a browser automation error or page navigation issue."
+            )
+
         result = json_module.loads(result_str)
 
         if result["status"] in (401, 403):
@@ -603,6 +621,15 @@ class NodriverClient(AsyncClientBase):
         """
 
         result_str = await self._tab.evaluate(js_code, await_promise=True, return_by_value=True)
+
+        # Handle ExceptionDetails from nodriver when evaluation fails
+        if not isinstance(result_str, str):
+            raise GrokAPIError(
+                f"Browser evaluation failed for asset request. "
+                f"Received: {type(result_str).__name__}. "
+                f"Asset URL: {asset_url}"
+            )
+
         result = json_module.loads(result_str)
 
         if result["status"] == 403:
