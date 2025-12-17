@@ -18,7 +18,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Debug: Write to file at import time to verify MCP is using new code
-_BROWSER_PY_VERSION = "v29-cmd-start-simple"
+_BROWSER_PY_VERSION = "v30-popen-detached"
 try:
     _debug_path = Path(tempfile.gettempdir()) / "grok_browser_import.log"
     with open(_debug_path, "a") as f:
@@ -365,36 +365,36 @@ def launch_chrome_with_debug_port(
             except Exception:
                 pass
 
-            # Use simple subprocess.run with shell=True
-            # This is the same as what works in bash: cmd /c start "" "chrome.exe" ...
+            # Use subprocess.Popen with DETACHED_PROCESS + CREATE_BREAKAWAY_FROM_JOB
+            # This is similar to macOS's start_new_session=True
+            # It creates a completely independent process that breaks away from the job/session
             try:
                 import datetime
 
-                # Build the full command
-                full_cmd = f'cmd /c {cmd_str}'
+                # Use DETACHED_PROCESS to detach from console
+                # Use CREATE_BREAKAWAY_FROM_JOB to break away from job object
+                # This combination should create a truly independent process
+                creationflags = subprocess.DETACHED_PROCESS | subprocess.CREATE_BREAKAWAY_FROM_JOB
 
                 # Debug: Log command
                 _cmd_log_path = Path(tempfile.gettempdir()) / "grok_chrome_launch.log"
                 with open(_cmd_log_path, "a") as f:
-                    f.write(f"[{datetime.datetime.now().isoformat()}] SIMPLE_CMD: {full_cmd}\n")
+                    f.write(f"[{datetime.datetime.now().isoformat()}] POPEN_DETACHED_ARGS: {args}\n")
+                    f.write(f"[{datetime.datetime.now().isoformat()}] POPEN_DETACHED_FLAGS: DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB\n")
                     f.write(f"[{datetime.datetime.now().isoformat()}] PROCESS_INFO: PID={os.getpid()}, PPID={os.getppid()}\n")
 
-                # Run the command with shell=True (same as bash)
-                result = subprocess.run(
-                    full_cmd,
-                    shell=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=5
+                # Launch Chrome with Popen (like macOS does)
+                process = subprocess.Popen(
+                    args,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    stdin=subprocess.DEVNULL,
+                    creationflags=creationflags
                 )
 
                 # Debug: Log result
                 with open(_cmd_log_path, "a") as f:
-                    f.write(f"[{datetime.datetime.now().isoformat()}] SIMPLE_RESULT: returncode={result.returncode}\n")
-                    if result.stdout:
-                        f.write(f"[{datetime.datetime.now().isoformat()}] SIMPLE_STDOUT: {result.stdout.strip()}\n")
-                    if result.stderr:
-                        f.write(f"[{datetime.datetime.now().isoformat()}] SIMPLE_STDERR: {result.stderr.strip()}\n")
+                    f.write(f"[{datetime.datetime.now().isoformat()}] POPEN_DETACHED_PID: {process.pid}\n")
 
             except Exception as e:
                 logger.error(f"Failed to launch Chrome: {e}")
@@ -403,12 +403,9 @@ def launch_chrome_with_debug_port(
                     _cmd_log_path = Path(tempfile.gettempdir()) / "grok_chrome_launch.log"
                     with open(_cmd_log_path, "a") as f:
                         import datetime
-                        f.write(f"[{datetime.datetime.now().isoformat()}] SIMPLE_ERROR: {e}\n")
+                        f.write(f"[{datetime.datetime.now().isoformat()}] POPEN_DETACHED_ERROR: {e}\n")
                 except Exception:
                     pass
-
-            # Return a dummy process since we can't get Chrome's actual PID
-            process = type('DummyProcess', (), {'pid': 0, 'poll': lambda: None})()
         else:
             # On Unix, use start_new_session
             popen_kwargs = {
@@ -488,11 +485,6 @@ async def ensure_chrome_running(
     debug_log(f"Launcher process created, PID: {process.pid}")
 
     is_windows = platform.system() == "Windows"
-
-    # On Windows with Task Scheduler, wait for the scheduled task to execute
-    if is_windows:
-        debug_log("Waiting 3 seconds for Task Scheduler to launch Chrome...")
-        await asyncio.sleep(3)
 
     # Wait for Chrome to be ready
     start_time = asyncio.get_event_loop().time()
