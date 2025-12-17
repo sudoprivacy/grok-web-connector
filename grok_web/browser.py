@@ -18,7 +18,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Debug: Write to file at import time to verify MCP is using new code
-_BROWSER_PY_VERSION = "v19-shell-true"
+_BROWSER_PY_VERSION = "v20-subprocess-run"
 try:
     _debug_path = Path(tempfile.gettempdir()) / "grok_browser_import.log"
     with open(_debug_path, "a") as f:
@@ -365,23 +365,28 @@ def launch_chrome_with_debug_port(
             except Exception:
                 pass
 
-            # Use Popen with shell=True - this is critical for proper quote handling
-            popen_kwargs = {
-                "stdout": subprocess.DEVNULL,
-                "stderr": subprocess.DEVNULL,
-                "stdin": subprocess.DEVNULL,
-                "shell": True,
-            }
-            process = subprocess.Popen(cmd_str, **popen_kwargs)
+            # Use subprocess.run() to execute the start command
+            # subprocess.run() waits for cmd.exe to finish executing the start command
+            # before returning, ensuring Chrome actually launches
+            result = subprocess.run(
+                cmd_str,
+                shell=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+            )
 
-            # Debug: Log result
+            # Debug: Log subprocess.run result
             try:
                 _cmd_log_path = Path(tempfile.gettempdir()) / "grok_chrome_launch.log"
                 with open(_cmd_log_path, "a") as f:
                     import datetime
-                    f.write(f"[{datetime.datetime.now().isoformat()}] POPEN_PID: {process.pid}\n")
+                    f.write(f"[{datetime.datetime.now().isoformat()}] RUN_RESULT: returncode={result.returncode}\n")
             except Exception:
                 pass
+
+            # Return a dummy process since we can't get Chrome's actual PID from 'start'
+            process = type('DummyProcess', (), {'pid': 0, 'poll': lambda: None})()
         else:
             # On Unix, use start_new_session
             popen_kwargs = {
