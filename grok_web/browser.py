@@ -18,7 +18,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Debug: Write to file at import time to verify MCP is using new code
-_BROWSER_PY_VERSION = "v24-vbscript"
+_BROWSER_PY_VERSION = "v25-task-scheduler"
 try:
     _debug_path = Path(tempfile.gettempdir()) / "grok_browser_import.log"
     with open(_debug_path, "a") as f:
@@ -365,62 +365,70 @@ def launch_chrome_with_debug_port(
             except Exception:
                 pass
 
-            # Write a VBScript file to launch Chrome
-            # VBScript's WScript.Shell.Run has special privileges and can
-            # create truly independent processes, even from non-interactive sessions
-            vbs_path = Path(tempfile.gettempdir()) / "grok_chrome_launch.vbs"
+            # Use Windows Task Scheduler to create a temporary one-time task
+            # This completely bypasses the parent process context - the task runs
+            # under the Task Scheduler service, not as a child of MCP
             try:
-                # Escape quotes for VBScript
-                # VBScript needs doubled quotes for escaping
-                vbs_cmd = cmd_str.replace('"', '""')
+                import datetime
+                import random
 
-                vbs_content = f'''Set objShell = CreateObject("WScript.Shell")
-objShell.Run "cmd /c {vbs_cmd}", 0, False
-'''
+                # Generate unique task name
+                task_name = f"GrokChromeLaunch_{random.randint(1000, 9999)}"
 
-                with open(vbs_path, "w") as f:
-                    f.write(vbs_content)
+                # Calculate start time (current time + 2 seconds)
+                start_time = (datetime.datetime.now() + datetime.timedelta(seconds=2)).strftime("%H:%M")
 
-                # Debug: Log VBS file creation
+                # The command to run - use cmd /c to execute the start command
+                task_command = f'cmd /c {cmd_str}'
+
+                # Create the scheduled task
+                # /SC ONCE - one-time task
+                # /ST - start time
+                # /Z - delete task after completion
+                # /F - force (overwrite if exists)
+                schtasks_cmd = [
+                    "schtasks",
+                    "/Create",
+                    "/TN", task_name,
+                    "/TR", task_command,
+                    "/SC", "ONCE",
+                    "/ST", start_time,
+                    "/Z",
+                    "/F"
+                ]
+
+                # Debug: Log task creation
                 _cmd_log_path = Path(tempfile.gettempdir()) / "grok_chrome_launch.log"
                 with open(_cmd_log_path, "a") as f:
-                    import datetime
-                    f.write(f"[{datetime.datetime.now().isoformat()}] VBS_FILE: {vbs_path}\n")
-                    f.write(f"[{datetime.datetime.now().isoformat()}] VBS_CMD: {vbs_cmd}\n")
+                    f.write(f"[{datetime.datetime.now().isoformat()}] SCHTASKS_NAME: {task_name}\n")
+                    f.write(f"[{datetime.datetime.now().isoformat()}] SCHTASKS_TIME: {start_time}\n")
+                    f.write(f"[{datetime.datetime.now().isoformat()}] SCHTASKS_CMD: {task_command}\n")
                     f.write(f"[{datetime.datetime.now().isoformat()}] PROCESS_INFO: PID={os.getpid()}, PPID={os.getppid()}\n")
-            except Exception as e:
-                logger.error(f"Failed to create VBS file: {e}")
 
-            # Execute VBScript using cscript.exe (console script host)
-            # This completely detaches from the current process context
-            try:
+                # Execute schtasks to create the task
                 result = subprocess.run(
-                    ["cscript.exe", "//NoLogo", str(vbs_path)],
+                    schtasks_cmd,
                     capture_output=True,
                     text=True,
                     timeout=5
                 )
 
-                # Debug: Log VBScript execution result
-                try:
-                    _cmd_log_path = Path(tempfile.gettempdir()) / "grok_chrome_launch.log"
-                    with open(_cmd_log_path, "a") as f:
-                        import datetime
-                        f.write(f"[{datetime.datetime.now().isoformat()}] VBS_RESULT: returncode={result.returncode}\n")
-                        if result.stdout:
-                            f.write(f"[{datetime.datetime.now().isoformat()}] VBS_STDOUT: {result.stdout}\n")
-                        if result.stderr:
-                            f.write(f"[{datetime.datetime.now().isoformat()}] VBS_STDERR: {result.stderr}\n")
-                except Exception:
-                    pass
+                # Debug: Log result
+                with open(_cmd_log_path, "a") as f:
+                    f.write(f"[{datetime.datetime.now().isoformat()}] SCHTASKS_RESULT: returncode={result.returncode}\n")
+                    if result.stdout:
+                        f.write(f"[{datetime.datetime.now().isoformat()}] SCHTASKS_STDOUT: {result.stdout.strip()}\n")
+                    if result.stderr:
+                        f.write(f"[{datetime.datetime.now().isoformat()}] SCHTASKS_STDERR: {result.stderr.strip()}\n")
+
             except Exception as e:
-                logger.error(f"Failed to execute VBScript: {e}")
+                logger.error(f"Failed to create scheduled task: {e}")
                 # Debug: Log error
                 try:
                     _cmd_log_path = Path(tempfile.gettempdir()) / "grok_chrome_launch.log"
                     with open(_cmd_log_path, "a") as f:
                         import datetime
-                        f.write(f"[{datetime.datetime.now().isoformat()}] VBS_ERROR: {e}\n")
+                        f.write(f"[{datetime.datetime.now().isoformat()}] SCHTASKS_ERROR: {e}\n")
                 except Exception:
                     pass
 
@@ -505,6 +513,11 @@ async def ensure_chrome_running(
     debug_log(f"Launcher process created, PID: {process.pid}")
 
     is_windows = platform.system() == "Windows"
+
+    # On Windows with Task Scheduler, wait for the scheduled task to execute
+    if is_windows:
+        debug_log("Waiting 3 seconds for Task Scheduler to launch Chrome...")
+        await asyncio.sleep(3)
 
     # Wait for Chrome to be ready
     start_time = asyncio.get_event_loop().time()
