@@ -18,7 +18,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Debug: Write to file at import time to verify MCP is using new code
-_BROWSER_PY_VERSION = "v31-explorer-launch"
+_BROWSER_PY_VERSION = "v32-port-scan"
 try:
     _debug_path = Path(tempfile.gettempdir()) / "grok_browser_import.log"
     with open(_debug_path, "a") as f:
@@ -453,18 +453,37 @@ async def ensure_chrome_running(
 
     Args:
         host: Remote debugging host
-        port: Remote debugging port
+        port: Remote debugging port (will auto-scan 9222-9230 if not available)
         headless: Run in headless mode if launching new instance
         timeout: Max seconds to wait for Chrome to start
 
     Returns:
-        Popen process if we launched Chrome, None if reusing existing Chrome.
+        Tuple of (Popen process or None, actual_port_used).
 
     Raises:
         TimeoutError: If Chrome doesn't start within timeout.
         FileNotFoundError: If Chrome executable not found.
     """
-    # Check if Chrome is already running
+    # Auto-scan ports 9222-9230 to find an available debug Chrome
+    # This allows using any existing debug Chrome instance
+    original_port = port
+    port_found = False
+
+    if not is_port_in_use(host, port):
+        # Requested port not in use, scan for alternatives
+        logger.info(f"Port {port} not in use, scanning ports 9222-9230 for existing debug Chrome...")
+        for scan_port in range(9222, 9231):
+            if is_port_in_use(host, scan_port):
+                logger.info(f"Found Chrome on port {scan_port}, will use it")
+                port = scan_port
+                port_found = True
+                break
+
+        if not port_found:
+            logger.info(f"No existing debug Chrome found on ports 9222-9230, will try to launch on port {original_port}")
+            port = original_port
+
+    # Check if Chrome is already running on the selected port
     if is_port_in_use(host, port):
         # Check if it's a stale temp Chrome from a previous session
         is_temp, pid = is_temp_chrome_on_port(port)
@@ -479,7 +498,7 @@ async def ensure_chrome_running(
         else:
             # User's Chrome with real profile - reuse it
             logger.debug(f"Reusing existing Chrome on port {port}")
-            return None
+            return None, port
 
     # Launch Chrome with debug logging to temp file
     debug_log_path = Path(tempfile.gettempdir()) / "grok_chrome_debug.log"
@@ -542,4 +561,4 @@ async def ensure_chrome_running(
     # Give Chrome a moment to fully initialize
     await asyncio.sleep(0.5)
 
-    return process
+    return process, port

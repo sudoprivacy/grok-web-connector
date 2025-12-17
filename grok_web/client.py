@@ -339,9 +339,10 @@ class NodriverClient(AsyncClientBase):
         from .browser import ensure_chrome_running, is_port_in_use
 
         # Ensure Chrome is running (auto-launch if needed)
+        actual_port = self._remote_port  # Default to requested port
         if self._auto_launch:
             try:
-                self._chrome_process = await ensure_chrome_running(
+                self._chrome_process, actual_port = await ensure_chrome_running(
                     host=self._remote_host,
                     port=self._remote_port,
                     headless=self._headless,
@@ -359,11 +360,11 @@ class NodriverClient(AsyncClientBase):
                     f"--user-data-dir=/tmp/chrome_debug"
                 )
 
-        # Connect to Chrome
+        # Connect to Chrome using the actual port (may differ from requested if auto-scanned)
         try:
             self._browser = await nodriver.start(
                 host=self._remote_host,
-                port=self._remote_port,
+                port=actual_port,
             )
         except Exception as e:
             raise GrokAPIError(
