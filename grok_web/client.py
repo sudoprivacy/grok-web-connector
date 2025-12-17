@@ -605,42 +605,53 @@ class NodriverClient(AsyncClientBase):
         return result["body"]
 
     async def _asset_request_head(self, asset_url: str) -> int:
-        """Make HEAD request to asset URL via browser fetch."""
-        import json as json_module
+        """Make HEAD request to asset URL via CDP Network.loadNetworkResource.
 
-        js_code = f"""
-        (async () => {{
-            const resp = await fetch("{asset_url}", {{
-                method: "HEAD",
-                credentials: "include"
-            }});
-            return JSON.stringify({{
-                status: resp.status,
-                contentLength: resp.headers.get("content-length")
-            }});
-        }})()
+        This bypasses JavaScript fetch CORS restrictions by using Chrome DevTools Protocol directly.
+        Works reliably on both Windows and macOS.
         """
+        from nodriver import cdp
 
-        result_str = await self._tab.evaluate(js_code, await_promise=True, return_by_value=True)
-
-        # Handle ExceptionDetails from nodriver when evaluation fails
-        if not isinstance(result_str, str):
-            raise GrokAPIError(
-                f"Browser evaluation failed for asset request. "
-                f"Received: {type(result_str).__name__}. "
-                f"Asset URL: {asset_url}"
+        try:
+            # Use CDP Network.loadNetworkResource to fetch headers
+            # This bypasses CORS and is more reliable than fetch()
+            response = await self._tab.send(
+                cdp.network.load_network_resource(
+                    url=asset_url,
+                    options=cdp.network.LoadNetworkResourceOptions(
+                        disable_cache=False,
+                        include_credentials=True
+                    )
+                )
             )
 
-        result = json_module.loads(result_str)
+            # Check if we got the resource info
+            if not response or not response.resource:
+                raise GrokAPIError(f"Failed to load network resource: {asset_url}")
 
-        if result["status"] == 403:
-            raise GrokAuthError("Asset access denied (403)")
-        if result["status"] != 200:
-            raise GrokAPIError(f"Asset request failed: {result['status']}")
-        if not result["contentLength"]:
-            raise GrokAPIError("No Content-Length header")
+            resource = response.resource
 
-        return int(result["contentLength"])
+            # Check HTTP status
+            if resource.http_status_code == 403:
+                raise GrokAuthError("Asset access denied (403)")
+            if resource.http_status_code and resource.http_status_code >= 400:
+                raise GrokAPIError(f"Asset request failed: HTTP {resource.http_status_code}")
+
+            # Get Content-Length from headers
+            if resource.headers:
+                for header_name, header_value in resource.headers.items():
+                    if header_name.lower() == "content-length":
+                        return int(header_value)
+
+            raise GrokAPIError("No Content-Length header in response")
+
+        except (GrokAPIError, GrokAuthError):
+            raise
+        except Exception as e:
+            raise GrokAPIError(
+                f"CDP network request failed for asset. "
+                f"URL: {asset_url}, Error: {e}"
+            ) from e
 
     # =========================================================================
     # NodriverClient-specific methods
