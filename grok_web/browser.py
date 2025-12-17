@@ -18,7 +18,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Debug: Write to file at import time to verify MCP is using new code
-_BROWSER_PY_VERSION = "v10-manual-fallback"
+_BROWSER_PY_VERSION = "v12-bat-file"
 try:
     _debug_path = Path(tempfile.gettempdir()) / "grok_browser_import.log"
     with open(_debug_path, "a") as f:
@@ -334,18 +334,22 @@ def launch_chrome_with_debug_port(
     # Start Chrome process
     try:
         if platform.system() == "Windows":
-            # On Windows, use cmd /c start to spawn Chrome as truly independent process
-            # This is the only reliable way to prevent Chrome from delegating to existing instance
-            # when launched from a console-less process like MCP server
-            logger.debug(f"Launching Chrome on Windows via cmd /c start...")
+            # On Windows, write a .bat file and execute it to ensure Chrome starts
+            # in a proper shell environment. This works around issues where Chrome
+            # fails to start from console-less processes like MCP server.
+            logger.debug(f"Launching Chrome on Windows via .bat file...")
 
-            # Build command: cmd /c start "" "chrome_path" args...
-            # The empty "" after start is the window title
-            cmd_parts = ['cmd', '/c', 'start', '""', f'"{chrome_path}"']
-            cmd_parts.extend(f'"{arg}"' if ' ' in arg else arg for arg in args[1:])
+            # Build the start command
+            args_str = ' '.join(f'"{arg}"' if ' ' in str(arg) else str(arg) for arg in args[1:])
+            bat_content = f'@echo off\nstart "" "{chrome_path}" {args_str}\n'
 
+            # Write to a temp .bat file
+            bat_path = Path(tempfile.gettempdir()) / "grok_chrome_launch.bat"
+            bat_path.write_text(bat_content)
+
+            # Execute the .bat file
             process = subprocess.Popen(
-                ' '.join(cmd_parts),
+                [str(bat_path)],
                 shell=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
