@@ -343,6 +343,15 @@ def launch_chrome_with_debug_port(
             args_str = ' '.join(f'"{arg}"' if ' ' in str(arg) else str(arg) for arg in args[1:])
             cmd = f'start "" "{chrome_path}" {args_str}'
 
+            # Debug: Write command to temp file
+            try:
+                _cmd_log_path = Path(tempfile.gettempdir()) / "grok_chrome_launch.log"
+                with open(_cmd_log_path, "a") as f:
+                    import datetime
+                    f.write(f"[{datetime.datetime.now().isoformat()}] CMD: {cmd}\n")
+            except Exception:
+                pass
+
             # Use os.system() which runs through the system shell
             os.system(cmd)
 
