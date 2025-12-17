@@ -18,7 +18,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Debug: Write to file at import time to verify MCP is using new code
-_BROWSER_PY_VERSION = "v18-cmd-start"
+_BROWSER_PY_VERSION = "v19-shell-true"
 try:
     _debug_path = Path(tempfile.gettempdir()) / "grok_browser_import.log"
     with open(_debug_path, "a") as f:
@@ -356,25 +356,23 @@ def launch_chrome_with_debug_port(
             args_str = ' '.join(f'"{arg}"' if ' ' in str(arg) else str(arg) for arg in args[1:])
             cmd_str = f'start "" "{chrome_path}" {args_str}'
 
-            # Use cmd /c to execute the start command
-            cmd_args = ['cmd', '/c', cmd_str]
-
             # Debug: Log the command
             try:
                 _cmd_log_path = Path(tempfile.gettempdir()) / "grok_chrome_launch.log"
                 with open(_cmd_log_path, "a") as f:
                     import datetime
-                    f.write(f"[{datetime.datetime.now().isoformat()}] CMD_ARGS: {cmd_args}\n")
+                    f.write(f"[{datetime.datetime.now().isoformat()}] CMD_STR: {cmd_str}\n")
             except Exception:
                 pass
 
-            # Use Popen with shell=False but cmd /c start
+            # Use Popen with shell=True - this is critical for proper quote handling
             popen_kwargs = {
                 "stdout": subprocess.DEVNULL,
                 "stderr": subprocess.DEVNULL,
                 "stdin": subprocess.DEVNULL,
+                "shell": True,
             }
-            process = subprocess.Popen(cmd_args, **popen_kwargs)
+            process = subprocess.Popen(cmd_str, **popen_kwargs)
 
             # Debug: Log result
             try:
