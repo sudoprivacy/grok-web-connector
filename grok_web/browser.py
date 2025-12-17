@@ -18,7 +18,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Debug: Write to file at import time to verify MCP is using new code
-_BROWSER_PY_VERSION = "v25-task-scheduler"
+_BROWSER_PY_VERSION = "v29-cmd-start-simple"
 try:
     _debug_path = Path(tempfile.gettempdir()) / "grok_browser_import.log"
     with open(_debug_path, "a") as f:
@@ -365,49 +365,24 @@ def launch_chrome_with_debug_port(
             except Exception:
                 pass
 
-            # Use Windows Task Scheduler to create a temporary one-time task
-            # This completely bypasses the parent process context - the task runs
-            # under the Task Scheduler service, not as a child of MCP
+            # Use simple subprocess.run with shell=True
+            # This is the same as what works in bash: cmd /c start "" "chrome.exe" ...
             try:
                 import datetime
-                import random
 
-                # Generate unique task name
-                task_name = f"GrokChromeLaunch_{random.randint(1000, 9999)}"
+                # Build the full command
+                full_cmd = f'cmd /c {cmd_str}'
 
-                # Calculate start time (current time + 2 seconds)
-                start_time = (datetime.datetime.now() + datetime.timedelta(seconds=2)).strftime("%H:%M")
-
-                # The command to run - use cmd /c to execute the start command
-                task_command = f'cmd /c {cmd_str}'
-
-                # Create the scheduled task
-                # /SC ONCE - one-time task
-                # /ST - start time
-                # /Z - delete task after completion
-                # /F - force (overwrite if exists)
-                schtasks_cmd = [
-                    "schtasks",
-                    "/Create",
-                    "/TN", task_name,
-                    "/TR", task_command,
-                    "/SC", "ONCE",
-                    "/ST", start_time,
-                    "/Z",
-                    "/F"
-                ]
-
-                # Debug: Log task creation
+                # Debug: Log command
                 _cmd_log_path = Path(tempfile.gettempdir()) / "grok_chrome_launch.log"
                 with open(_cmd_log_path, "a") as f:
-                    f.write(f"[{datetime.datetime.now().isoformat()}] SCHTASKS_NAME: {task_name}\n")
-                    f.write(f"[{datetime.datetime.now().isoformat()}] SCHTASKS_TIME: {start_time}\n")
-                    f.write(f"[{datetime.datetime.now().isoformat()}] SCHTASKS_CMD: {task_command}\n")
+                    f.write(f"[{datetime.datetime.now().isoformat()}] SIMPLE_CMD: {full_cmd}\n")
                     f.write(f"[{datetime.datetime.now().isoformat()}] PROCESS_INFO: PID={os.getpid()}, PPID={os.getppid()}\n")
 
-                # Execute schtasks to create the task
+                # Run the command with shell=True (same as bash)
                 result = subprocess.run(
-                    schtasks_cmd,
+                    full_cmd,
+                    shell=True,
                     capture_output=True,
                     text=True,
                     timeout=5
@@ -415,20 +390,20 @@ def launch_chrome_with_debug_port(
 
                 # Debug: Log result
                 with open(_cmd_log_path, "a") as f:
-                    f.write(f"[{datetime.datetime.now().isoformat()}] SCHTASKS_RESULT: returncode={result.returncode}\n")
+                    f.write(f"[{datetime.datetime.now().isoformat()}] SIMPLE_RESULT: returncode={result.returncode}\n")
                     if result.stdout:
-                        f.write(f"[{datetime.datetime.now().isoformat()}] SCHTASKS_STDOUT: {result.stdout.strip()}\n")
+                        f.write(f"[{datetime.datetime.now().isoformat()}] SIMPLE_STDOUT: {result.stdout.strip()}\n")
                     if result.stderr:
-                        f.write(f"[{datetime.datetime.now().isoformat()}] SCHTASKS_STDERR: {result.stderr.strip()}\n")
+                        f.write(f"[{datetime.datetime.now().isoformat()}] SIMPLE_STDERR: {result.stderr.strip()}\n")
 
             except Exception as e:
-                logger.error(f"Failed to create scheduled task: {e}")
+                logger.error(f"Failed to launch Chrome: {e}")
                 # Debug: Log error
                 try:
                     _cmd_log_path = Path(tempfile.gettempdir()) / "grok_chrome_launch.log"
                     with open(_cmd_log_path, "a") as f:
                         import datetime
-                        f.write(f"[{datetime.datetime.now().isoformat()}] SCHTASKS_ERROR: {e}\n")
+                        f.write(f"[{datetime.datetime.now().isoformat()}] SIMPLE_ERROR: {e}\n")
                 except Exception:
                     pass
 
