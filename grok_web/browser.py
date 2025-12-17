@@ -18,7 +18,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Debug: Write to file at import time to verify MCP is using new code
-_BROWSER_PY_VERSION = "v13-os-system"
+_BROWSER_PY_VERSION = "v14-subprocess-run"
 try:
     _debug_path = Path(tempfile.gettempdir()) / "grok_browser_import.log"
     with open(_debug_path, "a") as f:
@@ -352,8 +352,17 @@ def launch_chrome_with_debug_port(
             except Exception:
                 pass
 
-            # Use os.system() which runs through the system shell
-            os.system(cmd)
+            # Use subprocess.run() with shell=True for better control
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+
+            # Debug: Log result
+            try:
+                _cmd_log_path = Path(tempfile.gettempdir()) / "grok_chrome_launch.log"
+                with open(_cmd_log_path, "a") as f:
+                    import datetime
+                    f.write(f"[{datetime.datetime.now().isoformat()}] RESULT: returncode={result.returncode}, stdout={result.stdout!r}, stderr={result.stderr!r}\n")
+            except Exception:
+                pass
 
             # Return a dummy process object (os.system doesn't return one)
             process = type('DummyProcess', (), {'pid': 0, 'poll': lambda: None})()
