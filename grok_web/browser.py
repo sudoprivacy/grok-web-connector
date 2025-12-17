@@ -18,7 +18,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Debug: Write to file at import time to verify MCP is using new code
-_BROWSER_PY_VERSION = "v20-subprocess-run"
+_BROWSER_PY_VERSION = "v21-bat-file"
 try:
     _debug_path = Path(tempfile.gettempdir()) / "grok_browser_import.log"
     with open(_debug_path, "a") as f:
@@ -365,23 +365,38 @@ def launch_chrome_with_debug_port(
             except Exception:
                 pass
 
-            # Use subprocess.run() to execute the start command
-            # subprocess.run() waits for cmd.exe to finish executing the start command
-            # before returning, ensuring Chrome actually launches
+            # Write the command to a .bat file and execute it
+            # This completely isolates Chrome from the Python process environment
+            bat_path = Path(tempfile.gettempdir()) / "grok_chrome_launch.bat"
+            try:
+                with open(bat_path, "w") as f:
+                    f.write(f"@echo off\n{cmd_str}\n")
+
+                # Debug: Log bat file creation
+                _cmd_log_path = Path(tempfile.gettempdir()) / "grok_chrome_launch.log"
+                with open(_cmd_log_path, "a") as f:
+                    import datetime
+                    f.write(f"[{datetime.datetime.now().isoformat()}] BAT_FILE: {bat_path}\n")
+                    f.write(f"[{datetime.datetime.now().isoformat()}] BAT_CMD: {cmd_str}\n")
+            except Exception as e:
+                logger.error(f"Failed to create bat file: {e}")
+
+            # Execute the .bat file
             result = subprocess.run(
-                cmd_str,
+                [str(bat_path)],
                 shell=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 stdin=subprocess.DEVNULL,
+                creationflags=subprocess.DETACHED_PROCESS if hasattr(subprocess, 'DETACHED_PROCESS') else 0,
             )
 
-            # Debug: Log subprocess.run result
+            # Debug: Log result
             try:
                 _cmd_log_path = Path(tempfile.gettempdir()) / "grok_chrome_launch.log"
                 with open(_cmd_log_path, "a") as f:
                     import datetime
-                    f.write(f"[{datetime.datetime.now().isoformat()}] RUN_RESULT: returncode={result.returncode}\n")
+                    f.write(f"[{datetime.datetime.now().isoformat()}] BAT_RESULT: returncode={result.returncode}\n")
             except Exception:
                 pass
 
