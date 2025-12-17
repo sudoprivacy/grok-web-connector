@@ -18,7 +18,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Debug: Write to file at import time to verify MCP is using new code
-_BROWSER_PY_VERSION = "v15-powershell-minimal"
+_BROWSER_PY_VERSION = "v16-popen-new-console"
 try:
     _debug_path = Path(tempfile.gettempdir()) / "grok_browser_import.log"
     with open(_debug_path, "a") as f:
@@ -343,42 +343,37 @@ def launch_chrome_with_debug_port(
     # Start Chrome process
     try:
         if platform.system() == "Windows":
-            # On Windows, use PowerShell Start-Process for better process isolation
-            logger.debug(f"Launching Chrome on Windows via PowerShell Start-Process...")
+            # On Windows, use direct Popen with CREATE_NEW_CONSOLE
+            # This creates a completely independent Chrome process
+            logger.debug(f"Launching Chrome on Windows via Popen with CREATE_NEW_CONSOLE...")
 
-            # Build PowerShell Start-Process command with ArgumentList
-            # This provides better process isolation than cmd's 'start' command
-            args_str = ', '.join(f"'{arg}'" for arg in args[1:])
-            ps_cmd = f'Start-Process -FilePath "{chrome_path}" -ArgumentList {args_str}'
-
-            # Debug: Write command to temp file
+            # Debug: Log the command
             try:
                 _cmd_log_path = Path(tempfile.gettempdir()) / "grok_chrome_launch.log"
                 with open(_cmd_log_path, "a") as f:
                     import datetime
-                    f.write(f"[{datetime.datetime.now().isoformat()}] PS_CMD: {ps_cmd}\n")
+                    f.write(f"[{datetime.datetime.now().isoformat()}] POPEN_ARGS: {args}\n")
             except Exception:
                 pass
 
-            # Use PowerShell to launch Chrome
-            result = subprocess.run(
-                ["powershell", "-Command", ps_cmd],
-                capture_output=True,
-                text=True,
-                creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
-            )
+            # Use Popen directly with CREATE_NEW_CONSOLE flag
+            # This creates a new console window for Chrome, making it independent
+            popen_kwargs = {
+                "stdout": subprocess.DEVNULL,
+                "stderr": subprocess.DEVNULL,
+                "stdin": subprocess.DEVNULL,
+                "creationflags": subprocess.CREATE_NEW_CONSOLE,
+            }
+            process = subprocess.Popen(args, **popen_kwargs)
 
             # Debug: Log result
             try:
                 _cmd_log_path = Path(tempfile.gettempdir()) / "grok_chrome_launch.log"
                 with open(_cmd_log_path, "a") as f:
                     import datetime
-                    f.write(f"[{datetime.datetime.now().isoformat()}] RESULT: returncode={result.returncode}, stdout={result.stdout!r}, stderr={result.stderr!r}\n")
+                    f.write(f"[{datetime.datetime.now().isoformat()}] POPEN_PID: {process.pid}\n")
             except Exception:
                 pass
-
-            # Return a dummy process object
-            process = type('DummyProcess', (), {'pid': 0, 'poll': lambda: None})()
         else:
             # On Unix, use start_new_session
             popen_kwargs = {
