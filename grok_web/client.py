@@ -615,7 +615,7 @@ class NodriverClient(AsyncClientBase):
         try:
             # Get the main frame ID for the current page
             frame_tree = await self._tab.send(cdp.page.get_frame_tree())
-            frame_id = frame_tree.frame.id
+            frame_id = frame_tree.frame.id_  # Note: id_ (with underscore) because 'id' is a Python keyword
 
             # Use CDP Network.loadNetworkResource to fetch headers
             # This bypasses CORS and is more reliable than fetch()
