@@ -18,7 +18,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Debug: Write to file at import time to verify MCP is using new code
-_BROWSER_PY_VERSION = "v23-debug-process"
+_BROWSER_PY_VERSION = "v24-vbscript"
 try:
     _debug_path = Path(tempfile.gettempdir()) / "grok_browser_import.log"
     with open(_debug_path, "a") as f:
@@ -365,54 +365,62 @@ def launch_chrome_with_debug_port(
             except Exception:
                 pass
 
-            # Write the command to a .bat file and execute it with os.startfile()
-            # os.startfile() mimics double-clicking a file, which is more reliable
-            # than subprocess on Windows for launching independent processes
-            bat_path = Path(tempfile.gettempdir()) / "grok_chrome_launch.bat"
+            # Write a VBScript file to launch Chrome
+            # VBScript's WScript.Shell.Run has special privileges and can
+            # create truly independent processes, even from non-interactive sessions
+            vbs_path = Path(tempfile.gettempdir()) / "grok_chrome_launch.vbs"
             try:
-                with open(bat_path, "w") as f:
-                    f.write(f"@echo off\n{cmd_str}\n")
+                # Escape quotes for VBScript
+                # VBScript needs doubled quotes for escaping
+                vbs_cmd = cmd_str.replace('"', '""')
 
-                # Debug: Log bat file creation
+                vbs_content = f'''Set objShell = CreateObject("WScript.Shell")
+objShell.Run "cmd /c {vbs_cmd}", 0, False
+'''
+
+                with open(vbs_path, "w") as f:
+                    f.write(vbs_content)
+
+                # Debug: Log VBS file creation
                 _cmd_log_path = Path(tempfile.gettempdir()) / "grok_chrome_launch.log"
                 with open(_cmd_log_path, "a") as f:
                     import datetime
-                    f.write(f"[{datetime.datetime.now().isoformat()}] BAT_FILE: {bat_path}\n")
-                    f.write(f"[{datetime.datetime.now().isoformat()}] BAT_CMD: {cmd_str}\n")
+                    f.write(f"[{datetime.datetime.now().isoformat()}] VBS_FILE: {vbs_path}\n")
+                    f.write(f"[{datetime.datetime.now().isoformat()}] VBS_CMD: {vbs_cmd}\n")
+                    f.write(f"[{datetime.datetime.now().isoformat()}] PROCESS_INFO: PID={os.getpid()}, PPID={os.getppid()}\n")
             except Exception as e:
-                logger.error(f"Failed to create bat file: {e}")
+                logger.error(f"Failed to create VBS file: {e}")
 
-            # Debug: Log process information before launching
+            # Execute VBScript using cscript.exe (console script host)
+            # This completely detaches from the current process context
             try:
-                _cmd_log_path = Path(tempfile.gettempdir()) / "grok_chrome_launch.log"
-                with open(_cmd_log_path, "a") as f:
-                    import datetime
-                    f.write(f"[{datetime.datetime.now().isoformat()}] PROCESS_INFO: PID={os.getpid()}, PPID={os.getppid()}, CWD={os.getcwd()}\n")
-                    f.write(f"[{datetime.datetime.now().isoformat()}] ENV_INFO: USERNAME={os.environ.get('USERNAME')}, SESSIONNAME={os.environ.get('SESSIONNAME')}, USERPROFILE={os.environ.get('USERPROFILE')}\n")
-            except Exception:
-                pass
+                result = subprocess.run(
+                    ["cscript.exe", "//NoLogo", str(vbs_path)],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
 
-            # Use os.startfile() to launch the .bat file
-            # This is Windows-native and mimics user double-clicking the file
-            try:
-                os.startfile(str(bat_path))
-
-                # Debug: Log successful startfile
+                # Debug: Log VBScript execution result
                 try:
                     _cmd_log_path = Path(tempfile.gettempdir()) / "grok_chrome_launch.log"
                     with open(_cmd_log_path, "a") as f:
                         import datetime
-                        f.write(f"[{datetime.datetime.now().isoformat()}] STARTFILE: Success\n")
+                        f.write(f"[{datetime.datetime.now().isoformat()}] VBS_RESULT: returncode={result.returncode}\n")
+                        if result.stdout:
+                            f.write(f"[{datetime.datetime.now().isoformat()}] VBS_STDOUT: {result.stdout}\n")
+                        if result.stderr:
+                            f.write(f"[{datetime.datetime.now().isoformat()}] VBS_STDERR: {result.stderr}\n")
                 except Exception:
                     pass
             except Exception as e:
-                logger.error(f"Failed to start bat file with os.startfile(): {e}")
+                logger.error(f"Failed to execute VBScript: {e}")
                 # Debug: Log error
                 try:
                     _cmd_log_path = Path(tempfile.gettempdir()) / "grok_chrome_launch.log"
                     with open(_cmd_log_path, "a") as f:
                         import datetime
-                        f.write(f"[{datetime.datetime.now().isoformat()}] STARTFILE_ERROR: {e}\n")
+                        f.write(f"[{datetime.datetime.now().isoformat()}] VBS_ERROR: {e}\n")
                 except Exception:
                     pass
 
