@@ -18,7 +18,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Debug: Write to file at import time to verify MCP is using new code
-_BROWSER_PY_VERSION = "v22-os-startfile"
+_BROWSER_PY_VERSION = "v23-debug-process"
 try:
     _debug_path = Path(tempfile.gettempdir()) / "grok_browser_import.log"
     with open(_debug_path, "a") as f:
@@ -381,6 +381,16 @@ def launch_chrome_with_debug_port(
                     f.write(f"[{datetime.datetime.now().isoformat()}] BAT_CMD: {cmd_str}\n")
             except Exception as e:
                 logger.error(f"Failed to create bat file: {e}")
+
+            # Debug: Log process information before launching
+            try:
+                _cmd_log_path = Path(tempfile.gettempdir()) / "grok_chrome_launch.log"
+                with open(_cmd_log_path, "a") as f:
+                    import datetime
+                    f.write(f"[{datetime.datetime.now().isoformat()}] PROCESS_INFO: PID={os.getpid()}, PPID={os.getppid()}, CWD={os.getcwd()}\n")
+                    f.write(f"[{datetime.datetime.now().isoformat()}] ENV_INFO: USERNAME={os.environ.get('USERNAME')}, SESSIONNAME={os.environ.get('SESSIONNAME')}, USERPROFILE={os.environ.get('USERPROFILE')}\n")
+            except Exception:
+                pass
 
             # Use os.startfile() to launch the .bat file
             # This is Windows-native and mimics user double-clicking the file
