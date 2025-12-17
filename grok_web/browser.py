@@ -18,7 +18,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Debug: Write to file at import time to verify MCP is using new code
-_BROWSER_PY_VERSION = "v14-subprocess-run"
+_BROWSER_PY_VERSION = "v15-powershell-minimal"
 try:
     _debug_path = Path(tempfile.gettempdir()) / "grok_browser_import.log"
     with open(_debug_path, "a") as f:
@@ -305,28 +305,37 @@ def launch_chrome_with_debug_port(
     if user_data_dir is None:
         user_data_dir = tempfile.mkdtemp(prefix="grok_chrome_")
 
-    args = [
-        chrome_path,
-        f"--remote-debugging-port={port}",
-        f"--user-data-dir={user_data_dir}",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--disable-background-networking",
-        "--disable-client-side-phishing-detection",
-        "--disable-default-apps",
-        "--disable-extensions",
-        "--disable-hang-monitor",
-        "--disable-popup-blocking",
-        "--disable-prompt-on-repost",
-        "--disable-sync",
-        "--disable-translate",
-        "--metrics-recording-only",
-        "--safebrowsing-disable-auto-update",
-        # Force Chrome to start as independent instance (Windows MCP fix)
-        "--disable-features=RendererCodeIntegrity",
-        "--no-service-autorun",
-        "--password-store=basic",
-    ]
+    # On Windows, use minimal args to avoid conflicts
+    if platform.system() == "Windows":
+        args = [
+            chrome_path,
+            f"--remote-debugging-port={port}",
+            f"--user-data-dir={user_data_dir}",
+            "--no-first-run",
+        ]
+    else:
+        args = [
+            chrome_path,
+            f"--remote-debugging-port={port}",
+            f"--user-data-dir={user_data_dir}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-background-networking",
+            "--disable-client-side-phishing-detection",
+            "--disable-default-apps",
+            "--disable-extensions",
+            "--disable-hang-monitor",
+            "--disable-popup-blocking",
+            "--disable-prompt-on-repost",
+            "--disable-sync",
+            "--disable-translate",
+            "--metrics-recording-only",
+            "--safebrowsing-disable-auto-update",
+            # Force Chrome to start as independent instance (Windows MCP fix)
+            "--disable-features=RendererCodeIntegrity",
+            "--no-service-autorun",
+            "--password-store=basic",
+        ]
 
     if headless:
         args.append("--headless=new")
@@ -334,26 +343,30 @@ def launch_chrome_with_debug_port(
     # Start Chrome process
     try:
         if platform.system() == "Windows":
-            # On Windows, use os.system() to run the start command directly.
-            # This works better than subprocess.Popen() for launching Chrome
-            # when another Chrome instance is already running.
-            logger.debug(f"Launching Chrome on Windows via os.system()...")
+            # On Windows, use PowerShell Start-Process for better process isolation
+            logger.debug(f"Launching Chrome on Windows via PowerShell Start-Process...")
 
-            # Build the start command
-            args_str = ' '.join(f'"{arg}"' if ' ' in str(arg) else str(arg) for arg in args[1:])
-            cmd = f'start "" "{chrome_path}" {args_str}'
+            # Build PowerShell Start-Process command with ArgumentList
+            # This provides better process isolation than cmd's 'start' command
+            args_str = ', '.join(f"'{arg}'" for arg in args[1:])
+            ps_cmd = f'Start-Process -FilePath "{chrome_path}" -ArgumentList {args_str}'
 
             # Debug: Write command to temp file
             try:
                 _cmd_log_path = Path(tempfile.gettempdir()) / "grok_chrome_launch.log"
                 with open(_cmd_log_path, "a") as f:
                     import datetime
-                    f.write(f"[{datetime.datetime.now().isoformat()}] CMD: {cmd}\n")
+                    f.write(f"[{datetime.datetime.now().isoformat()}] PS_CMD: {ps_cmd}\n")
             except Exception:
                 pass
 
-            # Use subprocess.run() with shell=True for better control
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            # Use PowerShell to launch Chrome
+            result = subprocess.run(
+                ["powershell", "-Command", ps_cmd],
+                capture_output=True,
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+            )
 
             # Debug: Log result
             try:
@@ -364,7 +377,7 @@ def launch_chrome_with_debug_port(
             except Exception:
                 pass
 
-            # Return a dummy process object (os.system doesn't return one)
+            # Return a dummy process object
             process = type('DummyProcess', (), {'pid': 0, 'poll': lambda: None})()
         else:
             # On Unix, use start_new_session
