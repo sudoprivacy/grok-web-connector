@@ -18,7 +18,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Debug: Write to file at import time to verify MCP is using new code
-_BROWSER_PY_VERSION = "v12-bat-file"
+_BROWSER_PY_VERSION = "v13-os-system"
 try:
     _debug_path = Path(tempfile.gettempdir()) / "grok_browser_import.log"
     with open(_debug_path, "a") as f:
@@ -334,26 +334,20 @@ def launch_chrome_with_debug_port(
     # Start Chrome process
     try:
         if platform.system() == "Windows":
-            # On Windows, write a .bat file and execute it to ensure Chrome starts
-            # in a proper shell environment. This works around issues where Chrome
-            # fails to start from console-less processes like MCP server.
-            logger.debug(f"Launching Chrome on Windows via .bat file...")
+            # On Windows, use os.system() to run the start command directly.
+            # This works better than subprocess.Popen() for launching Chrome
+            # when another Chrome instance is already running.
+            logger.debug(f"Launching Chrome on Windows via os.system()...")
 
             # Build the start command
             args_str = ' '.join(f'"{arg}"' if ' ' in str(arg) else str(arg) for arg in args[1:])
-            bat_content = f'@echo off\nstart "" "{chrome_path}" {args_str}\n'
+            cmd = f'start "" "{chrome_path}" {args_str}'
 
-            # Write to a temp .bat file
-            bat_path = Path(tempfile.gettempdir()) / "grok_chrome_launch.bat"
-            bat_path.write_text(bat_content)
+            # Use os.system() which runs through the system shell
+            os.system(cmd)
 
-            # Execute the .bat file
-            process = subprocess.Popen(
-                [str(bat_path)],
-                shell=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            # Return a dummy process object (os.system doesn't return one)
+            process = type('DummyProcess', (), {'pid': 0, 'poll': lambda: None})()
         else:
             # On Unix, use start_new_session
             popen_kwargs = {
