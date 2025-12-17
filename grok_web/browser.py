@@ -18,7 +18,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Debug: Write to file at import time to verify MCP is using new code
-_BROWSER_PY_VERSION = "v30-popen-detached"
+_BROWSER_PY_VERSION = "v31-explorer-launch"
 try:
     _debug_path = Path(tempfile.gettempdir()) / "grok_browser_import.log"
     with open(_debug_path, "a") as f:
@@ -365,47 +365,62 @@ def launch_chrome_with_debug_port(
             except Exception:
                 pass
 
-            # Use subprocess.Popen with DETACHED_PROCESS + CREATE_BREAKAWAY_FROM_JOB
-            # This is similar to macOS's start_new_session=True
-            # It creates a completely independent process that breaks away from the job/session
+            # Use Windows ShellExecute API to launch Chrome via explorer.exe
+            # This simulates a user double-clicking and runs in the desktop session
             try:
                 import datetime
+                import ctypes
 
-                # Use DETACHED_PROCESS to detach from console
-                # Use CREATE_BREAKAWAY_FROM_JOB to break away from job object
-                # This combination should create a truly independent process
-                creationflags = subprocess.DETACHED_PROCESS | subprocess.CREATE_BREAKAWAY_FROM_JOB
+                # Create a batch file with the start command
+                bat_content = f'@echo off\nstart "" "{chrome_path}" --remote-debugging-port={port} --user-data-dir="{user_data_dir}" --no-first-run --disable-features=ProcessSingleton\n'
+                bat_path = os.path.join(tempfile.gettempdir(), 'grok_chrome_launcher.bat')
+
+                with open(bat_path, 'w') as f:
+                    f.write(bat_content)
 
                 # Debug: Log command
                 _cmd_log_path = Path(tempfile.gettempdir()) / "grok_chrome_launch.log"
                 with open(_cmd_log_path, "a") as f:
-                    f.write(f"[{datetime.datetime.now().isoformat()}] POPEN_DETACHED_ARGS: {args}\n")
-                    f.write(f"[{datetime.datetime.now().isoformat()}] POPEN_DETACHED_FLAGS: DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB\n")
+                    f.write(f"[{datetime.datetime.now().isoformat()}] EXPLORER_LAUNCH_BAT: {bat_path}\n")
+                    f.write(f"[{datetime.datetime.now().isoformat()}] EXPLORER_LAUNCH_CMD: {bat_content.strip()}\n")
                     f.write(f"[{datetime.datetime.now().isoformat()}] PROCESS_INFO: PID={os.getpid()}, PPID={os.getppid()}\n")
 
-                # Launch Chrome with Popen (like macOS does)
-                process = subprocess.Popen(
-                    args,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    stdin=subprocess.DEVNULL,
-                    creationflags=creationflags
+                # Use ShellExecute to open the batch file (like double-clicking)
+                # SW_HIDE (0) = hidden window
+                # This runs in the user's desktop session via explorer.exe
+                result = ctypes.windll.shell32.ShellExecuteW(
+                    None,           # parent window
+                    "open",         # operation
+                    bat_path,       # file to open
+                    None,           # parameters
+                    None,           # directory
+                    0               # SW_HIDE = 0
                 )
 
                 # Debug: Log result
                 with open(_cmd_log_path, "a") as f:
-                    f.write(f"[{datetime.datetime.now().isoformat()}] POPEN_DETACHED_PID: {process.pid}\n")
+                    f.write(f"[{datetime.datetime.now().isoformat()}] EXPLORER_LAUNCH_RESULT: {result}\n")
+                    # ShellExecute returns > 32 on success, <= 32 on error
+                    if result > 32:
+                        f.write(f"[{datetime.datetime.now().isoformat()}] EXPLORER_LAUNCH_SUCCESS\n")
+                    else:
+                        f.write(f"[{datetime.datetime.now().isoformat()}] EXPLORER_LAUNCH_ERROR: code={result}\n")
+
+                # Return a dummy process
+                process = type('DummyProcess', (), {'pid': 0, 'poll': lambda: None})()
 
             except Exception as e:
-                logger.error(f"Failed to launch Chrome: {e}")
+                logger.error(f"Failed to launch Chrome via explorer: {e}")
                 # Debug: Log error
                 try:
                     _cmd_log_path = Path(tempfile.gettempdir()) / "grok_chrome_launch.log"
                     with open(_cmd_log_path, "a") as f:
                         import datetime
-                        f.write(f"[{datetime.datetime.now().isoformat()}] POPEN_DETACHED_ERROR: {e}\n")
+                        f.write(f"[{datetime.datetime.now().isoformat()}] EXPLORER_LAUNCH_EXCEPTION: {e}\n")
                 except Exception:
                     pass
+                # Return a dummy process
+                process = type('DummyProcess', (), {'pid': 0, 'poll': lambda: None})()
         else:
             # On Unix, use start_new_session
             popen_kwargs = {
