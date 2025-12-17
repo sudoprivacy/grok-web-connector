@@ -18,7 +18,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Debug: Write to file at import time to verify MCP is using new code
-_BROWSER_PY_VERSION = "v21-bat-file"
+_BROWSER_PY_VERSION = "v22-os-startfile"
 try:
     _debug_path = Path(tempfile.gettempdir()) / "grok_browser_import.log"
     with open(_debug_path, "a") as f:
@@ -365,8 +365,9 @@ def launch_chrome_with_debug_port(
             except Exception:
                 pass
 
-            # Write the command to a .bat file and execute it
-            # This completely isolates Chrome from the Python process environment
+            # Write the command to a .bat file and execute it with os.startfile()
+            # os.startfile() mimics double-clicking a file, which is more reliable
+            # than subprocess on Windows for launching independent processes
             bat_path = Path(tempfile.gettempdir()) / "grok_chrome_launch.bat"
             try:
                 with open(bat_path, "w") as f:
@@ -381,26 +382,31 @@ def launch_chrome_with_debug_port(
             except Exception as e:
                 logger.error(f"Failed to create bat file: {e}")
 
-            # Execute the .bat file
-            result = subprocess.run(
-                [str(bat_path)],
-                shell=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                stdin=subprocess.DEVNULL,
-                creationflags=subprocess.DETACHED_PROCESS if hasattr(subprocess, 'DETACHED_PROCESS') else 0,
-            )
-
-            # Debug: Log result
+            # Use os.startfile() to launch the .bat file
+            # This is Windows-native and mimics user double-clicking the file
             try:
-                _cmd_log_path = Path(tempfile.gettempdir()) / "grok_chrome_launch.log"
-                with open(_cmd_log_path, "a") as f:
-                    import datetime
-                    f.write(f"[{datetime.datetime.now().isoformat()}] BAT_RESULT: returncode={result.returncode}\n")
-            except Exception:
-                pass
+                os.startfile(str(bat_path))
 
-            # Return a dummy process since we can't get Chrome's actual PID from 'start'
+                # Debug: Log successful startfile
+                try:
+                    _cmd_log_path = Path(tempfile.gettempdir()) / "grok_chrome_launch.log"
+                    with open(_cmd_log_path, "a") as f:
+                        import datetime
+                        f.write(f"[{datetime.datetime.now().isoformat()}] STARTFILE: Success\n")
+                except Exception:
+                    pass
+            except Exception as e:
+                logger.error(f"Failed to start bat file with os.startfile(): {e}")
+                # Debug: Log error
+                try:
+                    _cmd_log_path = Path(tempfile.gettempdir()) / "grok_chrome_launch.log"
+                    with open(_cmd_log_path, "a") as f:
+                        import datetime
+                        f.write(f"[{datetime.datetime.now().isoformat()}] STARTFILE_ERROR: {e}\n")
+                except Exception:
+                    pass
+
+            # Return a dummy process since we can't get Chrome's actual PID
             process = type('DummyProcess', (), {'pid': 0, 'poll': lambda: None})()
         else:
             # On Unix, use start_new_session
