@@ -18,7 +18,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Debug: Write to file at import time to verify MCP is using new code
-_BROWSER_PY_VERSION = "v16-popen-new-console"
+_BROWSER_PY_VERSION = "v17-disable-singleton"
 try:
     _debug_path = Path(tempfile.gettempdir()) / "grok_browser_import.log"
     with open(_debug_path, "a") as f:
@@ -305,13 +305,16 @@ def launch_chrome_with_debug_port(
     if user_data_dir is None:
         user_data_dir = tempfile.mkdtemp(prefix="grok_chrome_")
 
-    # On Windows, use minimal args to avoid conflicts
+    # On Windows, use minimal args plus ProcessSingleton disable
     if platform.system() == "Windows":
         args = [
             chrome_path,
             f"--remote-debugging-port={port}",
             f"--user-data-dir={user_data_dir}",
             "--no-first-run",
+            # Critical: Disable single-instance mode so Chrome doesn't
+            # delegate to existing instances and exit immediately
+            "--disable-features=ProcessSingleton",
         ]
     else:
         args = [
