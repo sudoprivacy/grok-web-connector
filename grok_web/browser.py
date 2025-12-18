@@ -18,7 +18,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Debug: Write to file at import time to verify MCP is using new code
-_BROWSER_PY_VERSION = "v34-generic-error"
+_BROWSER_PY_VERSION = "v35-unified-popen"
 try:
     _debug_path = Path(tempfile.gettempdir()) / "grok_browser_import.log"
     with open(_debug_path, "a") as f:
@@ -305,131 +305,49 @@ def launch_chrome_with_debug_port(
     if user_data_dir is None:
         user_data_dir = tempfile.mkdtemp(prefix="grok_chrome_")
 
-    # On Windows, use minimal args plus ProcessSingleton disable
-    if platform.system() == "Windows":
-        args = [
-            chrome_path,
-            f"--remote-debugging-port={port}",
-            f"--user-data-dir={user_data_dir}",
-            "--no-first-run",
-            # Critical: Disable single-instance mode so Chrome doesn't
-            # delegate to existing instances and exit immediately
-            "--disable-features=ProcessSingleton",
-        ]
-    else:
-        args = [
-            chrome_path,
-            f"--remote-debugging-port={port}",
-            f"--user-data-dir={user_data_dir}",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--disable-background-networking",
-            "--disable-client-side-phishing-detection",
-            "--disable-default-apps",
-            "--disable-extensions",
-            "--disable-hang-monitor",
-            "--disable-popup-blocking",
-            "--disable-prompt-on-repost",
-            "--disable-sync",
-            "--disable-translate",
-            "--metrics-recording-only",
-            "--safebrowsing-disable-auto-update",
-            # Force Chrome to start as independent instance (Windows MCP fix)
-            "--disable-features=RendererCodeIntegrity",
-            "--no-service-autorun",
-            "--password-store=basic",
-        ]
+    # Build Chrome arguments (cross-platform)
+    args = [
+        chrome_path,
+        f"--remote-debugging-port={port}",
+        f"--user-data-dir={user_data_dir}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-background-networking",
+        "--disable-client-side-phishing-detection",
+        "--disable-default-apps",
+        "--disable-extensions",
+        "--disable-hang-monitor",
+        "--disable-popup-blocking",
+        "--disable-prompt-on-repost",
+        "--disable-sync",
+        "--disable-translate",
+        "--metrics-recording-only",
+        "--safebrowsing-disable-auto-update",
+    ]
 
     if headless:
         args.append("--headless=new")
 
     # Start Chrome process
     try:
+        # Use subprocess.Popen on all platforms
+        # On Unix, use start_new_session to detach from parent
+        # On Windows, CREATE_NEW_PROCESS_GROUP for similar isolation
         if platform.system() == "Windows":
-            # On Windows, use 'cmd /c start' just like the Bash tool does
-            # This is the ONLY method that successfully launches Chrome when
-            # other Chrome instances are already running
-            logger.debug(f"Launching Chrome on Windows via cmd /c start...")
-
-            # Build command as string for shell execution
-            # Format: start "" "chrome.exe" arg1 arg2 arg3...
-            args_str = ' '.join(f'"{arg}"' if ' ' in str(arg) else str(arg) for arg in args[1:])
-            cmd_str = f'start "" "{chrome_path}" {args_str}'
-
-            # Debug: Log the command
-            try:
-                _cmd_log_path = Path(tempfile.gettempdir()) / "grok_chrome_launch.log"
-                with open(_cmd_log_path, "a") as f:
-                    import datetime
-                    f.write(f"[{datetime.datetime.now().isoformat()}] CMD_STR: {cmd_str}\n")
-            except Exception:
-                pass
-
-            # Use Windows ShellExecute API to launch Chrome via explorer.exe
-            # This simulates a user double-clicking and runs in the desktop session
-            try:
-                import datetime
-                import ctypes
-
-                # Create a batch file with the start command
-                bat_content = f'@echo off\nstart "" "{chrome_path}" --remote-debugging-port={port} --user-data-dir="{user_data_dir}" --no-first-run --disable-features=ProcessSingleton\n'
-                bat_path = os.path.join(tempfile.gettempdir(), 'grok_chrome_launcher.bat')
-
-                with open(bat_path, 'w') as f:
-                    f.write(bat_content)
-
-                # Debug: Log command
-                _cmd_log_path = Path(tempfile.gettempdir()) / "grok_chrome_launch.log"
-                with open(_cmd_log_path, "a") as f:
-                    f.write(f"[{datetime.datetime.now().isoformat()}] EXPLORER_LAUNCH_BAT: {bat_path}\n")
-                    f.write(f"[{datetime.datetime.now().isoformat()}] EXPLORER_LAUNCH_CMD: {bat_content.strip()}\n")
-                    f.write(f"[{datetime.datetime.now().isoformat()}] PROCESS_INFO: PID={os.getpid()}, PPID={os.getppid()}\n")
-
-                # Use ShellExecute to open the batch file (like double-clicking)
-                # SW_HIDE (0) = hidden window
-                # This runs in the user's desktop session via explorer.exe
-                result = ctypes.windll.shell32.ShellExecuteW(
-                    None,           # parent window
-                    "open",         # operation
-                    bat_path,       # file to open
-                    None,           # parameters
-                    None,           # directory
-                    0               # SW_HIDE = 0
-                )
-
-                # Debug: Log result
-                with open(_cmd_log_path, "a") as f:
-                    f.write(f"[{datetime.datetime.now().isoformat()}] EXPLORER_LAUNCH_RESULT: {result}\n")
-                    # ShellExecute returns > 32 on success, <= 32 on error
-                    if result > 32:
-                        f.write(f"[{datetime.datetime.now().isoformat()}] EXPLORER_LAUNCH_SUCCESS\n")
-                    else:
-                        f.write(f"[{datetime.datetime.now().isoformat()}] EXPLORER_LAUNCH_ERROR: code={result}\n")
-
-                # Return a dummy process
-                process = type('DummyProcess', (), {'pid': 0, 'poll': lambda: None})()
-
-            except Exception as e:
-                logger.error(f"Failed to launch Chrome via explorer: {e}")
-                # Debug: Log error
-                try:
-                    _cmd_log_path = Path(tempfile.gettempdir()) / "grok_chrome_launch.log"
-                    with open(_cmd_log_path, "a") as f:
-                        import datetime
-                        f.write(f"[{datetime.datetime.now().isoformat()}] EXPLORER_LAUNCH_EXCEPTION: {e}\n")
-                except Exception:
-                    pass
-                # Return a dummy process
-                process = type('DummyProcess', (), {'pid': 0, 'poll': lambda: None})()
+            popen_kwargs = {
+                "stdout": subprocess.DEVNULL,
+                "stderr": subprocess.PIPE,
+                "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP,
+            }
         else:
-            # On Unix, use start_new_session
             popen_kwargs = {
                 "stdout": subprocess.DEVNULL,
                 "stderr": subprocess.PIPE,
                 "start_new_session": True,
             }
-            logger.debug(f"Launching Chrome with args: {args[:3]}...")
-            process = subprocess.Popen(args, **popen_kwargs)
+
+        logger.debug(f"Launching Chrome with args: {args[:3]}...")
+        process = subprocess.Popen(args, **popen_kwargs)
 
         logger.debug(f"Chrome process created, PID: {process.pid}")
     except Exception as e:
