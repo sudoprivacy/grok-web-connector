@@ -630,21 +630,27 @@ class NodriverClient(AsyncClientBase):
                 )
             )
 
-            # Check if we got the resource info
-            if not response or not response.resource:
+            # Check if request succeeded
+            if not response:
                 raise GrokAPIError(f"Failed to load network resource: {asset_url}")
 
-            resource = response.resource
+            # Response is directly LoadNetworkResourcePageResult (not wrapped)
+            # Check if there was a network error
+            if not response.success:
+                error_msg = f"Network request failed for {asset_url}"
+                if response.net_error_name:
+                    error_msg += f": {response.net_error_name}"
+                raise GrokAPIError(error_msg)
 
             # Check HTTP status
-            if resource.http_status_code == 403:
+            if response.http_status_code == 403:
                 raise GrokAuthError("Asset access denied (403)")
-            if resource.http_status_code and resource.http_status_code >= 400:
-                raise GrokAPIError(f"Asset request failed: HTTP {resource.http_status_code}")
+            if response.http_status_code and response.http_status_code >= 400:
+                raise GrokAPIError(f"Asset request failed: HTTP {response.http_status_code}")
 
             # Get Content-Length from headers
-            if resource.headers:
-                for header_name, header_value in resource.headers.items():
+            if response.headers:
+                for header_name, header_value in response.headers.items():
                     if header_name.lower() == "content-length":
                         return int(header_value)
 
