@@ -1808,7 +1808,7 @@ class NodriverClient(AsyncClientBase):
         self,
         prompt: str,
         aspect_ratio: str = "portrait",
-        timeout: int = 180,
+        timeout: int = 300,
         wait_for_video: bool = True,
     ) -> VideoGenerationResult:
         """
@@ -1823,7 +1823,9 @@ class NodriverClient(AsyncClientBase):
         Args:
             prompt: Text description of the video to generate
             aspect_ratio: "portrait" (9:16), "square" (1:1), or "landscape" (16:9)
-            timeout: Max seconds to wait for video generation (default 180)
+            timeout: Max seconds to wait for video generation (default 300).
+                    While txt2vid is usually fast (~30s), we use a generous timeout
+                    to handle network delays and server-side queueing.
             wait_for_video: Wait for video element to load (default True).
                            Set False to return immediately after URL redirect.
 
@@ -2048,7 +2050,7 @@ class NodriverClient(AsyncClientBase):
         source_image_path: str | Path | None = None,
         preset: VideoPreset | str = "normal",
         aspect_ratio: str = "portrait",
-        timeout: int = 180,
+        timeout: int = 300,
         wait_for_video: bool = True,
     ) -> VideoGenerationResult:
         """
@@ -2069,7 +2071,8 @@ class NodriverClient(AsyncClientBase):
             preset: Video style preset - 'normal', 'fun', or 'spicy'.
                    Only used for img2vid mode.
             aspect_ratio: Video aspect ratio.
-            timeout: Max seconds to wait for video generation (default 180).
+            timeout: Max seconds to wait for video generation (default 300).
+                    Video generation typically takes 2-5 minutes, especially for img2vid mode.
             wait_for_video: (txt2vid only) Wait for video element to load (default True).
 
         Returns:
@@ -2112,7 +2115,7 @@ class NodriverClient(AsyncClientBase):
         self,
         parent_post_id: str,
         preset: VideoPreset | str = VideoPreset.NORMAL,
-        timeout: int = 120,
+        timeout: int = 300,
         stable_id: str | None = None,
         adjustment_prompt: str | None = None,
     ) -> VideoGenerationResult:
@@ -2125,7 +2128,8 @@ class NodriverClient(AsyncClientBase):
         Args:
             parent_post_id: The image post ID to generate video from
             preset: Video style preset - 'normal', 'fun', or 'spicy' (or VideoPreset enum)
-            timeout: Max seconds to wait for video generation
+            timeout: Max seconds to wait for video generation (default 300).
+                    Video generation typically takes 2-5 minutes for img2vid mode.
             stable_id: Optional custom stable_id to inject before generation.
                       Use generate_stable_id() to create one. Controls A/B style bucket.
             adjustment_prompt: Video generation prompt (same as typing in Grok UI after image).
@@ -2889,7 +2893,7 @@ class SmartGrokClient:
         source_image_path: str | Path | None = None,
         preset: VideoPreset | str = "normal",
         aspect_ratio: str = "portrait",
-        timeout: int = 180,
+        timeout: int = 300,
         wait_for_video: bool = True,
     ) -> VideoGenerationResult:
         """
@@ -2912,7 +2916,8 @@ class SmartGrokClient:
             aspect_ratio: Video aspect ratio.
                          - txt2vid: "portrait" (9:16), "square" (1:1), "landscape" (16:9)
                          - img2vid: "2:3", "1:1", "3:2"
-            timeout: Max seconds to wait for video generation (default 180).
+            timeout: Max seconds to wait for video generation (default 300).
+                    Video generation typically takes 2-5 minutes, especially for img2vid mode.
             wait_for_video: (txt2vid only) Wait for video element to load (default True).
 
         Returns:
