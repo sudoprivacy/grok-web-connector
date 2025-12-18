@@ -3,11 +3,13 @@
 import asyncio
 import contextlib
 import logging
+import platform
+import subprocess
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal
 
-from ..browser import find_nodriver_chromes, get_available_port
+from ..browser import find_nodriver_chromes, get_available_port, get_pid_on_port
 from ..client import NodriverClient
 from ..models import GrokCookies
 from .job import Job, JobResult, JobStatus
@@ -15,6 +17,35 @@ from .persistence import PoolState, load_state, save_state
 from .worker import Worker, WorkerStats, WorkerStatus
 
 logger = logging.getLogger(__name__)
+
+
+def _kill_process_tree(pid: int) -> None:
+    """Kill a process and all its children (process tree).
+
+    On Windows, Chrome spawns child processes that continue running even after
+    the parent is killed. We need to kill the entire process tree.
+
+    Args:
+        pid: Process ID to kill (including all descendants)
+    """
+    try:
+        if platform.system() == "Windows":
+            # Use taskkill /T to kill process tree on Windows
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                capture_output=True,
+                timeout=10,
+            )
+        else:
+            # On Unix-like systems, use SIGKILL
+            import signal
+            import os
+            try:
+                os.killpg(os.getpgid(pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass  # Process already dead
+    except Exception as e:
+        logger.warning(f"Failed to kill process tree for PID {pid}: {e}")
 
 
 class BrowserWorkerPool:
@@ -151,12 +182,18 @@ class BrowserWorkerPool:
         for worker in self._workers.values():
             if worker.client:
                 try:
-                    # Terminate Chrome process if close_chrome is True
+                    # Terminate Chrome process if close_chrome is True AND we launched it
+                    # (if we reused existing Chrome, _chrome_process will be None)
                     if self._close_chrome and hasattr(worker.client, "_chrome_process"):
                         chrome_process = worker.client._chrome_process
                         if chrome_process is not None:
-                            chrome_process.terminate()
-                            logger.info(f"Terminated Chrome for worker {worker.worker_id}")
+                            # Chrome launches child processes and the parent exits quickly
+                            # Find the actual Chrome PID by port
+                            actual_pid = get_pid_on_port(worker.port)
+                            if actual_pid:
+                                logger.info(f"Killing Chrome process tree (PID: {actual_pid}) for worker {worker.worker_id}")
+                                # Kill the entire process tree (parent + all children)
+                                _kill_process_tree(actual_pid)
 
                     await worker.client.__aexit__(None, None, None)
                 except Exception as e:
@@ -261,12 +298,18 @@ class BrowserWorkerPool:
         # Close browser client and optionally terminate Chrome
         if worker.client:
             try:
-                # Terminate Chrome process if close_chrome is True
+                # Terminate Chrome process if close_chrome is True AND we launched it
+                # (if we reused existing Chrome, _chrome_process will be None)
                 if self._close_chrome and hasattr(worker.client, "_chrome_process"):
                     chrome_process = worker.client._chrome_process
                     if chrome_process is not None:
-                        chrome_process.terminate()
-                        logger.info(f"Terminated Chrome for worker {worker_id}")
+                        # Chrome launches child processes and the parent exits quickly
+                        # Find the actual Chrome PID by port
+                        actual_pid = get_pid_on_port(worker.port)
+                        if actual_pid:
+                            logger.info(f"Killing Chrome process tree (PID: {actual_pid}) for worker {worker_id}")
+                            # Kill the entire process tree (parent + all children)
+                            _kill_process_tree(actual_pid)
 
                 await worker.client.__aexit__(None, None, None)
             except Exception as e:
