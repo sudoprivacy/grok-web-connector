@@ -2322,46 +2322,98 @@ class NodriverClient(AsyncClientBase):
                             )
                         if item_text == preset_menu_text:
                             await item.mouse_click()
-                            preset_selected = True
-                            break  # Selecting preset auto-triggers video generation
+
+                            # Wait for request to be captured (verify preset triggered API)
+                            preset_start = asyncio.get_event_loop().time()
+                            while captured_response["request_id"] is None:
+                                elapsed = asyncio.get_event_loop().time() - preset_start
+                                if elapsed > 3:  # 3s timeout for preset (local JS)
+                                    break
+                                await asyncio.sleep(0.3)
+
+                            if captured_response["request_id"] is not None:
+                                preset_selected = True
+                            break
 
             except Exception:
                 pass  # If preset selection fails, fall back to clicking Create Video
 
         # For Normal preset (or if preset selection failed), click "Create Video" button
+        # with retry logic for UI non-determinism
         if not preset_selected:
-            try:
-                buttons = await self._tab.find_all("button, [role='button']")
+            max_click_retries = 3
+            click_wait_timeout = 8  # Wait 8s for request capture before retry
 
-                # Find the "生成视频" / "Create Video" button
-                create_btn = None
-                for btn in buttons:
-                    text = ""
-                    label = btn.attrs.get("aria-label", "")
-                    if hasattr(btn, "text"):
-                        text = btn.text.strip() if btn.text else ""
+            async def find_and_click_create_button() -> bool:
+                """Find and click the Create Video button. Returns True if clicked."""
+                try:
+                    buttons = await self._tab.find_all("button, [role='button']")
 
-                    if (
-                        "生成视频" in text
-                        or "Create Video" in text
-                        or "Make video" in label
-                        or label == "生成视频"
-                    ):
-                        create_btn = btn
+                    # Find the "生成视频" / "Create Video" button
+                    create_btn = None
+                    for btn in buttons:
+                        text = ""
+                        label = btn.attrs.get("aria-label", "")
+                        if hasattr(btn, "text"):
+                            text = btn.text.strip() if btn.text else ""
+
+                        if (
+                            "生成视频" in text
+                            or "Create Video" in text
+                            or "Make video" in label
+                            or label == "生成视频"
+                        ):
+                            create_btn = btn
+                            break
+
+                    if not create_btn:
+                        return False
+
+                    await create_btn.mouse_click()
+                    return True
+
+                except Exception:
+                    return False
+
+            # Retry clicking the button if no request is captured
+            for click_attempt in range(1, max_click_retries + 1):
+                # Reset request_id for each attempt to detect new requests
+                captured_response["request_id"] = None
+
+                clicked = await find_and_click_create_button()
+                if not clicked:
+                    if click_attempt == max_click_retries:
+                        raise GrokAPIError("Could not find 'Create Video' button after retries")
+                    await asyncio.sleep(2)  # Wait for page to stabilize before retry
+                    continue
+
+                # Wait for request to be captured (indicates button click triggered API call)
+                click_start = asyncio.get_event_loop().time()
+                while captured_response["request_id"] is None:
+                    elapsed = asyncio.get_event_loop().time() - click_start
+                    if elapsed > click_wait_timeout:
                         break
+                    await asyncio.sleep(0.5)
 
-                if not create_btn:
-                    raise GrokAPIError("Could not find 'Create Video' button on page")
+                # If request was captured, break out of retry loop
+                if captured_response["request_id"] is not None:
+                    break
 
-                await create_btn.mouse_click()
+                # No request captured - wait before retry to let page stabilize
+                if click_attempt < max_click_retries:
+                    await asyncio.sleep(2)
 
-            except Exception as e:
-                raise GrokAPIError(f"Failed to click Create Video button: {e}") from e
+            # If still no request captured after all retries, raise error
+            if captured_response["request_id"] is None:
+                raise GrokAPIError(
+                    f"Button click did not trigger video generation request after {max_click_retries} attempts"
+                )
 
-        # Wait for response with timeout
+        # Wait for response body with timeout
         start_time = asyncio.get_event_loop().time()
         while captured_response["body"] is None:
-            if asyncio.get_event_loop().time() - start_time > timeout:
+            elapsed = asyncio.get_event_loop().time() - start_time
+            if elapsed > timeout:
                 raise GrokAPIError("Timeout waiting for video generation response")
             await asyncio.sleep(0.5)
 
