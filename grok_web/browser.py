@@ -88,13 +88,27 @@ def is_port_in_use(host: str, port: int) -> bool:
     Returns:
         True if port is in use, False otherwise.
     """
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.settimeout(1)
-        try:
+    # Check IPv4
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(1)
             sock.connect((host, port))
             return True
-        except (TimeoutError, ConnectionRefusedError, OSError):
-            return False
+    except (TimeoutError, ConnectionRefusedError, OSError):
+        pass
+
+    # Check IPv6 (Chrome on Windows might only listen on IPv6)
+    try:
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as sock:
+            sock.settimeout(1)
+            # Map IPv4 loopback to IPv6
+            ipv6_host = "::1" if host in ("127.0.0.1", "localhost") else host
+            sock.connect((ipv6_host, port))
+            return True
+    except (TimeoutError, ConnectionRefusedError, OSError):
+        pass
+
+    return False
 
 
 def get_pid_on_port(port: int) -> int | None:
@@ -123,16 +137,16 @@ def get_pid_on_port(port: int) -> int | None:
         except (subprocess.TimeoutExpired, ValueError, FileNotFoundError):
             pass
     elif system == "Windows":
-        # Use netstat on Windows
+        # Use netstat on Windows (without -p TCP to include IPv6 listeners)
         try:
             result = subprocess.run(
-                ["netstat", "-ano", "-p", "TCP"],
+                ["netstat", "-ano"],
                 capture_output=True,
                 text=True,
                 timeout=5,
             )
             for line in result.stdout.split("\n"):
-                if f":{port}" in line and "LISTENING" in line:
+                if f":{port}" in line and "LISTENING" in line and "TCP" in line:
                     parts = line.split()
                     if parts:
                         return int(parts[-1])
@@ -382,26 +396,7 @@ async def ensure_chrome_running(
         TimeoutError: If Chrome doesn't start within timeout.
         FileNotFoundError: If Chrome executable not found.
     """
-    # Auto-scan ports 9222-9230 to find an available debug Chrome
-    # This allows using any existing debug Chrome instance
-    original_port = port
-    port_found = False
-
-    if not is_port_in_use(host, port):
-        # Requested port not in use, scan for alternatives
-        logger.info(f"Port {port} not in use, scanning ports 9222-9230 for existing debug Chrome...")
-        for scan_port in range(9222, 9231):
-            if is_port_in_use(host, scan_port):
-                logger.info(f"Found Chrome on port {scan_port}, will use it")
-                port = scan_port
-                port_found = True
-                break
-
-        if not port_found:
-            logger.info(f"No existing debug Chrome found on ports 9222-9230, will try to launch on port {original_port}")
-            port = original_port
-
-    # Check if Chrome is already running on the selected port
+    # Check if Chrome is already running on the requested port
     if is_port_in_use(host, port):
         # Check if it's a stale temp Chrome from a previous session
         is_temp, pid = is_temp_chrome_on_port(port)
