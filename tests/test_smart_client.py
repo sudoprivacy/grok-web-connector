@@ -697,6 +697,6 @@ class TestSmartGrokClientTxt2Vid:
             source_image_path="/path/to/image.jpg",
             preset="zoom_in",
             aspect_ratio="portrait",
-            timeout=180,
+            timeout=300,
         )
         assert result.video_id == "uploaded-video-123"

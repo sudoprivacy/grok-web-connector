@@ -169,7 +169,17 @@ class TestNodriverClientAssetRequest:
     @pytest.mark.asyncio
     async def test_asset_head_success(self, client: NodriverClient):
         """Successful HEAD request returns content length."""
-        client._tab.evaluate = AsyncMock(return_value='{"status": 200, "contentLength": "12345"}')
+        # Mock CDP responses
+        mock_frame_tree = MagicMock()
+        mock_frame_tree.frame.id_ = "test-frame-id"
+
+        mock_response = MagicMock()
+        mock_response.success = True
+        mock_response.http_status_code = 200
+        mock_response.headers = {"content-length": "12345"}
+        mock_response.net_error_name = None
+
+        client._tab.send = AsyncMock(side_effect=[mock_frame_tree, mock_response])
 
         result = await client._asset_request_head("https://assets.grok.com/video.mp4")
 
@@ -180,7 +190,17 @@ class TestNodriverClientAssetRequest:
         """403 response raises GrokAuthError."""
         from grok_web.exceptions import GrokAuthError
 
-        client._tab.evaluate = AsyncMock(return_value='{"status": 403, "contentLength": null}')
+        # Mock CDP responses
+        mock_frame_tree = MagicMock()
+        mock_frame_tree.frame.id_ = "test-frame-id"
+
+        mock_response = MagicMock()
+        mock_response.success = True
+        mock_response.http_status_code = 403
+        mock_response.headers = {}
+        mock_response.net_error_name = None
+
+        client._tab.send = AsyncMock(side_effect=[mock_frame_tree, mock_response])
 
         with pytest.raises(GrokAuthError, match="Asset access denied"):
             await client._asset_request_head("https://assets.grok.com/video.mp4")
@@ -190,7 +210,17 @@ class TestNodriverClientAssetRequest:
         """Missing Content-Length raises GrokAPIError."""
         from grok_web.exceptions import GrokAPIError
 
-        client._tab.evaluate = AsyncMock(return_value='{"status": 200, "contentLength": null}')
+        # Mock CDP responses
+        mock_frame_tree = MagicMock()
+        mock_frame_tree.frame.id_ = "test-frame-id"
+
+        mock_response = MagicMock()
+        mock_response.success = True
+        mock_response.http_status_code = 200
+        mock_response.headers = {}  # No Content-Length header
+        mock_response.net_error_name = None
+
+        client._tab.send = AsyncMock(side_effect=[mock_frame_tree, mock_response])
 
         with pytest.raises(GrokAPIError, match="No Content-Length"):
             await client._asset_request_head("https://assets.grok.com/video.mp4")

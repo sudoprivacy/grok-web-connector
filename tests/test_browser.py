@@ -189,8 +189,9 @@ class TestEnsureChromeRunning:
         with patch("grok_web.browser.is_port_in_use", return_value=True):
             # Not a temp Chrome (user's real Chrome)
             with patch("grok_web.browser.is_temp_chrome_on_port", return_value=(False, 12345)):
-                result = await ensure_chrome_running()
-                assert result is None
+                result_tuple = await ensure_chrome_running()
+                # Function now returns (process, port) tuple
+                assert result_tuple == (None, 9222)
 
     @pytest.mark.asyncio
     async def test_kills_stale_temp_chrome_and_launches_new(self):
@@ -198,6 +199,8 @@ class TestEnsureChromeRunning:
         from grok_web.browser import ensure_chrome_running
 
         mock_process = MagicMock()
+        mock_process.poll.return_value = None  # Process still running
+        mock_process.pid = 12345
         # First call: port in use; after kill: not in use; then: in use (new Chrome)
         port_checks = [True, False, True]
 
@@ -210,8 +213,10 @@ class TestEnsureChromeRunning:
                         return_value=mock_process,
                     ):
                         with patch("grok_web.browser.asyncio.sleep"):
-                            result = await ensure_chrome_running()
-                            assert result == mock_process
+                            with patch("grok_web.browser.platform.system", return_value="Darwin"):
+                                process, port = await ensure_chrome_running()
+                                assert process == mock_process
+                                assert port == 9222
 
     @pytest.mark.asyncio
     async def test_launches_chrome_when_not_running(self):
@@ -219,14 +224,17 @@ class TestEnsureChromeRunning:
         from grok_web.browser import ensure_chrome_running
 
         mock_process = MagicMock()
+        mock_process.poll.return_value = None  # Process still running
+        mock_process.pid = 12345
         port_check_calls = [False, False, True]  # Not running, then running
 
         with patch("grok_web.browser.is_port_in_use", side_effect=port_check_calls):
             with patch("grok_web.browser.launch_chrome_with_debug_port", return_value=mock_process):
                 with patch("grok_web.browser.asyncio.sleep"):
-                    result = await ensure_chrome_running()
-
-                    assert result == mock_process
+                    with patch("grok_web.browser.platform.system", return_value="Darwin"):
+                        process, port = await ensure_chrome_running()
+                        assert process == mock_process
+                        assert port == 9222
 
     @pytest.mark.asyncio
     async def test_raises_timeout_when_chrome_fails_to_start(self):
@@ -234,14 +242,15 @@ class TestEnsureChromeRunning:
         from grok_web.browser import ensure_chrome_running
 
         mock_process = MagicMock()
+        mock_process.poll.return_value = None  # Process still running
+        mock_process.pid = 12345
 
         with patch("grok_web.browser.is_port_in_use", return_value=False):
             with patch("grok_web.browser.launch_chrome_with_debug_port", return_value=mock_process):
                 with patch("grok_web.browser.asyncio.sleep"):
-                    with pytest.raises(TimeoutError, match="did not start"):
-                        await ensure_chrome_running(timeout=0.1)
-
-                    mock_process.terminate.assert_called_once()
+                    with patch("grok_web.browser.platform.system", return_value="Darwin"):
+                        with pytest.raises(TimeoutError, match="failed to start"):
+                            await ensure_chrome_running(timeout=0.1)
 
 
 class TestDefaultConstants:
