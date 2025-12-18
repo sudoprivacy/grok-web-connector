@@ -398,16 +398,12 @@ async def ensure_chrome_running(
     """
     # Check if Chrome is already running on the requested port
     if is_port_in_use(host, port):
-        # Check if it's a stale temp Chrome from a previous session
+        # Check if it's a temp Chrome from a previous session
         is_temp, pid = is_temp_chrome_on_port(port)
         if is_temp:
-            logger.info(f"Found stale temp Chrome (PID {pid}) on port {port}, killing it")
-            kill_stale_temp_chrome(port)
-            # Wait for port to be released
-            for _ in range(10):
-                if not is_port_in_use(host, port):
-                    break
-                await asyncio.sleep(0.2)
+            # Reuse existing temp Chrome - it may have logged-in session
+            logger.debug(f"Reusing existing temp Chrome (PID {pid}) on port {port}")
+            return None, port
         else:
             # User's Chrome with real profile - reuse it
             logger.debug(f"Reusing existing Chrome on port {port}")

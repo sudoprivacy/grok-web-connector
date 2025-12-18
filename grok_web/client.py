@@ -2488,11 +2488,15 @@ class SmartGrokClient:
         return self
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any):
-        """Clean up both clients."""
+        """Clean up both clients and release allocated port."""
         if self._http_client:
             await self._http_client.__aexit__(exc_type, exc_val, exc_tb)
         if self._browser_client:
             await self._browser_client.__aexit__(exc_type, exc_val, exc_tb)
+
+        # Release port back to available pool (set by get_client())
+        if hasattr(self, "_release_port_callback") and hasattr(self, "_allocated_port"):
+            self._release_port_callback(self._allocated_port)
 
     async def _get_browser_client(self) -> NodriverClient:
         """Lazy browser initialization - only when needed."""
