@@ -18,7 +18,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Debug: Write to file at import time to verify MCP is using new code
-_BROWSER_PY_VERSION = "v32-port-scan"
+_BROWSER_PY_VERSION = "v34-generic-error"
 try:
     _debug_path = Path(tempfile.gettempdir()) / "grok_browser_import.log"
     with open(_debug_path, "a") as f:
@@ -539,21 +539,10 @@ async def ensure_chrome_running(
 
         if elapsed > timeout:
             debug_log(f"Timeout after {elapsed:.1f}s!")
-            # On Windows, provide helpful error message with manual start command
-            if is_windows:
-                manual_cmd = (
-                    f'start "" "{get_chrome_executable()}" '
-                    f'--remote-debugging-port={port} '
-                    f'--user-data-dir="%TEMP%\\chrome_debug_profile" '
-                    f'--no-first-run'
-                )
-                raise TimeoutError(
-                    f"Chrome auto-start failed. This happens on Windows when Chrome is already running.\n\n"
-                    f"Solution: Run this command in cmd/PowerShell (keep the Chrome window open):\n\n"
-                    f"  {manual_cmd}\n\n"
-                    f"Then retry. The debug Chrome will show Cloudflare challenge if needed."
-                )
-            raise TimeoutError(f"Chrome did not start within {timeout} seconds")
+            raise TimeoutError(
+                f"Chrome failed to start on port {port} within {timeout} seconds. "
+                f"Port may be occupied or Chrome instance failed to launch."
+            )
         await asyncio.sleep(0.2)
 
     debug_log(f"Chrome is ready on port {port} after {asyncio.get_event_loop().time() - start_time:.1f}s")
