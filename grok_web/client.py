@@ -2027,7 +2027,19 @@ class NodriverClient(AsyncClientBase):
         aspect_ratio: str = ...,
         timeout: int = ...,
     ) -> VideoGenerationResult:
-        """img2vid: Generate video from existing Grok image post."""
+        """img2vid: Generate video with custom prompt."""
+        ...
+
+    @overload
+    async def create_video(
+        self,
+        *,
+        source_post_id: str,
+        preset: VideoPreset | str,
+        aspect_ratio: str = ...,
+        timeout: int = ...,
+    ) -> VideoGenerationResult:
+        """img2vid: Generate video with preset only (no prompt)."""
         ...
 
     @overload
@@ -2044,7 +2056,7 @@ class NodriverClient(AsyncClientBase):
 
     async def create_video(
         self,
-        prompt: str,
+        prompt: str = "",
         *,
         source_post_id: str | None = None,
         source_image_path: str | Path | None = None,
@@ -2926,7 +2938,19 @@ class SmartGrokClient:
         aspect_ratio: str = ...,
         timeout: int = ...,
     ) -> VideoGenerationResult:
-        """img2vid: Generate video from existing Grok image post."""
+        """img2vid: Generate video with custom prompt."""
+        ...
+
+    @overload
+    async def create_video(
+        self,
+        *,
+        source_post_id: str,
+        preset: VideoPreset | str,
+        aspect_ratio: str = ...,
+        timeout: int = ...,
+    ) -> VideoGenerationResult:
+        """img2vid: Generate video with preset only (no prompt)."""
         ...
 
     @overload
@@ -2943,7 +2967,7 @@ class SmartGrokClient:
 
     async def create_video(
         self,
-        prompt: str,
+        prompt: str = "",
         *,
         source_post_id: str | None = None,
         source_image_path: str | Path | None = None,
