@@ -194,29 +194,17 @@ class TestEnsureChromeRunning:
                 assert result_tuple == (None, 9222)
 
     @pytest.mark.asyncio
-    async def test_kills_stale_temp_chrome_and_launches_new(self):
-        """Kills stale temp Chrome and launches fresh one."""
+    async def test_reuses_temp_chrome_when_running(self):
+        """Reuses existing temp Chrome to preserve logged-in session."""
         from grok_web.browser import ensure_chrome_running
 
-        mock_process = MagicMock()
-        mock_process.poll.return_value = None  # Process still running
-        mock_process.pid = 12345
-        # First call: port in use; after kill: not in use; then: in use (new Chrome)
-        port_checks = [True, False, True]
-
-        with patch("grok_web.browser.is_port_in_use", side_effect=port_checks):
-            # It's a stale temp Chrome
+        with patch("grok_web.browser.is_port_in_use", return_value=True):
+            # It's a temp Chrome from previous session
             with patch("grok_web.browser.is_temp_chrome_on_port", return_value=(True, 99999)):
-                with patch("grok_web.browser.kill_stale_temp_chrome", return_value=True):
-                    with patch(
-                        "grok_web.browser.launch_chrome_with_debug_port",
-                        return_value=mock_process,
-                    ):
-                        with patch("grok_web.browser.asyncio.sleep"):
-                            with patch("grok_web.browser.platform.system", return_value="Darwin"):
-                                process, port = await ensure_chrome_running()
-                                assert process == mock_process
-                                assert port == 9222
+                process, port = await ensure_chrome_running()
+                # Should reuse (return None) instead of killing and launching new
+                assert process is None
+                assert port == 9222
 
     @pytest.mark.asyncio
     async def test_launches_chrome_when_not_running(self):

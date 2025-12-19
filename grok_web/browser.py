@@ -378,9 +378,8 @@ async def ensure_chrome_running(
 ) -> subprocess.Popen | None:
     """Ensure Chrome is running with remote debugging.
 
-    If a user's Chrome (real profile) is running on the port, reuses it.
-    If a stale temp Chrome (from previous NodriverClient) is on the port, kills it
-    and launches a fresh one.
+    If any Chrome is already running on the port (user's or temp), reuses it.
+    This preserves logged-in sessions from previous NodriverClient instances.
     Otherwise, launches a new Chrome instance.
 
     Args:

@@ -700,3 +700,41 @@ class TestSmartGrokClientTxt2Vid:
             timeout=300,
         )
         assert result.video_id == "uploaded-video-123"
+
+    @pytest.mark.asyncio
+    async def test_create_video_preset_only_mode(self, mock_cookies: GrokCookies):
+        """create_video() with preset only (no prompt) works correctly."""
+        mock_http = AsyncMock()
+        mock_http.get_post_details.return_value = PostDetails(
+            id="post-123",
+            mode="img2vid",
+            media_url="https://example.com/image.jpg",
+            media_type="MEDIA_POST_TYPE_IMAGE",
+        )
+        mock_http.create_video_from_image.side_effect = GrokAuthError("403")
+
+        mock_browser = AsyncMock()
+        mock_browser.create_video.return_value = VideoGenerationResult(
+            parent_post_id="parent-123",
+            video_id="preset-video-123",
+            video_url="https://grok.com/video.mp4",
+            moderated=False,
+        )
+
+        client = SmartGrokClient(cookies=mock_cookies)
+        client._http_client = mock_http
+        client._browser_client = mock_browser
+
+        # Call without prompt (preset-only mode)
+        result = await client.create_video(
+            source_post_id="post-123",
+            preset="spicy",
+        )
+
+        # Should call browser with empty prompt
+        mock_browser.create_video.assert_called_once()
+        call_kwargs = mock_browser.create_video.call_args.kwargs
+        assert call_kwargs["prompt"] == ""
+        assert call_kwargs["source_post_id"] == "post-123"
+        assert call_kwargs["preset"] == "spicy"
+        assert result.video_id == "preset-video-123"
