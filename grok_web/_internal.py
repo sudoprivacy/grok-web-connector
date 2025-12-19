@@ -127,9 +127,11 @@ def parse_video_ndjson_response(
             continue
 
     if not video_result:
+        # Include response preview for debugging
+        preview = response_text[:500] if response_text else "(empty)"
         raise GrokAPIError(
             "Failed to parse video generation response. "
-            "No streamingVideoGenerationResponse found."
+            f"No streamingVideoGenerationResponse found. Response preview: {preview}"
         )
 
     return VideoGenerationResult(

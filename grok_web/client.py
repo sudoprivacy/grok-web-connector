@@ -1367,7 +1367,8 @@ class NodriverClient(AsyncClientBase):
 
         async def handle_response(event: cdp.network.ResponseReceived):
             url = event.response.url
-            if "conversations/new" in url or "app-chat" in url:
+            # Only match the specific video generation endpoint, not conversation list
+            if "/app-chat/conversations/new" in url:
                 captured_data["request_id"] = event.request_id
 
         async def handle_loading_finished(event: cdp.network.LoadingFinished):
@@ -2189,7 +2190,8 @@ class NodriverClient(AsyncClientBase):
 
         async def handle_request(event: cdp.network.RequestWillBeSent):
             url = event.request.url
-            if "conversations/new" in url or "app-chat" in url:
+            # Only match the specific video generation endpoint, not conversation list
+            if "/app-chat/conversations/new" in url:
                 captured_response["request_id"] = event.request_id
                 # Capture statsig_id from request headers
                 headers = event.request.headers
@@ -2371,9 +2373,12 @@ class NodriverClient(AsyncClientBase):
 
                         if (
                             "生成视频" in text
+                            or "重新生成" in text
                             or "Create Video" in text
+                            or "Regenerate" in text
                             or "Make video" in label
                             or label == "生成视频"
+                            or label == "重新生成"
                         ):
                             create_btn = btn
                             break
