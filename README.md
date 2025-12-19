@@ -5,10 +5,12 @@ Python client library for interacting with Grok Imagine web API.
 ## Features
 
 - **SmartGrokClient** - Recommended client with HTTP-first, browser-fallback strategy
+- **BrowserWorkerPool** - Parallel task execution with automatic retry and progress persistence
 - **15+ Core APIs** - list_posts, get_post_details, create_video, create_image, upload_image, download_video, and more
 - **3 Video Creation Modes** - img2vid, txt2vid, upload2vid (local image to video)
 - **Auto Cloudflare bypass** - Browser fallback handles challenges automatically
 - **Video presets** - Normal, Fun, Spicy modes for video generation
+- **Dynamic task dispatch** - Zero-maintenance worker pool (new client methods auto-available)
 - Type-safe with Pydantic models
 
 ## Installation
@@ -263,6 +265,66 @@ async with get_client(browser_host="127.0.0.1", browser_port=9222) as client:
     await client.favorite_post(posts[0].id)
     video = await client.create_video(posts[0].id, preset="fun")
 ```
+
+## Batch Operations (BrowserWorkerPool)
+
+For parallel processing of multiple tasks, use `BrowserWorkerPool`:
+
+```python
+from grok_web import BrowserWorkerPool
+
+async with BrowserWorkerPool(num_workers=3) as pool:
+    # Submit jobs - task_type maps directly to client method names
+    job_ids = []
+    for post_id in parent_posts:
+        job_id = await pool.submit(
+            "create_video",           # Method name from NodriverClient
+            prompt="orbit camera",    # Args passed to client.create_video()
+            source_post_id=post_id,
+            timeout=300
+        )
+        job_ids.append(job_id)
+
+    # Wait for all jobs to complete
+    results = await pool.wait_all()
+
+    # Process results
+    for job_id in job_ids:
+        result = results[job_id]
+        if result.success:
+            video_id = result.data["video_id"]
+            moderated = result.data["moderated"]
+```
+
+### How It Works
+
+**Dynamic Method Dispatch**: `task_type` directly maps to client method names
+- ✅ `"create_video"` → calls `client.create_video(*args, **kwargs)`
+- ✅ `"list_posts"` → calls `client.list_posts(*args, **kwargs)`
+- ✅ `"delete_video"` → calls `client.delete_video(*args, **kwargs)`
+
+**Zero Maintenance**: Add new methods to `NodriverClient`, they're automatically available
+- No need to update worker pool code
+- Arguments match client method signatures exactly
+- Return values automatically serialized to JSON-compatible dicts
+
+**Retry & Monitoring**:
+```python
+async with BrowserWorkerPool(
+    num_workers=3,
+    max_retries=5,           # Retry failed jobs
+    fail_condition=lambda r: r.get("moderated", False),  # Retry if moderated
+    state_file="progress.json"  # Resume after restart
+) as pool:
+    job_id = await pool.submit("create_video", ...)
+
+    # Check job status
+    result = pool.get_result(job_id)
+    if result:
+        print(f"Success: {result.success}")
+```
+
+See `examples/retry_moderated_child_video.py` and `examples/batch_camera_test.py` for complete examples.
 
 ## Error Handling
 
