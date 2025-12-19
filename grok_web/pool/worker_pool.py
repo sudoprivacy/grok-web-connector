@@ -38,12 +38,12 @@ def _kill_process_tree(pid: int) -> None:
             )
         else:
             # On Unix-like systems, use SIGKILL
-            import signal
+            import contextlib
             import os
-            try:
+            import signal
+
+            with contextlib.suppress(ProcessLookupError):
                 os.killpg(os.getpgid(pid), signal.SIGKILL)
-            except ProcessLookupError:
-                pass  # Process already dead
     except Exception as e:
         logger.warning(f"Failed to kill process tree for PID {pid}: {e}")
 
@@ -191,7 +191,9 @@ class BrowserWorkerPool:
                             # Find the actual Chrome PID by port
                             actual_pid = get_pid_on_port(worker.port)
                             if actual_pid:
-                                logger.info(f"Killing Chrome process tree (PID: {actual_pid}) for worker {worker.worker_id}")
+                                logger.info(
+                                    f"Killing Chrome process tree (PID: {actual_pid}) for worker {worker.worker_id}"
+                                )
                                 # Kill the entire process tree (parent + all children)
                                 _kill_process_tree(actual_pid)
 
@@ -307,7 +309,9 @@ class BrowserWorkerPool:
                         # Find the actual Chrome PID by port
                         actual_pid = get_pid_on_port(worker.port)
                         if actual_pid:
-                            logger.info(f"Killing Chrome process tree (PID: {actual_pid}) for worker {worker_id}")
+                            logger.info(
+                                f"Killing Chrome process tree (PID: {actual_pid}) for worker {worker_id}"
+                            )
                             # Kill the entire process tree (parent + all children)
                             _kill_process_tree(actual_pid)
 
@@ -614,23 +618,76 @@ class BrowserWorkerPool:
                 f"({job.job_id[:8]}...) after {job.retries} retries: {error}"
             )
 
+    def _serialize_result(self, result: Any) -> Any:
+        """Convert result to JSON-serializable format.
+
+        Uses Pydantic's model_dump() if available, otherwise smart conversion.
+        This ensures consistent serialization across all task types while maintaining
+        zero maintenance overhead.
+
+        Args:
+            result: The result object from client method call
+
+        Returns:
+            JSON-serializable dict, list, or primitive value
+        """
+        # Pydantic models (VideoGenerationResult, PostDetails, etc.)
+        if hasattr(result, "model_dump"):
+            return result.model_dump(
+                mode="python",
+                exclude_none=True,  # Skip None values for cleaner output
+                exclude_unset=False,
+            )
+
+        # List of results (e.g., list_posts returns List[PostSummary])
+        if isinstance(result, list):
+            return [self._serialize_result(item) for item in result]
+
+        # Already serializable primitive types
+        if isinstance(result, dict | str | int | float | bool | type(None)):
+            return result
+
+        # Objects with to_dict() method (legacy support)
+        if hasattr(result, "to_dict") and callable(result.to_dict):
+            return result.to_dict()
+
+        # Fallback: convert __dict__ to dict, excluding private attributes
+        if hasattr(result, "__dict__"):
+            return {k: v for k, v in result.__dict__.items() if not k.startswith("_")}
+
+        # Return as-is (will fail during JSON serialization if not compatible)
+        return result
+
     async def _execute_job(self, worker: Worker, job: Job) -> Any:
-        """Execute a job on a worker.
+        """Execute a job by dynamically calling the client method.
+
+        The task_type directly maps to NodriverClient method names.
+        This approach maintains zero maintenance overhead - adding new client methods
+        automatically makes them available through the worker pool.
+
+        Examples:
+            task_type="create_video" → calls client.create_video(*args, **kwargs)
+            task_type="list_posts" → calls client.list_posts(*args, **kwargs)
+            task_type="delete_video" → calls client.delete_video(*args, **kwargs)
 
         Args:
             worker: The worker to use
             job: The job to execute
 
         Returns:
-            Result data from the job execution
+            JSON-serializable result data (automatically serialized via _serialize_result)
+
+        Raises:
+            RuntimeError: If worker has no client
+            ValueError: If task_type doesn't match any client method
+            AttributeError: If task_type is not callable
         """
         client = worker.client
         if client is None:
             raise RuntimeError(f"Worker {worker.worker_id} has no client")
 
-        task_type = job.task_type
-        args = job.args
-        kwargs = dict(job.kwargs)  # Copy to avoid modifying original
+        # Copy kwargs to avoid modifying original job
+        kwargs = dict(job.kwargs)
 
         # Extract ui_delay if present (for UI operations)
         ui_delay = kwargs.pop("ui_delay", None)
@@ -639,85 +696,31 @@ class BrowserWorkerPool:
             client._ui_delay = ui_delay
 
         try:
-            # Dispatch based on task type
-            if task_type == "create_video":
-                result = await client.create_video(*args, **kwargs)
-                return {
-                    "video_id": result.video_id,
-                    "moderated": result.moderated,
-                    "parent_post_id": result.parent_post_id,
-                    "progress": result.progress,
-                    "mode": result.mode,
-                }
+            # Dynamic method lookup - task_type must match a client method name
+            try:
+                method = getattr(client, job.task_type)
+            except AttributeError:
+                # Provide helpful error message with available methods
+                available = [
+                    m
+                    for m in dir(client)
+                    if not m.startswith("_") and callable(getattr(client, m, None))
+                ]
+                raise ValueError(
+                    f"Unknown task_type: '{job.task_type}'. "
+                    f"Available client methods: {', '.join(sorted(available)[:20])}..."
+                ) from None
 
-            elif task_type == "create_video_via_ui":
-                result = await client.create_video_via_ui(*args, **kwargs)
-                return {
-                    "video_id": result.video_id,
-                    "moderated": result.moderated,
-                    "parent_post_id": result.parent_post_id,
-                }
+            # Verify it's callable
+            if not callable(method):
+                raise ValueError(f"task_type '{job.task_type}' is not a callable method")
 
-            elif task_type == "list_posts":
-                posts = await client.list_posts(*args, **kwargs)
-                return [p.to_dict() if hasattr(p, "to_dict") else p for p in posts]
+            # Call the method with job args/kwargs
+            result = await method(*job.args, **kwargs)
 
-            elif task_type == "get_post_details":
-                post = await client.get_post_details(*args, **kwargs)
-                return post._raw_data if hasattr(post, "_raw_data") else post
+            # Serialize result to JSON-compatible format
+            return self._serialize_result(result)
 
-            elif task_type == "favorite_post":
-                return await client.favorite_post(*args, **kwargs)
-
-            elif task_type == "unfavorite_post":
-                return await client.unfavorite_post(*args, **kwargs)
-
-            elif task_type == "like_post":
-                return await client.like_post(*args, **kwargs)
-
-            elif task_type == "dislike_post":
-                return await client.dislike_post(*args, **kwargs)
-
-            elif task_type == "delete_video":
-                return await client.delete_video(*args, **kwargs)
-
-            elif task_type == "upgrade_video":
-                return await client.upgrade_video(*args, **kwargs)
-
-            elif task_type == "edit_image":
-                result = await client.edit_image(*args, **kwargs)
-                return {
-                    "post_id": result.post_id,
-                    "edit_prompt": result.edit_prompt,
-                    "image_urls": result.image_urls,
-                    "moderated_count": result.moderated_count,
-                    "success_count": result.success_count,
-                    "total_count": result.total_count,
-                }
-
-            elif task_type == "create_video_from_text":
-                result = await client.create_video_from_text(*args, **kwargs)
-                return {
-                    "video_id": result.video_id,
-                    "parent_post_id": result.parent_post_id,
-                    "moderated": result.moderated,
-                    "progress": result.progress,
-                    "mode": result.mode,
-                }
-
-            elif task_type == "create_image":
-                result = await client.create_image(*args, **kwargs)
-                return {
-                    "prompt": result.prompt,
-                    "image_urls": result.image_urls,
-                    "moderated_count": result.moderated_count,
-                    "r_rated_count": result.r_rated_count,
-                    "success_count": result.success_count,
-                    "total_count": result.total_count,
-                }
-
-            else:
-                raise ValueError(f"Unknown task type: {task_type}")
         finally:
             # Restore original ui_delay
             if ui_delay is not None:
