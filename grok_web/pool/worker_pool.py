@@ -848,6 +848,10 @@ class BrowserWorkerPool:
                     kwargs["progress_callback"] = self._make_shared_progress_callback(
                         job.job_id, shared_target.state, shared_target.target
                     )
+                    # If user didn't set min_success, default to shared target value
+                    # If user DID set min_success, honor both (callback AND min_success)
+                    if "min_success" in sig.parameters and "min_success" not in kwargs:
+                        kwargs["min_success"] = shared_target.target
 
             # Call the method with job args/kwargs
             result = await method(*job.args, **kwargs)
