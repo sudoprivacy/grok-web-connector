@@ -323,6 +323,12 @@ class ImageGenerationResult(BaseModel):
     # Conversation info (for debugging)
     conversation_id: str | None = Field(None, description="Chat conversation UUID")
 
+    # Post IDs collected via thumbnail_selector callback
+    selected_post_ids: list[str] = Field(
+        default_factory=list,
+        description="Post IDs of images selected via thumbnail_selector callback",
+    )
+
     @computed_field
     @property
     def image_urls(self) -> list[str]:

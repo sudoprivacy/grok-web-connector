@@ -1555,6 +1555,36 @@ class NodriverClient(AsyncClientBase):
 
         return post_id
 
+    async def _scan_favorited_indices(self) -> list[int]:
+        """Scan gallery DOM to find which items have been favorited.
+
+        Returns:
+            List of indices (0-based) of favorited gallery items.
+        """
+        result = await self._tab.evaluate("""
+            (function() {
+                const items = document.querySelectorAll('[role="listitem"]');
+                const favorited = [];
+
+                items.forEach((item, idx) => {
+                    // Look for favorite button state
+                    // When favorited, button aria-label changes to "取消收藏" or similar
+                    const favBtn = item.querySelector('button[aria-label*="收藏"]');
+                    if (favBtn) {
+                        const label = favBtn.getAttribute('aria-label') || '';
+                        // "取消收藏" means it's currently favorited
+                        // "收藏" means it's not favorited
+                        if (label.includes('取消') || label.includes('Unsave') || label.includes('unfavorite')) {
+                            favorited.push(idx);
+                        }
+                    }
+                });
+
+                return favorited;
+            })()
+        """)
+        return list(result) if result else []
+
     async def create_image(
         self,
         prompt: str,
@@ -1562,6 +1592,7 @@ class NodriverClient(AsyncClientBase):
         min_success: int = 1,
         max_scroll: int = 5,
         timeout: int = 120,
+        thumbnail_selector: "Callable[[int, Callable[[], Awaitable[list[int]]]], Awaitable[list[int]]] | None" = None,
     ) -> ImageGenerationResult:
         """
         Generate images from a text prompt (txt2img).
@@ -1580,19 +1611,32 @@ class NodriverClient(AsyncClientBase):
             min_success: Minimum completed images needed (default 1)
             max_scroll: Maximum scroll attempts to generate more images (default 5)
             timeout: Max seconds to wait for initial generation (default 120)
+            thumbnail_selector: Optional async callback to select which images to collect
+                post_ids for. Signature: async (count, scan_favorites) -> list[int]
+                - count: number of gallery items
+                - scan_favorites: async function to detect which items user favorited
+                - returns: list of indices to collect post_ids for
+                If None (default), no post_ids are collected.
+                See grok_web.selectors for pre-built selectors.
 
         Returns:
             ImageGenerationResult with job IDs and generation info.
-            Note: image_urls and post_ids will be empty since images are temporary.
-            Use success_count to check how many images were generated.
+            If thumbnail_selector is None, selected_post_ids will be empty.
+            If thumbnail_selector is provided, selected_post_ids will contain
+            post_ids for the selected images (for video generation).
 
         Raises:
             GrokAPIError: If generation fails or times out
 
         Example:
+            >>> # Without selection - just generate
             >>> result = await client.create_image("a cat wearing sunglasses")
             >>> result.success_count  # Number of completed images
-            >>> result.total_count    # Total images generated
+
+            >>> # With manual selection (user favorites in browser)
+            >>> from grok_web.selectors import manual_favorite_selector
+            >>> result = await client.create_image("a cat", thumbnail_selector=manual_favorite_selector)
+            >>> result.selected_post_ids  # Post IDs of favorited images
         """
         import asyncio
         import json as json_mod
@@ -1798,11 +1842,81 @@ class NodriverClient(AsyncClientBase):
 
         # Build result
         images = list(captured_data["jobs"].values())
+        selected_post_ids: list[str] = []
+
+        # Step 8: Collect post URLs via thumbnail_selector callback
+        if thumbnail_selector and images:
+            await asyncio.sleep(2 * d)  # Wait for DOM to settle
+
+            # Get count of gallery items
+            item_count_result = await self._tab.evaluate(
+                "document.querySelectorAll('[role=\"listitem\"]').length"
+            )
+            item_count = int(item_count_result) if item_count_result else 0
+
+            # Call the selector callback with count and scan_favorites function
+            selected_indices = await thumbnail_selector(
+                item_count, self._scan_favorited_indices
+            )
+
+            # Collect post_ids for selected indices only
+            for i in selected_indices:
+                if i >= item_count:
+                    continue
+
+                # Scroll to item and click on the gallery card
+                click_result = await self._tab.evaluate(f"""
+                    (function() {{
+                        const items = document.querySelectorAll('[role="listitem"]');
+                        if (items.length <= {i}) return 'no item';
+                        const item = items[{i}];
+
+                        // Scroll item into view first
+                        item.scrollIntoView({{ behavior: 'instant', block: 'center' }});
+
+                        const clickable = item.querySelector('[class*="hover:scale"]') ||
+                                         item.querySelector('[class*="media-post-masonry-card"]') ||
+                                         item.querySelector('div.relative');
+                        if (!clickable) {{
+                            item.click();
+                            return 'clicked item';
+                        }}
+                        clickable.click();
+                        return 'clicked card';
+                    }})()
+                """)
+
+                if click_result == "no item":
+                    continue
+
+                # Wait for navigation
+                await asyncio.sleep(2 * d)
+
+                # Check if URL changed to post page
+                current_url = self._tab.target.url
+                if "/imagine/post/" in current_url:
+                    # Extract post_id from URL
+                    post_id = current_url.split("/imagine/post/")[-1]
+                    selected_post_ids.append(post_id)
+
+                    # Navigate back to gallery
+                    await self._tab.evaluate("window.history.back()")
+                    await asyncio.sleep(2 * d)
+
+                    # Verify we're back at gallery
+                    back_url = self._tab.target.url
+                    if "/imagine/post/" in back_url:
+                        # Still on post page, try harder to go back
+                        await self._tab.get(f"{self.BASE_URL}/imagine")
+                        await asyncio.sleep(2 * d)
+                        # Gallery is likely lost, stop collecting
+                        break
 
         return ImageGenerationResult(
             prompt=prompt,
             images=images,
             conversation_id=None,  # Not available via WebSocket
+            selected_post_ids=selected_post_ids,
         )
 
     async def create_video_from_text(
@@ -2863,6 +2977,7 @@ class SmartGrokClient:
         min_success: int = 1,
         max_scroll: int = 5,
         timeout: int = 120,
+        thumbnail_selector: "Callable[[int, Callable[[], Awaitable[list[int]]]], Awaitable[list[int]]] | None" = None,
     ) -> "ImageGenerationResult":
         """
         Generate images from a text prompt (browser only, txt2img).
@@ -2877,18 +2992,40 @@ class SmartGrokClient:
             min_success: Minimum non-moderated images needed (default 1)
             max_scroll: Maximum scroll attempts to find more images (default 5)
             timeout: Max seconds to wait for initial generation (default 120)
+            thumbnail_selector: Optional async callback for selecting which thumbnails
+                to collect post_ids for. The callback receives:
+                - count: Number of gallery items available
+                - scan_favorites: Async function to scan DOM for favorited indices
+                The callback should return a list of indices (0-based) to collect.
+                Note: Clicking adds ~2 seconds per image for click+back navigation.
 
         Returns:
-            ImageGenerationResult with image URLs and moderation info
+            ImageGenerationResult with image URLs and moderation info.
+            If thumbnail_selector is provided, selected_post_ids will be populated.
 
         Example:
             >>> result = await client.create_image("a cat wearing sunglasses")
             >>> print(result.image_urls)  # List of generated image URLs
             >>> print(result.success_count)  # Non-moderated images count
             >>> result.has_enough_success(2)  # Check if got at least 2
+
+            >>> # With automatic selection (select all)
+            >>> async def select_all(count, scan_favorites):
+            ...     return list(range(count))
+            >>> result = await client.create_image("a cat", thumbnail_selector=select_all)
+            >>> print(result.selected_post_ids)  # Post IDs for video generation
+
+            >>> # With manual selection (wait for user to favorite)
+            >>> async def manual_selector(count, scan_favorites):
+            ...     print(f"Please favorite images in browser, then press Enter...")
+            ...     await asyncio.get_event_loop().run_in_executor(None, input)
+            ...     return await scan_favorites()
+            >>> result = await client.create_image("a cat", thumbnail_selector=manual_selector)
         """
         browser = await self._get_browser_client()
-        return await browser.create_image(prompt, aspect_ratio, min_success, max_scroll, timeout)
+        return await browser.create_image(
+            prompt, aspect_ratio, min_success, max_scroll, timeout, thumbnail_selector
+        )
 
     async def upload_image(self, image_path: str | Path, timeout: int = 30) -> str:
         """
