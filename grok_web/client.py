@@ -1605,6 +1605,7 @@ class NodriverClient(AsyncClientBase):
         max_scroll: int = 5,
         timeout: int = 120,
         thumbnail_selector: "Callable[[int, Callable[[], Awaitable[list[int]]]], Awaitable[list[int]]] | None" = None,
+        progress_callback: "Callable[[int], Awaitable[bool]] | None" = None,
     ) -> ImageGenerationResult:
         """
         Generate images from a text prompt (txt2img).
@@ -1630,6 +1631,12 @@ class NodriverClient(AsyncClientBase):
                 - returns: list of indices to collect post_ids for
                 If None (default), no post_ids are collected.
                 See grok_web.selectors for pre-built selectors.
+            progress_callback: Optional async callback for shared target across workers.
+                Signature: async (success_count) -> bool
+                - success_count: current number of non-moderated images
+                - returns: True to continue scrolling, False to stop early
+                Used by BrowserWorkerPool for shared target mode where multiple
+                workers contribute to a common success target.
 
         Returns:
             ImageGenerationResult with job IDs and generation info.
@@ -1870,6 +1877,13 @@ class NodriverClient(AsyncClientBase):
             moderated_count = sum(1 for job in completed if job.get("moderated"))
 
             logger.info(f"[scroll {scroll_count}] jobs={len(completed)}, success={success_count}, moderated={moderated_count}, target={min_success}")
+
+            # Check shared target callback (used by pool for multi-worker coordination)
+            if progress_callback is not None:
+                should_continue = await progress_callback(success_count)
+                if not should_continue:
+                    logger.info(f"[scroll] progress_callback signaled stop at {success_count} success")
+                    break
 
             if success_count >= min_success:
                 logger.info(f"[scroll] reached min_success={min_success}, stopping")

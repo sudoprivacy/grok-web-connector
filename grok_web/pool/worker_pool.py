@@ -2,10 +2,12 @@
 
 import asyncio
 import contextlib
+import inspect
 import logging
 import platform
 import subprocess
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
@@ -17,6 +19,14 @@ from .persistence import PoolState, load_state, save_state
 from .worker import Worker, WorkerStats, WorkerStatus
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _SharedTarget:
+    """Internal shared target state for coordinating multiple workers."""
+
+    target: int
+    state: dict[str, int] = field(default_factory=dict)  # job_id -> success_count
 
 
 def _kill_process_tree(pid: int) -> None:
@@ -135,6 +145,9 @@ class BrowserWorkerPool:
         # Pool state
         self._running = False
         self._state = PoolState()
+
+        # Shared target tracking (internal, used by wait(min_success=X))
+        self._shared_targets: dict[str, _SharedTarget] = {}
 
     async def __aenter__(self) -> "BrowserWorkerPool":
         """Start the pool and all workers."""
@@ -425,12 +438,14 @@ class BrowserWorkerPool:
         Flexible wait method that supports multiple modes:
         - wait() - wait for ALL jobs in the pool to complete
         - wait(job_ids=[...]) - wait for specific jobs to complete
-        - wait(job_ids=[...], min_success=10) - wait until total success >= 10
+        - wait(job_ids=[...], min_success=10) - shared target across workers
 
         Args:
             job_ids: List of job IDs to monitor. None = wait for all jobs.
-            min_success: Early return when total success_count reaches this target.
-                Only valid when job_ids is provided. None = wait for all to complete.
+            min_success: Shared target across all specified jobs. When provided,
+                workers stop when their COMBINED success_count reaches this target.
+                For create_image jobs, this works with per-job min_success - a job
+                stops when EITHER its per-job target OR the shared target is reached.
             timeout: Max seconds to wait. None = wait forever.
 
         Returns:
@@ -447,11 +462,18 @@ class BrowserWorkerPool:
             # Wait for specific jobs
             results = await pool.wait(job_ids=[job1, job2, job3])
 
-            # Wait until 10 successful images (shared target across workers)
+            # Shared target: workers stop when combined success reaches 10
             results = await pool.wait(job_ids=[job1, job2, job3], min_success=10)
         """
         if min_success is not None and job_ids is None:
             raise ValueError("min_success requires job_ids to be specified")
+
+        # Setup shared target for jobs that support progress_callback
+        if min_success is not None and job_ids:
+            shared = _SharedTarget(target=min_success)
+            for job_id in job_ids:
+                self._shared_targets[job_id] = shared
+            logger.info(f"[wait] Setup shared target: {min_success} across {len(job_ids)} jobs")
 
         start_time = asyncio.get_event_loop().time()
 
@@ -695,6 +717,31 @@ class BrowserWorkerPool:
                 f"({job.job_id[:8]}...) after {job.retries} retries: {error}"
             )
 
+    def _make_shared_progress_callback(
+        self,
+        job_id: str,
+        shared_state: dict[str, int],
+        target: int,
+    ) -> Callable[[int], Awaitable[bool]]:
+        """Create progress callback for shared target mode.
+
+        Args:
+            job_id: This job's ID
+            shared_state: Dict shared across all workers {job_id: success_count}
+            target: Total success target across all workers
+
+        Returns:
+            Callback that reports progress and returns False when target reached.
+        """
+        async def callback(current_success: int) -> bool:
+            shared_state[job_id] = current_success
+            total = sum(shared_state.values())
+            should_continue = total < target
+            if not should_continue:
+                logger.info(f"[shared_target] Total {total} >= {target}, signaling stop")
+            return should_continue
+        return callback
+
     def _serialize_result(self, result: Any) -> Any:
         """Convert result to JSON-serializable format.
 
@@ -791,6 +838,16 @@ class BrowserWorkerPool:
             # Verify it's callable
             if not callable(method):
                 raise ValueError(f"task_type '{job.task_type}' is not a callable method")
+
+            # Inject progress_callback for shared target mode (if method supports it)
+            shared_target = self._shared_targets.get(job.job_id)
+            if shared_target is not None:
+                # Check if method accepts progress_callback parameter
+                sig = inspect.signature(method)
+                if "progress_callback" in sig.parameters:
+                    kwargs["progress_callback"] = self._make_shared_progress_callback(
+                        job.job_id, shared_target.state, shared_target.target
+                    )
 
             # Call the method with job args/kwargs
             result = await method(*job.args, **kwargs)
