@@ -286,7 +286,7 @@ async with BrowserWorkerPool(num_workers=3) as pool:
         job_ids.append(job_id)
 
     # Wait for all jobs to complete
-    results = await pool.wait_all()
+    results = await pool.wait()
 
     # Process results
     for job_id in job_ids:

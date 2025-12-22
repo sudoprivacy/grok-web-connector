@@ -16,6 +16,7 @@ Public API:
     which automatically routes to the appropriate internal client.
 """
 
+import logging
 from pathlib import Path
 from typing import Any, overload
 
@@ -30,6 +31,7 @@ from playwright.async_api import (
 )
 
 from ._internal import (
+    MEDIA_POST_LIKE_ENDPOINT,
     AsyncClientBase,
     build_video_payload,
     generate_statsig_id,
@@ -45,6 +47,12 @@ from .models import (
     VideoGenerationResult,
     VideoPreset,
 )
+
+# =============================================================================
+# Logging
+# =============================================================================
+
+logger = logging.getLogger(__name__)
 
 # =============================================================================
 # Constants
@@ -1558,6 +1566,10 @@ class NodriverClient(AsyncClientBase):
     async def _scan_favorited_indices(self) -> list[int]:
         """Scan gallery DOM to find which items have been favorited.
 
+        Gallery items have a save button with aria-label:
+        - Non-favorited: "保存" (Save)
+        - Favorited: "取消保存" (Unsave)
+
         Returns:
             List of indices (0-based) of favorited gallery items.
         """
@@ -1567,14 +1579,14 @@ class NodriverClient(AsyncClientBase):
                 const favorited = [];
 
                 items.forEach((item, idx) => {
-                    // Look for favorite button state
-                    // When favorited, button aria-label changes to "取消收藏" or similar
-                    const favBtn = item.querySelector('button[aria-label*="收藏"]');
-                    if (favBtn) {
-                        const label = favBtn.getAttribute('aria-label') || '';
-                        // "取消收藏" means it's currently favorited
-                        // "收藏" means it's not favorited
-                        if (label.includes('取消') || label.includes('Unsave') || label.includes('unfavorite')) {
+                    // Look for save button - gallery uses "保存" (Save) / "取消保存" (Unsave)
+                    const saveBtn = item.querySelector('button[aria-label*="保存"]') ||
+                                   item.querySelector('button[aria-label*="Save"]');
+                    if (saveBtn) {
+                        const label = saveBtn.getAttribute('aria-label') || '';
+                        // "取消保存" or "Unsave" means it's currently favorited
+                        // "保存" or "Save" means it's not favorited
+                        if (label.includes('取消') || label.toLowerCase().includes('unsave')) {
                             favorited.push(idx);
                         }
                     }
@@ -1807,46 +1819,136 @@ class NodriverClient(AsyncClientBase):
                 break
             await asyncio.sleep(1)
 
+        # Check if we got any jobs at all - if not, something went wrong
+        if len(captured_data["jobs"]) == 0:
+            logger.error("[create_image] No jobs received after initial wait. Navigation or WebSocket may have failed.")
+            raise GrokAPIError("No image generation jobs received. The page may not have loaded correctly.")
+
         # Step 7: Scroll down to generate more if needed
         # min_success means non-moderated images, so we keep scrolling until we have enough
+        # Note: Grok rate-limits generation - new batches appear every 2-3 minutes
+        # We use exponential backoff when scroll doesn't generate new jobs
         scroll_count = 0
+        jobs_before_scroll = 0
+        consecutive_no_new_jobs = 0
+        base_scroll_delay = 3 * d  # Base delay after scroll
         while scroll_count < max_scroll:
+            # Wait until ALL current jobs have completed (progress=100)
+            # This ensures moderated status has been received for all images
+            prev_job_count = 0
+            stable_count = 0
+            stable_wait_start = asyncio.get_event_loop().time()
+            max_stable_wait = 30  # Max 30 seconds to wait for stability
+
+            while stable_count < 3:  # Wait for 3 consecutive stable checks
+                # Timeout check
+                if asyncio.get_event_loop().time() - stable_wait_start > max_stable_wait:
+                    logger.debug(f"[scroll] stable wait timeout after 30s")
+                    break
+
+                all_jobs = list(captured_data["jobs"].values())
+                completed = [job for job in all_jobs if job.get("progress") == 100]
+
+                # Check if all jobs are completed and count is stable
+                if len(completed) == len(all_jobs) and len(all_jobs) > 0:
+                    if len(all_jobs) == prev_job_count:
+                        stable_count += 1
+                    else:
+                        stable_count = 0
+                    prev_job_count = len(all_jobs)
+                else:
+                    stable_count = 0
+                    prev_job_count = len(all_jobs)
+
+                await asyncio.sleep(1)
+
+            # Now count non-moderated (successful) images
             completed = [
                 job for job in captured_data["jobs"].values() if job.get("progress") == 100
             ]
-            # Count only non-moderated (successful) images
             success_count = sum(1 for job in completed if not job.get("moderated"))
+            moderated_count = sum(1 for job in completed if job.get("moderated"))
+
+            logger.info(f"[scroll {scroll_count}] jobs={len(completed)}, success={success_count}, moderated={moderated_count}, target={min_success}")
 
             if success_count >= min_success:
+                logger.info(f"[scroll] reached min_success={min_success}, stopping")
                 break
+
+            # Check if scrolling is generating new jobs
+            if scroll_count > 0 and len(completed) == jobs_before_scroll:
+                consecutive_no_new_jobs += 1
+                logger.warning(f"[scroll] no new jobs after scroll {scroll_count}, jobs still at {len(completed)} (consecutive: {consecutive_no_new_jobs})")
+            else:
+                consecutive_no_new_jobs = 0  # Reset when new jobs appear
+            jobs_before_scroll = len(completed)
+
+            # Exponential backoff when scroll doesn't generate new jobs
+            # Grok rate-limits generation, new batches appear every 2-3 minutes
+            if consecutive_no_new_jobs >= 3:
+                # Wait longer before next scroll (15s, then 30s, capped at 60s)
+                backoff_wait = min(15 * (2 ** (consecutive_no_new_jobs - 3)), 60)
+                logger.info(f"[scroll] rate-limited, waiting {backoff_wait}s before next scroll")
+                await asyncio.sleep(backoff_wait)
 
             # Scroll down to trigger more generation
             # The imagine page uses a specific scrollable container, not window
-            await self._tab.evaluate("""
+            scroll_result = await self._tab.evaluate("""
                 (function() {
                     // Find the scrollable container (has overflow-scroll class)
                     const container = document.querySelector('.overflow-scroll') ||
                                      document.querySelector('[class*="overflow-scroll"]') ||
                                      document.querySelector('main');
                     if (container) {
+                        const beforeScroll = container.scrollTop;
                         container.scrollTop = container.scrollHeight;
-                        return 'scrolled container';
+                        return 'scrolled container from ' + beforeScroll + ' to ' + container.scrollTop + ' (max: ' + container.scrollHeight + ')';
                     }
                     // Fallback to window scroll
                     window.scrollTo(0, document.body.scrollHeight);
-                    return 'scrolled window';
+                    return 'scrolled window (fallback)';
                 })()
             """)
-            await asyncio.sleep(5 * d)  # Wait for new images to generate
+            logger.debug(f"[scroll {scroll_count}] {scroll_result}")
+            await asyncio.sleep(3 * d)  # Brief wait for scroll to trigger new jobs
             scroll_count += 1
 
         # Build result
         images = list(captured_data["jobs"].values())
         selected_post_ids: list[str] = []
 
-        # Step 8: Collect post URLs via thumbnail_selector callback
+        # Step 8: Collect post_ids via thumbnail_selector callback
+        # When user clicks "Create Video" on a gallery image, Grok auto-favorites it
+        # by sending POST /rest/media/post/like with {"id": "post_id"}
+        # We capture these requests to get post_ids without navigation
         if thumbnail_selector and images:
             await asyncio.sleep(2 * d)  # Wait for DOM to settle
+
+            # Set up request capture for /rest/media/post/like
+            captured_like_ids: list[str] = []
+
+            async def capture_like_request(event: cdp.network.RequestWillBeSent):
+                """Capture POST /rest/media/post/like to get post_ids."""
+                url = event.request.url
+                if MEDIA_POST_LIKE_ENDPOINT in url:
+                    post_data = getattr(event.request, "post_data", None)
+                    if post_data:
+                        try:
+                            import re
+                            # Try JSON parse first
+                            data = json_mod.loads(post_data)
+                            post_id = data.get("id")
+                            if post_id and post_id not in captured_like_ids:
+                                captured_like_ids.append(post_id)
+                        except json_mod.JSONDecodeError:
+                            # Fallback: regex extraction
+                            match = re.search(r'"id"\s*:\s*"([^"]+)"', post_data)
+                            if match:
+                                post_id = match.group(1)
+                                if post_id not in captured_like_ids:
+                                    captured_like_ids.append(post_id)
+
+            self._tab.add_handler(cdp.network.RequestWillBeSent, capture_like_request)
 
             # Get count of gallery items
             item_count_result = await self._tab.evaluate(
@@ -1854,63 +1956,14 @@ class NodriverClient(AsyncClientBase):
             )
             item_count = int(item_count_result) if item_count_result else 0
 
-            # Call the selector callback with count and scan_favorites function
-            selected_indices = await thumbnail_selector(
-                item_count, self._scan_favorited_indices
-            )
+            # Call the selector callback
+            # For manual selection: user clicks "Create Video" in browser, we capture post_ids
+            # The callback can wait for user input (e.g., signal file, keyboard input)
+            # then return indices (which we ignore - we use captured_like_ids instead)
+            await thumbnail_selector(item_count, self._scan_favorited_indices)
 
-            # Collect post_ids for selected indices only
-            for i in selected_indices:
-                if i >= item_count:
-                    continue
-
-                # Scroll to item and click on the gallery card
-                click_result = await self._tab.evaluate(f"""
-                    (function() {{
-                        const items = document.querySelectorAll('[role="listitem"]');
-                        if (items.length <= {i}) return 'no item';
-                        const item = items[{i}];
-
-                        // Scroll item into view first
-                        item.scrollIntoView({{ behavior: 'instant', block: 'center' }});
-
-                        const clickable = item.querySelector('[class*="hover:scale"]') ||
-                                         item.querySelector('[class*="media-post-masonry-card"]') ||
-                                         item.querySelector('div.relative');
-                        if (!clickable) {{
-                            item.click();
-                            return 'clicked item';
-                        }}
-                        clickable.click();
-                        return 'clicked card';
-                    }})()
-                """)
-
-                if click_result == "no item":
-                    continue
-
-                # Wait for navigation
-                await asyncio.sleep(2 * d)
-
-                # Check if URL changed to post page
-                current_url = self._tab.target.url
-                if "/imagine/post/" in current_url:
-                    # Extract post_id from URL
-                    post_id = current_url.split("/imagine/post/")[-1]
-                    selected_post_ids.append(post_id)
-
-                    # Navigate back to gallery
-                    await self._tab.evaluate("window.history.back()")
-                    await asyncio.sleep(2 * d)
-
-                    # Verify we're back at gallery
-                    back_url = self._tab.target.url
-                    if "/imagine/post/" in back_url:
-                        # Still on post page, try harder to go back
-                        await self._tab.get(f"{self.BASE_URL}/imagine")
-                        await asyncio.sleep(2 * d)
-                        # Gallery is likely lost, stop collecting
-                        break
+            # Use captured post_ids from /rest/media/post/like requests
+            selected_post_ids = captured_like_ids
 
         return ImageGenerationResult(
             prompt=prompt,

@@ -536,7 +536,7 @@ class TestSmartGrokClientImageAPIs:
         )
 
         mock_browser.create_image.assert_called_once_with(
-            "a cat wearing sunglasses", "square", 2, 3, 60
+            "a cat wearing sunglasses", "square", 2, 3, 60, None
         )
         assert result == mock_result
 

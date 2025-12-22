@@ -68,7 +68,7 @@ class BrowserWorkerPool:
             await pool.add_worker()
 
             # Wait for all jobs
-            results = await pool.wait_all()
+            results = await pool.wait()
     """
 
     def __init__(
@@ -94,6 +94,9 @@ class BrowserWorkerPool:
             cookies: Pre-loaded GrokCookies. If None, loads from config.
             headless: Run Chrome in headless mode.
             close_chrome: Terminate Chrome processes on pool exit. Default True.
+                IMPORTANT: Set to False when using create_image() - the image gallery
+                is ephemeral (not saved) and closing Chrome will lose all generated
+                images. Keep Chrome open to browse and select images from the gallery.
             fail_condition: Callable that takes result data dict and returns True if
                 the job should be considered failed (even if no exception was raised).
                 Example: `lambda r: r.get("moderated", False)` to fail moderated videos.
@@ -411,35 +414,109 @@ class BrowserWorkerPool:
         await asyncio.wait_for(self._result_events[job_id].wait(), timeout=timeout)
         return self._results[job_id]
 
-    async def wait_all(self, timeout: float | None = None) -> dict[str, JobResult]:
-        """Wait for all pending jobs to complete.
+    async def wait(
+        self,
+        job_ids: list[str] | None = None,
+        min_success: int | None = None,
+        timeout: float | None = None,
+    ) -> dict[str, JobResult]:
+        """Wait for jobs to complete.
+
+        Flexible wait method that supports multiple modes:
+        - wait() - wait for ALL jobs in the pool to complete
+        - wait(job_ids=[...]) - wait for specific jobs to complete
+        - wait(job_ids=[...], min_success=10) - wait until total success >= 10
 
         Args:
+            job_ids: List of job IDs to monitor. None = wait for all jobs.
+            min_success: Early return when total success_count reaches this target.
+                Only valid when job_ids is provided. None = wait for all to complete.
             timeout: Max seconds to wait. None = wait forever.
 
         Returns:
-            Dict of job_id -> JobResult for all completed jobs
+            Dict of job_id -> JobResult for completed jobs
+
+        Raises:
+            asyncio.TimeoutError: If timeout exceeded
+            ValueError: If min_success is provided without job_ids
+
+        Examples:
+            # Wait for all jobs
+            results = await pool.wait()
+
+            # Wait for specific jobs
+            results = await pool.wait(job_ids=[job1, job2, job3])
+
+            # Wait until 10 successful images (shared target across workers)
+            results = await pool.wait(job_ids=[job1, job2, job3], min_success=10)
         """
-        # Wait for queue to be empty and all workers to be idle
+        if min_success is not None and job_ids is None:
+            raise ValueError("min_success requires job_ids to be specified")
+
         start_time = asyncio.get_event_loop().time()
 
-        while True:
-            # Check if all jobs are done (both queues must be empty)
-            queues_empty = self._job_queue.empty() and self._priority_queue.empty()
-            if not self._pending_jobs and queues_empty:
-                all_idle = all(w.status == WorkerStatus.IDLE for w in self._workers.values())
-                if all_idle:
-                    break
+        # Mode 1: Wait for all jobs in pool
+        if job_ids is None:
+            while True:
+                queues_empty = self._job_queue.empty() and self._priority_queue.empty()
+                if not self._pending_jobs and queues_empty:
+                    all_idle = all(w.status == WorkerStatus.IDLE for w in self._workers.values())
+                    if all_idle:
+                        break
 
+                if timeout is not None:
+                    elapsed = asyncio.get_event_loop().time() - start_time
+                    if elapsed >= timeout:
+                        raise asyncio.TimeoutError("Timeout waiting for all jobs")
+
+                await asyncio.sleep(0.5)
+
+            return self._results.copy()
+
+        # Mode 2 & 3: Wait for specific jobs (with optional min_success)
+        completed_jobs: dict[str, JobResult] = {}
+        total_success = 0
+        pending_ids = set(job_ids)
+
+        while pending_ids:
             # Check timeout
             if timeout is not None:
                 elapsed = asyncio.get_event_loop().time() - start_time
                 if elapsed >= timeout:
-                    raise asyncio.TimeoutError("Timeout waiting for all jobs")
+                    if min_success is not None:
+                        raise asyncio.TimeoutError(
+                            f"Timeout waiting for min_success. "
+                            f"Got {total_success}/{min_success} success."
+                        )
+                    raise asyncio.TimeoutError("Timeout waiting for jobs")
+
+            # Check for newly completed jobs
+            for job_id in list(pending_ids):
+                if job_id in self._results:
+                    result = self._results[job_id]
+                    completed_jobs[job_id] = result
+                    pending_ids.remove(job_id)
+
+                    # Track success count if min_success is set
+                    if min_success is not None and result.success and result.data:
+                        success_count = result.data.get("success_count", 0)
+                        total_success += success_count
+                        logger.info(
+                            f"[wait] Job {job_id[:8]}... completed: "
+                            f"+{success_count} success, total={total_success}/{min_success}"
+                        )
+
+                        if total_success >= min_success:
+                            logger.info(
+                                f"[wait] Target reached! "
+                                f"{total_success}/{min_success} success from "
+                                f"{len(completed_jobs)} jobs"
+                            )
+                            return completed_jobs
 
             await asyncio.sleep(0.5)
 
-        return self._results.copy()
+        return completed_jobs
 
     # =========================================================================
     # State Management

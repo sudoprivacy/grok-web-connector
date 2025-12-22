@@ -99,7 +99,7 @@ BrowserWorkerPool for concurrent operations with multiple Chrome instances:
         await pool.submit("create_video", prompt="Orbit", source_post_id="abc")
         await pool.submit("create_video", prompt="Pan Left", source_post_id="abc")
         await pool.submit("create_video", prompt="Static Shot", source_post_id="abc")
-        results = await pool.wait_all()
+        results = await pool.wait()
 
 Task types: create_video, create_image, favorite_post, unfavorite_post,
 like_post, dislike_post, delete_video, upgrade_video, edit_image,

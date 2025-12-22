@@ -13,7 +13,7 @@ Example:
         await pool.add_worker()
 
         # Wait for all jobs
-        results = await pool.wait_all()
+        results = await pool.wait()
         for job_id, result in results.items():
             if result.success:
                 print(f"Video: {result.data['video_id']}")

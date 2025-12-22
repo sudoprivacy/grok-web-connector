@@ -563,19 +563,19 @@ class TestBrowserWorkerPoolEdgeCases:
             await pool.wait_for("nonexistent-job", timeout=0.1)
 
     @pytest.mark.asyncio
-    async def test_wait_all_empty_pool(self, pool):
-        """wait_all on empty pool returns empty dict."""
-        results = await pool.wait_all(timeout=0.1)
+    async def test_wait_empty_pool(self, pool):
+        """wait on empty pool returns empty dict."""
+        results = await pool.wait(timeout=0.1)
 
         assert results == {}
 
     @pytest.mark.asyncio
-    async def test_wait_all_timeout(self, pool):
-        """wait_all with timeout raises TimeoutError when jobs incomplete."""
+    async def test_wait_timeout(self, pool):
+        """wait with timeout raises TimeoutError when jobs incomplete."""
         await pool.submit("create_video", "post-123")
 
         with pytest.raises(asyncio.TimeoutError):
-            await pool.wait_all(timeout=0.1)
+            await pool.wait(timeout=0.1)
 
     def test_pending_count_empty_pool(self, pool):
         """pending_count property returns 0 for empty pool."""

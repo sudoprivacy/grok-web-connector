@@ -48,7 +48,7 @@ async def test_dynamic_worker_scaling():
             job_ids.append(job_id)
 
         # Phase 4: Wait for all jobs
-        results = await pool.wait_all(timeout=300)
+        results = await pool.wait(timeout=300)
         assert len(results) == 4
         assert all(r.success for r in results.values())
 
@@ -131,7 +131,7 @@ async def test_multiple_workers_distribute_jobs():
             )
             job_ids.append(job_id)
 
-        results = await pool.wait_all(timeout=300)
+        results = await pool.wait(timeout=300)
         assert len(results) == 3
         assert all(r.success for r in results.values())
 

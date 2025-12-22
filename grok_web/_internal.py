@@ -29,6 +29,12 @@ from .models import (
 # Shared Utilities
 # =============================================================================
 
+# Media post API endpoints
+MEDIA_POST_LIKE_ENDPOINT = "/rest/media/post/like"
+MEDIA_POST_UNLIKE_ENDPOINT = "/rest/media/post/unlike"
+MEDIA_POST_LIST_ENDPOINT = "/rest/media/post/list"
+MEDIA_POST_GET_ENDPOINT = "/rest/media/post/get"
+
 PRESET_MAP = {
     "normal": "normal",
     "fun": "extremely-crazy",
@@ -799,7 +805,7 @@ class SyncClientBase(ResponseParser, ABC):
         Returns:
             True if successful
         """
-        self._api_request("POST", "/rest/media/post/like", {"id": post_id})
+        self._api_request("POST", MEDIA_POST_LIKE_ENDPOINT, {"id": post_id})
         return True
 
     # =========================================================================
@@ -818,7 +824,7 @@ class SyncClientBase(ResponseParser, ABC):
         Returns:
             True if successful
         """
-        self._api_request("POST", "/rest/media/post/unlike", {"id": post_id})
+        self._api_request("POST", MEDIA_POST_UNLIKE_ENDPOINT, {"id": post_id})
         return True
 
     # =========================================================================
@@ -1304,7 +1310,7 @@ class AsyncClientBase(ResponseParser, ABC):
         Returns:
             True if successful
         """
-        await self._api_request("POST", "/rest/media/post/like", {"id": post_id})
+        await self._api_request("POST", MEDIA_POST_LIKE_ENDPOINT, {"id": post_id})
         return True
 
     # =========================================================================
@@ -1321,7 +1327,7 @@ class AsyncClientBase(ResponseParser, ABC):
         Returns:
             True if successful
         """
-        await self._api_request("POST", "/rest/media/post/unlike", {"id": post_id})
+        await self._api_request("POST", MEDIA_POST_UNLIKE_ENDPOINT, {"id": post_id})
         return True
 
     # =========================================================================
