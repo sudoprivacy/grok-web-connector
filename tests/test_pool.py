@@ -662,3 +662,113 @@ class TestBrowserWorkerPoolEdgeCases:
         # Each job appears in both _pending_jobs and the queue
         assert pool.pending_count >= 2
         assert len(pool._pending_jobs) == 2
+
+
+# =============================================================================
+# Shared Target Tests
+# =============================================================================
+
+
+class TestSharedTarget:
+    """Tests for shared target functionality (_SharedTarget, progress callback)."""
+
+    def test_shared_target_dataclass(self):
+        """_SharedTarget stores target and state correctly."""
+        from grok_web.pool.worker_pool import _SharedTarget
+
+        shared = _SharedTarget(target=10)
+        assert shared.target == 10
+        assert shared.state == {}
+
+        # Update state
+        shared.state["job1"] = 5
+        shared.state["job2"] = 3
+        assert sum(shared.state.values()) == 8
+
+    @pytest.mark.asyncio
+    async def test_make_shared_progress_callback_returns_true_below_target(self):
+        """Callback returns True when total is below target."""
+        from grok_web.pool import BrowserWorkerPool
+
+        pool = BrowserWorkerPool()
+        shared_state = {}
+        callback = pool._make_shared_progress_callback("job1", shared_state, target=10)
+
+        # Report 3 success - should return True (continue)
+        result = await callback(3)
+        assert result is True
+        assert shared_state["job1"] == 3
+
+    @pytest.mark.asyncio
+    async def test_make_shared_progress_callback_returns_false_at_target(self):
+        """Callback returns False when total reaches target."""
+        from grok_web.pool import BrowserWorkerPool
+
+        pool = BrowserWorkerPool()
+        shared_state = {"job1": 5}  # Pre-existing progress from another job
+        callback = pool._make_shared_progress_callback("job2", shared_state, target=10)
+
+        # Report 5 success - total is now 10, should return False (stop)
+        result = await callback(5)
+        assert result is False
+        assert shared_state["job2"] == 5
+        assert sum(shared_state.values()) == 10
+
+    @pytest.mark.asyncio
+    async def test_make_shared_progress_callback_multiple_jobs(self):
+        """Multiple callbacks share the same state dict."""
+        from grok_web.pool import BrowserWorkerPool
+
+        pool = BrowserWorkerPool()
+        shared_state = {}
+
+        cb1 = pool._make_shared_progress_callback("job1", shared_state, target=10)
+        cb2 = pool._make_shared_progress_callback("job2", shared_state, target=10)
+
+        # Job1 reports 3
+        assert await cb1(3) is True
+        assert shared_state == {"job1": 3}
+
+        # Job2 reports 4 - total is 7, continue
+        assert await cb2(4) is True
+        assert shared_state == {"job1": 3, "job2": 4}
+
+        # Job1 reports 6 (updated) - total is 10, stop
+        assert await cb1(6) is False
+        assert shared_state == {"job1": 6, "job2": 4}
+
+    @pytest.mark.asyncio
+    async def test_wait_min_success_requires_job_ids(self):
+        """wait() raises ValueError if min_success without job_ids."""
+        from grok_web.pool import BrowserWorkerPool
+
+        pool = BrowserWorkerPool()
+
+        with pytest.raises(ValueError, match="min_success requires job_ids"):
+            await pool.wait(min_success=10)
+
+    @pytest.mark.asyncio
+    async def test_wait_min_success_sets_up_shared_target(self):
+        """wait() with min_success creates _SharedTarget for job_ids."""
+        from grok_web.pool import BrowserWorkerPool
+
+        pool = BrowserWorkerPool()
+
+        # Submit some jobs
+        job1 = await pool.submit("create_image", prompt="test")
+        job2 = await pool.submit("create_image", prompt="test")
+
+        # Manually add results to simulate completion
+        from grok_web.pool.job import JobResult
+        pool._results[job1] = JobResult(job_id=job1, success=True, data={"success_count": 5})
+        pool._results[job2] = JobResult(job_id=job2, success=True, data={"success_count": 5})
+
+        # Call wait - it should set up shared targets
+        # Note: This will return immediately since jobs are already "complete"
+        results = await pool.wait(job_ids=[job1, job2], min_success=10)
+
+        # Verify shared targets were set up
+        assert job1 in pool._shared_targets
+        assert job2 in pool._shared_targets
+        # Both should reference the same _SharedTarget object
+        assert pool._shared_targets[job1] is pool._shared_targets[job2]
