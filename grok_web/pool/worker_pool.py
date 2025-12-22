@@ -149,6 +149,11 @@ class BrowserWorkerPool:
         # Shared target tracking (internal, used by wait(min_success=X))
         self._shared_targets: dict[str, _SharedTarget] = {}
 
+        # Held jobs waiting for release (used with shared target)
+        # Jobs with _hold=True are stored here instead of queue, released by wait()
+        self._held_jobs: dict[str, Job] = {}  # job_id -> Job (not in queue yet)
+        self._held_jobs_lock = asyncio.Lock()  # Protects _held_jobs access
+
     async def __aenter__(self) -> "BrowserWorkerPool":
         """Start the pool and all workers."""
         # Load state if state file exists
@@ -351,6 +356,7 @@ class BrowserWorkerPool:
         task_type: str,
         *args,
         max_retries: int | None = None,
+        _hold: bool = False,
         **kwargs,
     ) -> str:
         """Submit a job to the pool.
@@ -359,6 +365,8 @@ class BrowserWorkerPool:
             task_type: Type of task (e.g., "create_video", "get_details")
             *args: Positional arguments for the task
             max_retries: Max retries for this job. None = use pool default.
+            _hold: If True, job is held until released by wait(). Use this when
+                you need to set up shared targets before jobs start executing.
             **kwargs: Keyword arguments for the task
 
         Returns:
@@ -373,9 +381,16 @@ class BrowserWorkerPool:
 
         self._pending_jobs[job.job_id] = job
         self._result_events[job.job_id] = asyncio.Event()
-        await self._job_queue.put(job)
 
-        logger.debug(f"Submitted job {job.job_id}: {task_type}")
+        if _hold:
+            # Store in held_jobs instead of queue, will be released by wait()
+            async with self._held_jobs_lock:
+                self._held_jobs[job.job_id] = job
+            logger.debug(f"Submitted job {job.job_id}: {task_type} (held)")
+        else:
+            await self._job_queue.put(job)
+            logger.debug(f"Submitted job {job.job_id}: {task_type}")
+
         return job.job_id
 
     async def submit_batch(
@@ -474,6 +489,16 @@ class BrowserWorkerPool:
             for job_id in job_ids:
                 self._shared_targets[job_id] = shared
             logger.info(f"[wait] Setup shared target: {min_success} across {len(job_ids)} jobs")
+
+        # Release any held jobs now that shared target is configured
+        async with self._held_jobs_lock:
+            released_count = len(self._held_jobs)
+            for job_id in list(self._held_jobs.keys()):
+                job = self._held_jobs.pop(job_id)
+                await self._job_queue.put(job)
+                logger.debug(f"Released held job {job_id}: {job.task_type}")
+            if released_count > 0:
+                logger.info(f"[wait] Released {released_count} held jobs")
 
         start_time = asyncio.get_event_loop().time()
 
