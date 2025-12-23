@@ -221,13 +221,148 @@ def is_temp_chrome_on_port(port: int) -> tuple[bool, int | None]:
     return False, pid
 
 
-def find_nodriver_chromes(port_range: tuple[int, int] = (9222, 9300)) -> list[int]:
+def _get_port_lock_path(port: int) -> Path:
+    """Get the lock file path for a Chrome debugging port."""
+    return Path(tempfile.gettempdir()) / f"grok_port_{port}.lock"
+
+
+def is_process_alive(pid: int) -> bool:
+    """Check if a process with given PID is still running.
+
+    Args:
+        pid: Process ID to check
+
+    Returns:
+        True if process is alive, False otherwise.
+    """
+    try:
+        os.kill(pid, 0)  # Signal 0 doesn't kill, just checks
+        return True
+    except (ProcessLookupError, PermissionError):
+        return False
+
+
+def acquire_port_lock(port: int) -> bool:
+    """Acquire a lock for a Chrome debugging port.
+
+    Creates a lock file with the current process PID. This allows other
+    processes to know this port is in use.
+
+    Args:
+        port: Port to lock
+
+    Returns:
+        True if lock acquired successfully, False if already locked by another process.
+    """
+    lock_path = _get_port_lock_path(port)
+    current_pid = os.getpid()
+
+    # Check if lock already exists
+    if lock_path.exists():
+        try:
+            content = lock_path.read_text().strip()
+            locked_pid = int(content)
+            if is_process_alive(locked_pid) and locked_pid != current_pid:
+                # Another process holds the lock and is still alive
+                logger.debug(f"Port {port} is locked by PID {locked_pid}")
+                return False
+            # Lock is stale (process died) or it's our own lock - take it
+        except (ValueError, OSError):
+            pass  # Invalid lock file, take it
+
+    # Acquire the lock
+    try:
+        lock_path.write_text(str(current_pid))
+        logger.debug(f"Acquired lock for port {port} (PID {current_pid})")
+        return True
+    except OSError as e:
+        logger.warning(f"Failed to acquire lock for port {port}: {e}")
+        return False
+
+
+def release_port_lock(port: int) -> bool:
+    """Release the lock for a Chrome debugging port.
+
+    Only releases if the lock is held by the current process.
+
+    Args:
+        port: Port to unlock
+
+    Returns:
+        True if released successfully, False otherwise.
+    """
+    lock_path = _get_port_lock_path(port)
+    current_pid = os.getpid()
+
+    if not lock_path.exists():
+        return True
+
+    try:
+        content = lock_path.read_text().strip()
+        locked_pid = int(content)
+        if locked_pid == current_pid:
+            lock_path.unlink()
+            logger.debug(f"Released lock for port {port}")
+            return True
+        else:
+            logger.debug(f"Cannot release lock for port {port} - owned by PID {locked_pid}")
+            return False
+    except (ValueError, OSError) as e:
+        logger.warning(f"Failed to release lock for port {port}: {e}")
+        return False
+
+
+def is_port_locked(port: int) -> tuple[bool, int | None]:
+    """Check if a Chrome debugging port is locked by another process.
+
+    Args:
+        port: Port to check
+
+    Returns:
+        Tuple of (is_locked, locking_pid). Returns (False, None) if not locked.
+    """
+    lock_path = _get_port_lock_path(port)
+    current_pid = os.getpid()
+
+    if not lock_path.exists():
+        return False, None
+
+    try:
+        content = lock_path.read_text().strip()
+        locked_pid = int(content)
+
+        # If it's our own lock, not considered "locked"
+        if locked_pid == current_pid:
+            return False, None
+
+        # Check if the locking process is still alive
+        if is_process_alive(locked_pid):
+            return True, locked_pid
+        else:
+            # Stale lock - clean it up
+            try:
+                lock_path.unlink()
+                logger.debug(f"Cleaned up stale lock for port {port} (PID {locked_pid} is dead)")
+            except OSError:
+                pass
+            return False, None
+
+    except (ValueError, OSError):
+        return False, None
+
+
+def find_nodriver_chromes(
+    port_range: tuple[int, int] = (9222, 9300),
+    exclude_locked: bool = False,
+) -> list[int]:
     """Find all ports with nodriver Chrome instances (temp profiles).
 
     Scans the given port range for Chrome instances launched by this library.
 
     Args:
         port_range: Tuple of (start_port, end_port) to scan
+        exclude_locked: If True, skip ports that are locked by another process.
+                       This prevents stealing Chromes from other running scripts.
 
     Returns:
         List of ports with nodriver Chrome instances.
@@ -236,6 +371,11 @@ def find_nodriver_chromes(port_range: tuple[int, int] = (9222, 9300)) -> list[in
     for port in range(port_range[0], port_range[1]):
         is_temp, _ = is_temp_chrome_on_port(port)
         if is_temp:
+            if exclude_locked:
+                is_locked, locked_pid = is_port_locked(port)
+                if is_locked:
+                    logger.debug(f"Skipping locked Chrome on port {port} (PID {locked_pid})")
+                    continue
             nodriver_ports.append(port)
     return nodriver_ports
 

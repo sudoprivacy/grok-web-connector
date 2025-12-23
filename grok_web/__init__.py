@@ -111,7 +111,12 @@ Last updated: 2025-12-16
 from pathlib import Path
 
 from .auth import load_cookies, save_cookies
-from .browser import find_nodriver_chromes
+from .browser import (
+    find_nodriver_chromes,
+    acquire_port_lock,
+    release_port_lock,
+    is_port_locked,
+)
 from .client import SmartGrokClient
 from .selectors import select_all, timeout_selector, signal_file_selector
 from .exceptions import (
@@ -142,8 +147,9 @@ _active_ports: set[int] = set()
 
 
 def _release_port(port: int) -> None:
-    """Release a port back to the available pool."""
+    """Release a port back to the available pool and release the file lock."""
     _active_ports.discard(port)
+    release_port_lock(port)
 
 
 def get_client(
@@ -184,16 +190,20 @@ def get_client(
             video = await client.create_video("a cat playing with yarn")
     """
     # Auto-find available Chrome if port not specified
+    # Use exclude_locked=True to avoid stealing Chromes from other processes
     allocated_port = None
     if browser_port is None:
-        available_ports = find_nodriver_chromes()
+        available_ports = find_nodriver_chromes(exclude_locked=True)
         for port in available_ports:
             if port not in _active_ports:
-                browser_port = port
-                browser_host = browser_host or "127.0.0.1"
-                allocated_port = port
-                _active_ports.add(port)
-                break
+                # Try to acquire file lock for cross-process coordination
+                if acquire_port_lock(port):
+                    browser_port = port
+                    browser_host = browser_host or "127.0.0.1"
+                    allocated_port = port
+                    _active_ports.add(port)
+                    break
+                # Lock acquisition failed, try next port
 
     client = SmartGrokClient(
         cookies=cookies,
@@ -240,4 +250,8 @@ __all__ = [
     "select_all",
     "timeout_selector",
     "signal_file_selector",
+    # Port lock utilities (for cross-process coordination)
+    "acquire_port_lock",
+    "release_port_lock",
+    "is_port_locked",
 ]

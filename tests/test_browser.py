@@ -518,3 +518,124 @@ class TestGetProcessCmdline:
             with patch("grok_web.browser.subprocess.run", side_effect=TimeoutExpired("cmd", 5)):
                 result = get_process_cmdline(12345)
                 assert result is None
+
+
+class TestPortLock:
+    """Tests for port lock functions (cross-process coordination)."""
+
+    def test_acquire_lock_creates_file(self, tmp_path):
+        """acquire_port_lock creates a lock file with current PID."""
+        import os
+
+        from grok_web.browser import _get_port_lock_path, acquire_port_lock
+
+        with patch("grok_web.browser._get_port_lock_path", return_value=tmp_path / "test.lock"):
+            result = acquire_port_lock(9222)
+            assert result is True
+
+            lock_file = tmp_path / "test.lock"
+            assert lock_file.exists()
+            assert lock_file.read_text().strip() == str(os.getpid())
+
+    def test_acquire_lock_fails_if_locked_by_other(self, tmp_path):
+        """acquire_port_lock fails if locked by another living process."""
+        from grok_web.browser import acquire_port_lock
+
+        lock_file = tmp_path / "test.lock"
+        lock_file.write_text("1")  # PID 1 is always alive (init/systemd)
+
+        with patch("grok_web.browser._get_port_lock_path", return_value=lock_file):
+            with patch("grok_web.browser.is_process_alive", return_value=True):
+                result = acquire_port_lock(9222)
+                assert result is False
+
+    def test_acquire_lock_succeeds_if_stale(self, tmp_path):
+        """acquire_port_lock succeeds if existing lock is stale (process dead)."""
+        from grok_web.browser import acquire_port_lock
+
+        lock_file = tmp_path / "test.lock"
+        lock_file.write_text("99999999")  # Non-existent PID
+
+        with patch("grok_web.browser._get_port_lock_path", return_value=lock_file):
+            with patch("grok_web.browser.is_process_alive", return_value=False):
+                result = acquire_port_lock(9222)
+                assert result is True
+
+    def test_release_lock_removes_file(self, tmp_path):
+        """release_port_lock removes the lock file."""
+        import os
+
+        from grok_web.browser import release_port_lock
+
+        lock_file = tmp_path / "test.lock"
+        lock_file.write_text(str(os.getpid()))
+
+        with patch("grok_web.browser._get_port_lock_path", return_value=lock_file):
+            result = release_port_lock(9222)
+            assert result is True
+            assert not lock_file.exists()
+
+    def test_release_lock_fails_if_not_owner(self, tmp_path):
+        """release_port_lock fails if not the lock owner."""
+        from grok_web.browser import release_port_lock
+
+        lock_file = tmp_path / "test.lock"
+        lock_file.write_text("12345")  # Different PID
+
+        with patch("grok_web.browser._get_port_lock_path", return_value=lock_file):
+            result = release_port_lock(9222)
+            assert result is False
+            assert lock_file.exists()  # File should not be removed
+
+    def test_is_port_locked_returns_false_if_no_file(self, tmp_path):
+        """is_port_locked returns (False, None) if no lock file exists."""
+        from grok_web.browser import is_port_locked
+
+        with patch("grok_web.browser._get_port_lock_path", return_value=tmp_path / "nonexistent.lock"):
+            is_locked, pid = is_port_locked(9222)
+            assert is_locked is False
+            assert pid is None
+
+    def test_is_port_locked_returns_true_if_locked_by_other(self, tmp_path):
+        """is_port_locked returns (True, pid) if locked by another process."""
+        from grok_web.browser import is_port_locked
+
+        lock_file = tmp_path / "test.lock"
+        lock_file.write_text("12345")
+
+        with patch("grok_web.browser._get_port_lock_path", return_value=lock_file):
+            with patch("grok_web.browser.is_process_alive", return_value=True):
+                is_locked, pid = is_port_locked(9222)
+                assert is_locked is True
+                assert pid == 12345
+
+    def test_is_port_locked_cleans_stale_lock(self, tmp_path):
+        """is_port_locked cleans up stale lock files."""
+        from grok_web.browser import is_port_locked
+
+        lock_file = tmp_path / "test.lock"
+        lock_file.write_text("99999999")
+
+        with patch("grok_web.browser._get_port_lock_path", return_value=lock_file):
+            with patch("grok_web.browser.is_process_alive", return_value=False):
+                is_locked, pid = is_port_locked(9222)
+                assert is_locked is False
+                assert pid is None
+                assert not lock_file.exists()
+
+    def test_find_nodriver_chromes_excludes_locked(self):
+        """find_nodriver_chromes with exclude_locked=True skips locked ports."""
+        from grok_web.browser import find_nodriver_chromes
+
+        with patch("grok_web.browser.is_temp_chrome_on_port") as mock_is_temp:
+            mock_is_temp.side_effect = lambda p: (p in [9222, 9223, 9224], None)
+
+            with patch("grok_web.browser.is_port_locked") as mock_is_locked:
+                # 9222 is locked, 9223 and 9224 are not
+                mock_is_locked.side_effect = lambda p: (p == 9222, 12345 if p == 9222 else None)
+
+                result = find_nodriver_chromes(port_range=(9222, 9225), exclude_locked=True)
+
+                assert 9222 not in result
+                assert 9223 in result
+                assert 9224 in result
