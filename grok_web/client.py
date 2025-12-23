@@ -1664,7 +1664,13 @@ class NodriverClient(AsyncClientBase):
 
         d = self._ui_delay
 
-        # Navigate to imagine page
+        # Navigate to imagine page (go to blank first to ensure clean state on reused Chrome)
+        current_url = await self._tab.evaluate("window.location.href")
+        if "grok.com/imagine" in str(current_url):
+            # Already on imagine page (reused Chrome) - force full reload
+            logger.debug("[create_image] Reused Chrome on imagine page, forcing reload")
+            await self._tab.reload()
+            await asyncio.sleep(2 * d)
         await self._tab.get(f"{self.BASE_URL}/imagine")
         await asyncio.sleep(3 * d)
 
@@ -1790,6 +1796,7 @@ class NodriverClient(AsyncClientBase):
 
         # Step 4: Fill the prompt input (TipTap/ProseMirror contenteditable div)
         escaped_prompt = prompt.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+        logger.debug(f"[create_image] Filling prompt ({len(prompt)} chars)")
         fill_result = await self._tab.evaluate(f"""
             (function() {{
                 const editor = document.querySelector('.tiptap.ProseMirror') ||
@@ -1805,13 +1812,17 @@ class NodriverClient(AsyncClientBase):
         """)
         if fill_result == "not found":
             raise GrokAPIError("Could not find prompt editor on imagine page")
+        logger.debug(f"[create_image] Prompt filled: {fill_result}")
 
         await asyncio.sleep(1 * d)
 
         # Step 5: Click the submit button
+        logger.debug("[create_image] Looking for submit button...")
         submit_btn = await self._tab.select('button[aria-label="提交"]')
         if submit_btn:
+            logger.debug("[create_image] Found submit button, clicking...")
             await submit_btn.mouse_click()
+            logger.debug("[create_image] Submit button clicked")
         else:
             raise GrokAPIError("Could not find submit button")
 

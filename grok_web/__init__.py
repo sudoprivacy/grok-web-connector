@@ -113,6 +113,7 @@ from pathlib import Path
 from .auth import load_cookies, save_cookies
 from .browser import find_nodriver_chromes
 from .client import SmartGrokClient
+from .selectors import select_all, timeout_selector, signal_file_selector
 from .exceptions import (
     GrokAPIError,
     GrokAuthError,
@@ -235,4 +236,8 @@ __all__ = [
     # Auth utilities
     "load_cookies",
     "save_cookies",
+    # Thumbnail selectors (for create_image)
+    "select_all",
+    "timeout_selector",
+    "signal_file_selector",
 ]
