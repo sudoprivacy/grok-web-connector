@@ -351,9 +351,69 @@ def is_port_locked(port: int) -> tuple[bool, int | None]:
         return False, None
 
 
+def is_chrome_in_use(port: int, timeout: float = 2.0) -> bool:
+    """Check if Chrome on this port is being used by another script via CDP.
+
+    This is more reliable than file-based locking because:
+    1. No cleanup needed - when script dies, CDP attachment is automatically released
+    2. No race conditions - CDP state is always current
+    3. No stale lock detection needed
+
+    Args:
+        port: Chrome debugging port to check
+        timeout: Connection timeout in seconds
+
+    Returns:
+        True if Chrome has attached debugger sessions (in use by another script),
+        False if no attached sessions or Chrome is not available.
+    """
+    import json
+    import urllib.request
+    import urllib.error
+
+    try:
+        # Get browser WebSocket URL
+        version_url = f"http://127.0.0.1:{port}/json/version"
+        req = urllib.request.Request(version_url)
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            version = json.loads(response.read())
+            browser_ws = version.get("webSocketDebuggerUrl")
+
+        if not browser_ws:
+            return False
+
+        # Use synchronous WebSocket to check targets
+        # We need to do this synchronously for compatibility with find_nodriver_chromes
+        import websocket
+
+        ws = websocket.create_connection(browser_ws, timeout=timeout)
+        try:
+            # Get all targets
+            ws.send(json.dumps({"id": 1, "method": "Target.getTargets"}))
+            response = json.loads(ws.recv())
+
+            # Check if any page targets are attached
+            for target in response.get("result", {}).get("targetInfos", []):
+                if target.get("type") == "page" and target.get("attached", False):
+                    logger.debug(
+                        f"Port {port} is in use: page '{target.get('title', 'unknown')[:30]}' "
+                        f"has attached debugger"
+                    )
+                    return True
+
+            return False
+        finally:
+            ws.close()
+
+    except Exception as e:
+        logger.debug(f"Could not check CDP state for port {port}: {e}")
+        return False
+
+
 def find_nodriver_chromes(
     port_range: tuple[int, int] = (9222, 9300),
     exclude_locked: bool = False,
+    exclude_in_use: bool = False,
 ) -> list[int]:
     """Find all ports with nodriver Chrome instances (temp profiles).
 
@@ -361,8 +421,11 @@ def find_nodriver_chromes(
 
     Args:
         port_range: Tuple of (start_port, end_port) to scan
-        exclude_locked: If True, skip ports that are locked by another process.
-                       This prevents stealing Chromes from other running scripts.
+        exclude_locked: If True, skip ports that are locked by another process
+                       via file-based locking. (Legacy method, less reliable)
+        exclude_in_use: If True, skip ports where Chrome has attached debugger
+                       sessions (detected via CDP). This is more reliable than
+                       file-based locking. (Recommended)
 
     Returns:
         List of ports with nodriver Chrome instances.
@@ -371,11 +434,19 @@ def find_nodriver_chromes(
     for port in range(port_range[0], port_range[1]):
         is_temp, _ = is_temp_chrome_on_port(port)
         if is_temp:
+            # Check file-based lock (legacy)
             if exclude_locked:
                 is_locked, locked_pid = is_port_locked(port)
                 if is_locked:
                     logger.debug(f"Skipping locked Chrome on port {port} (PID {locked_pid})")
                     continue
+
+            # Check CDP-based in-use detection (recommended)
+            if exclude_in_use:
+                if is_chrome_in_use(port):
+                    logger.debug(f"Skipping in-use Chrome on port {port} (has attached debugger)")
+                    continue
+
             nodriver_ports.append(port)
     return nodriver_ports
 

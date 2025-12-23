@@ -188,8 +188,12 @@ class BrowserWorkerPool:
 
         self._running = True
 
-        # Find existing nodriver Chrome instances to reuse (exclude locked ports)
-        self._available_nodriver_ports = find_nodriver_chromes(exclude_locked=True)
+        # Find existing nodriver Chrome instances to reuse (exclude in-use via CDP)
+        # CDP-based detection is more reliable than file-based locking:
+        # - No stale lock cleanup needed
+        # - No race conditions
+        # - Automatically releases when process dies
+        self._available_nodriver_ports = find_nodriver_chromes(exclude_in_use=True)
         if self._available_nodriver_ports:
             logger.info(
                 f"Found {len(self._available_nodriver_ports)} available nodriver Chrome: {self._available_nodriver_ports}"
