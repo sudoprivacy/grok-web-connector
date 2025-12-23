@@ -11,7 +11,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from ..browser import find_nodriver_chromes, get_available_port, get_pid_on_port
+from ..browser import (
+    find_nodriver_chromes,
+    get_available_port,
+    get_pid_on_port,
+    acquire_port_lock,
+    release_port_lock,
+    is_port_locked,
+)
 from ..client import NodriverClient
 from ..models import GrokCookies
 from .job import Job, JobResult, JobStatus
@@ -158,6 +165,9 @@ class BrowserWorkerPool:
         # Used to pause wait() timeout during selection
         self._jobs_in_selection: set[str] = set()
 
+        # Track ports we've acquired file locks for (for cross-process coordination)
+        self._locked_ports: set[int] = set()
+
     async def __aenter__(self) -> "BrowserWorkerPool":
         """Start the pool and all workers."""
         # Load state if state file exists
@@ -178,11 +188,11 @@ class BrowserWorkerPool:
 
         self._running = True
 
-        # Find existing nodriver Chrome instances to reuse
-        self._available_nodriver_ports = find_nodriver_chromes()
+        # Find existing nodriver Chrome instances to reuse (exclude locked ports)
+        self._available_nodriver_ports = find_nodriver_chromes(exclude_locked=True)
         if self._available_nodriver_ports:
             logger.info(
-                f"Found {len(self._available_nodriver_ports)} existing nodriver Chrome: {self._available_nodriver_ports}"
+                f"Found {len(self._available_nodriver_ports)} available nodriver Chrome: {self._available_nodriver_ports}"
             )
 
         # Start initial workers
@@ -226,6 +236,12 @@ class BrowserWorkerPool:
                 except Exception as e:
                     logger.warning(f"Error closing worker {worker.worker_id}: {e}")
 
+        # Release all port locks
+        for port in list(self._locked_ports):
+            if release_port_lock(port):
+                logger.debug(f"Released lock for port {port}")
+            self._locked_ports.discard(port)
+
         # Final state save
         self.save_state()
 
@@ -246,21 +262,33 @@ class BrowserWorkerPool:
         worker_id = self._next_worker_id
         self._next_worker_id += 1
 
-        # Smart port allocation
+        # Smart port allocation with file-based locking for cross-process coordination
         port = None
         reusing = False
 
-        # Try to reuse an existing nodriver Chrome
+        # Try to reuse an existing nodriver Chrome (with lock)
         while self._available_nodriver_ports:
             candidate = self._available_nodriver_ports.pop(0)
             if candidate not in self._used_ports:
-                port = candidate
-                reusing = True
-                break
+                # Try to acquire file lock for cross-process coordination
+                if acquire_port_lock(candidate):
+                    port = candidate
+                    self._locked_ports.add(port)
+                    reusing = True
+                    logger.debug(f"Acquired lock for port {port}")
+                    break
+                else:
+                    # Lock acquisition failed - port is used by another process
+                    logger.debug(f"Port {candidate} locked by another process, skipping")
 
-        # If no reusable Chrome, find an available port
+        # If no reusable Chrome, find an available port and acquire lock
         if port is None:
             port = get_available_port(exclude=self._used_ports)
+            if acquire_port_lock(port):
+                self._locked_ports.add(port)
+                logger.debug(f"Acquired lock for new port {port}")
+            else:
+                logger.warning(f"Failed to acquire lock for port {port}, proceeding anyway")
 
         self._used_ports.add(port)
 
@@ -344,12 +372,17 @@ class BrowserWorkerPool:
             except Exception as e:
                 logger.warning(f"Error closing worker {worker_id}: {e}")
 
-        # Release the port
-        self._used_ports.discard(worker.port)
+        # Release the port and its lock
+        port = worker.port
+        self._used_ports.discard(port)
+        if port in self._locked_ports:
+            if release_port_lock(port):
+                logger.debug(f"Released lock for port {port}")
+            self._locked_ports.discard(port)
 
         worker.mark_stopped()
         del self._workers[worker_id]
-        logger.info(f"Worker {worker_id} removed (port {worker.port} released)")
+        logger.info(f"Worker {worker_id} removed (port {port} released)")
 
     # =========================================================================
     # Job Management
