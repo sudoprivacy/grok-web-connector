@@ -562,6 +562,22 @@ class BrowserWorkerPool:
                                 f"{total_success}/{min_success} success from "
                                 f"{len(completed_jobs)} jobs"
                             )
+                            # Wait for any jobs still in selection phase to complete
+                            # This ensures we collect their post_ids
+                            if self._jobs_in_selection:
+                                logger.info(
+                                    f"[wait] Waiting for {len(self._jobs_in_selection)} "
+                                    f"jobs in selection phase to complete..."
+                                )
+                                while self._jobs_in_selection:
+                                    # Collect any newly completed jobs
+                                    for jid in list(pending_ids):
+                                        if jid in self._results:
+                                            result = self._results[jid]
+                                            completed_jobs[jid] = result
+                                            pending_ids.remove(jid)
+                                    await asyncio.sleep(0.5)
+                                logger.info("[wait] All selection phases completed")
                             return completed_jobs
 
             # All jobs completed? Return now
