@@ -774,31 +774,20 @@ class TestSharedTarget:
         assert pool._shared_targets[job1] is pool._shared_targets[job2]
 
 
-class TestPoolPortLocking:
-    """Tests for BrowserWorkerPool port locking integration."""
-
-    def test_pool_has_locked_ports_set(self):
-        """Pool initializes with empty _locked_ports set."""
-        from grok_web.pool import BrowserWorkerPool
-
-        pool = BrowserWorkerPool()
-        assert hasattr(pool, "_locked_ports")
-        assert isinstance(pool._locked_ports, set)
-        assert len(pool._locked_ports) == 0
+class TestPoolCDPDetection:
+    """Tests for BrowserWorkerPool CDP-based Chrome detection."""
 
     @pytest.mark.asyncio
-    async def test_add_worker_acquires_port_lock(self):
-        """add_worker acquires port lock for assigned port."""
+    async def test_add_worker_uses_available_ports(self):
+        """add_worker uses ports from _available_nodriver_ports."""
         from unittest.mock import AsyncMock, MagicMock, patch
 
         from grok_web.pool import BrowserWorkerPool
 
         pool = BrowserWorkerPool(num_workers=0)
+        pool._available_nodriver_ports = [9222, 9223]
 
         with (
-            patch("grok_web.pool.worker_pool.find_nodriver_chromes", return_value=[]),
-            patch("grok_web.pool.worker_pool.get_available_port", return_value=9222),
-            patch("grok_web.pool.worker_pool.acquire_port_lock", return_value=True) as mock_acquire,
             patch("grok_web.pool.worker_pool.NodriverClient") as mock_client_cls,
         ):
             mock_client = MagicMock()
@@ -809,25 +798,22 @@ class TestPoolPortLocking:
             pool._running = True
             await pool.add_worker()
 
-            mock_acquire.assert_called_once_with(9222)
-            assert 9222 in pool._locked_ports
+            # Should have used port 9222 (first available)
+            assert 9222 in pool._used_ports
+            assert 9222 not in pool._available_nodriver_ports
 
     @pytest.mark.asyncio
-    async def test_add_worker_skips_locked_ports(self):
-        """add_worker skips ports locked by other processes."""
+    async def test_add_worker_gets_new_port_when_none_available(self):
+        """add_worker gets new port when no nodriver Chrome available."""
         from unittest.mock import AsyncMock, MagicMock, patch
 
         from grok_web.pool import BrowserWorkerPool
 
         pool = BrowserWorkerPool(num_workers=0)
-        pool._available_nodriver_ports = [9222, 9223, 9224]
-
-        def mock_acquire(port):
-            # 9222 and 9223 are locked, 9224 is available
-            return port == 9224
+        pool._available_nodriver_ports = []
 
         with (
-            patch("grok_web.pool.worker_pool.acquire_port_lock", side_effect=mock_acquire),
+            patch("grok_web.pool.worker_pool.get_available_port", return_value=9225),
             patch("grok_web.pool.worker_pool.NodriverClient") as mock_client_cls,
         ):
             mock_client = MagicMock()
@@ -838,15 +824,12 @@ class TestPoolPortLocking:
             pool._running = True
             await pool.add_worker()
 
-            # Should have acquired lock on 9224 (the only available one)
-            assert 9224 in pool._locked_ports
-            assert 9222 not in pool._locked_ports
-            assert 9223 not in pool._locked_ports
+            assert 9225 in pool._used_ports
 
     @pytest.mark.asyncio
-    async def test_remove_worker_releases_port_lock(self):
-        """remove_worker releases port lock when removing worker."""
-        from unittest.mock import AsyncMock, MagicMock, patch
+    async def test_remove_worker_releases_port(self):
+        """remove_worker releases port from _used_ports."""
+        from unittest.mock import AsyncMock, MagicMock
 
         from grok_web.pool import BrowserWorkerPool
         from grok_web.pool.worker import Worker, WorkerStatus
@@ -862,63 +845,7 @@ class TestPoolPortLocking:
         worker.client = mock_client
         pool._workers[0] = worker
         pool._used_ports.add(9222)
-        pool._locked_ports.add(9222)
 
-        with patch("grok_web.pool.worker_pool.release_port_lock", return_value=True) as mock_release:
-            await pool.remove_worker(0)
+        await pool.remove_worker(0)
 
-            mock_release.assert_called_once_with(9222)
-            assert 9222 not in pool._locked_ports
-
-    @pytest.mark.asyncio
-    async def test_pool_exit_releases_all_port_locks(self):
-        """Pool __aexit__ releases all acquired port locks."""
-        from unittest.mock import AsyncMock, MagicMock, patch
-
-        from grok_web.pool import BrowserWorkerPool
-        from grok_web.pool.worker import Worker, WorkerStatus
-
-        pool = BrowserWorkerPool(num_workers=0)
-        pool._running = True
-
-        # Simulate having acquired locks on multiple ports
-        pool._locked_ports = {9222, 9223, 9224}
-
-        # Add mock workers
-        for i, port in enumerate([9222, 9223, 9224]):
-            worker = Worker(worker_id=i, port=port)
-            worker.status = WorkerStatus.IDLE
-            mock_client = MagicMock()
-            mock_client.__aexit__ = AsyncMock(return_value=None)
-            mock_client._chrome_process = None
-            worker.client = mock_client
-            pool._workers[i] = worker
-
-        released_ports = []
-
-        def mock_release(port):
-            released_ports.append(port)
-            return True
-
-        with patch("grok_web.pool.worker_pool.release_port_lock", side_effect=mock_release):
-            await pool.__aexit__(None, None, None)
-
-            # All ports should have been released
-            assert set(released_ports) == {9222, 9223, 9224}
-            assert len(pool._locked_ports) == 0
-
-    def test_find_nodriver_chromes_called_with_exclude_locked(self):
-        """Pool __aenter__ calls find_nodriver_chromes with exclude_locked=True."""
-        from unittest.mock import patch
-
-        from grok_web.pool import BrowserWorkerPool
-
-        pool = BrowserWorkerPool(num_workers=0)
-
-        with patch("grok_web.pool.worker_pool.find_nodriver_chromes", return_value=[]) as mock_find:
-            # We can't fully test __aenter__ without mocking more, but we can verify
-            # that the import is correct by checking the pool's behavior
-            pool._available_nodriver_ports = []
-
-        # The actual call happens in __aenter__, which we're not fully testing here
-        # But we've verified the import exists and the pool is properly initialized
+        assert 9222 not in pool._used_ports

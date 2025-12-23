@@ -15,9 +15,6 @@ from ..browser import (
     find_nodriver_chromes,
     get_available_port,
     get_pid_on_port,
-    acquire_port_lock,
-    release_port_lock,
-    is_port_locked,
 )
 from ..client import NodriverClient
 from ..models import GrokCookies
@@ -165,9 +162,6 @@ class BrowserWorkerPool:
         # Used to pause wait() timeout during selection
         self._jobs_in_selection: set[str] = set()
 
-        # Track ports we've acquired file locks for (for cross-process coordination)
-        self._locked_ports: set[int] = set()
-
     async def __aenter__(self) -> "BrowserWorkerPool":
         """Start the pool and all workers."""
         # Load state if state file exists
@@ -240,12 +234,6 @@ class BrowserWorkerPool:
                 except Exception as e:
                     logger.warning(f"Error closing worker {worker.worker_id}: {e}")
 
-        # Release all port locks
-        for port in list(self._locked_ports):
-            if release_port_lock(port):
-                logger.debug(f"Released lock for port {port}")
-            self._locked_ports.discard(port)
-
         # Final state save
         self.save_state()
 
@@ -257,7 +245,7 @@ class BrowserWorkerPool:
         """Add a new worker to the pool.
 
         Port allocation strategy:
-        1. First, try to reuse existing nodriver Chrome instances
+        1. First, try to reuse existing nodriver Chrome instances (exclude in-use via CDP)
         2. If none available, find an available port and launch new Chrome
 
         Returns:
@@ -266,33 +254,21 @@ class BrowserWorkerPool:
         worker_id = self._next_worker_id
         self._next_worker_id += 1
 
-        # Smart port allocation with file-based locking for cross-process coordination
+        # Smart port allocation - CDP-based detection prevents contention
         port = None
         reusing = False
 
-        # Try to reuse an existing nodriver Chrome (with lock)
+        # Try to reuse an existing nodriver Chrome
         while self._available_nodriver_ports:
             candidate = self._available_nodriver_ports.pop(0)
             if candidate not in self._used_ports:
-                # Try to acquire file lock for cross-process coordination
-                if acquire_port_lock(candidate):
-                    port = candidate
-                    self._locked_ports.add(port)
-                    reusing = True
-                    logger.debug(f"Acquired lock for port {port}")
-                    break
-                else:
-                    # Lock acquisition failed - port is used by another process
-                    logger.debug(f"Port {candidate} locked by another process, skipping")
+                port = candidate
+                reusing = True
+                break
 
-        # If no reusable Chrome, find an available port and acquire lock
+        # If no reusable Chrome, find an available port
         if port is None:
             port = get_available_port(exclude=self._used_ports)
-            if acquire_port_lock(port):
-                self._locked_ports.add(port)
-                logger.debug(f"Acquired lock for new port {port}")
-            else:
-                logger.warning(f"Failed to acquire lock for port {port}, proceeding anyway")
 
         self._used_ports.add(port)
 
@@ -376,13 +352,9 @@ class BrowserWorkerPool:
             except Exception as e:
                 logger.warning(f"Error closing worker {worker_id}: {e}")
 
-        # Release the port and its lock
+        # Release the port
         port = worker.port
         self._used_ports.discard(port)
-        if port in self._locked_ports:
-            if release_port_lock(port):
-                logger.debug(f"Released lock for port {port}")
-            self._locked_ports.discard(port)
 
         worker.mark_stopped()
         del self._workers[worker_id]
