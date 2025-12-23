@@ -154,6 +154,10 @@ class BrowserWorkerPool:
         self._held_jobs: dict[str, Job] = {}  # job_id -> Job (not in queue yet)
         self._held_jobs_lock = asyncio.Lock()  # Protects _held_jobs access
 
+        # Track jobs currently in thumbnail_selector phase (human selection)
+        # Used to pause wait() timeout during selection
+        self._jobs_in_selection: set[str] = set()
+
     async def __aenter__(self) -> "BrowserWorkerPool":
         """Start the pool and all workers."""
         # Load state if state file exists
@@ -526,18 +530,8 @@ class BrowserWorkerPool:
         pending_ids = set(job_ids)
 
         while pending_ids:
-            # Check timeout
-            if timeout is not None:
-                elapsed = asyncio.get_event_loop().time() - start_time
-                if elapsed >= timeout:
-                    if min_success is not None:
-                        raise asyncio.TimeoutError(
-                            f"Timeout waiting for min_success. "
-                            f"Got {total_success}/{min_success} success."
-                        )
-                    raise asyncio.TimeoutError("Timeout waiting for jobs")
-
-            # Check for newly completed jobs
+            # Check for newly completed jobs FIRST (before timeout check)
+            # This ensures we don't timeout right after selection phase ends
             for job_id in list(pending_ids):
                 if job_id in self._results:
                     result = self._results[job_id]
@@ -560,6 +554,21 @@ class BrowserWorkerPool:
                                 f"{len(completed_jobs)} jobs"
                             )
                             return completed_jobs
+
+            # All jobs completed? Return now
+            if not pending_ids:
+                break
+
+            # Check timeout (skip if any jobs are in human selection phase)
+            if timeout is not None and not self._jobs_in_selection:
+                elapsed = asyncio.get_event_loop().time() - start_time
+                if elapsed >= timeout:
+                    if min_success is not None:
+                        raise asyncio.TimeoutError(
+                            f"Timeout waiting for min_success. "
+                            f"Got {total_success}/{min_success} success."
+                        )
+                    raise asyncio.TimeoutError("Timeout waiting for jobs")
 
             await asyncio.sleep(0.5)
 
@@ -767,6 +776,34 @@ class BrowserWorkerPool:
             return should_continue
         return callback
 
+    def _wrap_selector(
+        self,
+        job_id: str,
+        original_selector: Callable,
+    ) -> Callable:
+        """Wrap thumbnail_selector to track selection phase.
+
+        This wrapper adds job_id to _jobs_in_selection when selection starts
+        and removes it when selection ends. wait() uses this to pause timeout
+        during human selection phases.
+
+        Args:
+            job_id: The job ID to track
+            original_selector: The original thumbnail_selector callback
+
+        Returns:
+            Wrapped selector that tracks selection phase.
+        """
+        async def wrapped_selector(item_count: int, scan_favorites) -> list[int]:
+            self._jobs_in_selection.add(job_id)
+            logger.info(f"[selection] Job {job_id[:8]}... entering selection phase")
+            try:
+                return await original_selector(item_count, scan_favorites)
+            finally:
+                self._jobs_in_selection.discard(job_id)
+                logger.info(f"[selection] Job {job_id[:8]}... exited selection phase")
+        return wrapped_selector
+
     def _serialize_result(self, result: Any) -> Any:
         """Convert result to JSON-serializable format.
 
@@ -877,6 +914,11 @@ class BrowserWorkerPool:
                     # If user DID set min_success, honor both (callback AND min_success)
                     if "min_success" in sig.parameters and "min_success" not in kwargs:
                         kwargs["min_success"] = shared_target.target
+
+            # Wrap thumbnail_selector to track selection phase (for timeout handling)
+            original_selector = kwargs.get("thumbnail_selector")
+            if original_selector is not None:
+                kwargs["thumbnail_selector"] = self._wrap_selector(job.job_id, original_selector)
 
             # Call the method with job args/kwargs
             result = await method(*job.args, **kwargs)

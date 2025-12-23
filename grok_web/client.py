@@ -1956,7 +1956,26 @@ class NodriverClient(AsyncClientBase):
                 """Capture POST /rest/media/post/like to get post_ids."""
                 url = event.request.url
                 if MEDIA_POST_LIKE_ENDPOINT in url:
+                    logger.info(f"[post_id_capture] Detected like request: {url}")
                     post_data = getattr(event.request, "post_data", None)
+                    has_post_data = getattr(event.request, "has_post_data", False)
+                    logger.debug(
+                        f"[post_id_capture] has_post_data={has_post_data}, "
+                        f"post_data={'present' if post_data else 'None'}"
+                    )
+
+                    # Try to get post_data from request body
+                    if not post_data and has_post_data:
+                        # post_data may be empty in RequestWillBeSent, try to fetch it
+                        try:
+                            result = await self._tab.send(
+                                cdp.network.get_request_post_data(event.request_id)
+                            )
+                            post_data = result
+                            logger.debug(f"[post_id_capture] Fetched post_data: {post_data[:100] if post_data else 'None'}...")
+                        except Exception as e:
+                            logger.warning(f"[post_id_capture] Failed to get post data: {e}")
+
                     if post_data:
                         try:
                             import re
@@ -1965,6 +1984,7 @@ class NodriverClient(AsyncClientBase):
                             post_id = data.get("id")
                             if post_id and post_id not in captured_like_ids:
                                 captured_like_ids.append(post_id)
+                                logger.info(f"[post_id_capture] Captured post_id: {post_id}")
                         except json_mod.JSONDecodeError:
                             # Fallback: regex extraction
                             match = re.search(r'"id"\s*:\s*"([^"]+)"', post_data)
@@ -1972,6 +1992,7 @@ class NodriverClient(AsyncClientBase):
                                 post_id = match.group(1)
                                 if post_id not in captured_like_ids:
                                     captured_like_ids.append(post_id)
+                                    logger.info(f"[post_id_capture] Captured post_id (regex): {post_id}")
 
             self._tab.add_handler(cdp.network.RequestWillBeSent, capture_like_request)
 
