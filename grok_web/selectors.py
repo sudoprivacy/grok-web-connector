@@ -23,6 +23,9 @@ import asyncio
 import os
 from typing import Callable, Awaitable
 
+# Track which signal files have been cleaned up this process
+_signal_cleaned_paths: set[str] = set()
+
 
 def select_all() -> Callable[[int, Callable], Awaitable[list[int]]]:
     """Select all generated images.
@@ -88,7 +91,8 @@ def signal_file_selector(
     """Wait for a signal file to be created, then collect favorited items.
 
     Waits indefinitely for the user to create a signal file, allowing
-    unlimited time for selection. The signal file is deleted after reading.
+    unlimited time for selection. Safe for multi-worker scenarios - the
+    signal file is only cleaned at the start of a new process run.
 
     Args:
         signal_path: Path to the signal file (default: C:/tmp/done)
@@ -111,9 +115,11 @@ def signal_file_selector(
         print(f"When done, run:  echo . > {signal_path}")
         print("=" * 50 + "\n")
 
-        # Remove old signal file
-        if os.path.exists(signal_path):
-            os.remove(signal_path)
+        # Remove old signal file only once per path per process (first worker to enter)
+        if signal_path not in _signal_cleaned_paths:
+            _signal_cleaned_paths.add(signal_path)
+            if os.path.exists(signal_path):
+                os.remove(signal_path)
 
         # Wait for signal file
         while not os.path.exists(signal_path):
@@ -128,9 +134,8 @@ def signal_file_selector(
         else:
             print("[Selection] No favorites detected (post_ids captured via network)")
 
-        # Clean up signal file
-        if os.path.exists(signal_path):
-            os.remove(signal_path)
+        # Note: Don't delete signal file here - other workers may still need it
+        # The file will be deleted at the start of the next run
 
         return favorited
 
