@@ -12,10 +12,8 @@ from pathlib import Path
 from typing import Any, Literal
 
 from ..browser import (
-    find_nodriver_chromes,
     get_available_port,
     get_pid_on_port,
-    is_chrome_in_use,
 )
 from ..client import NodriverClient
 from ..models import GrokCookies
@@ -137,8 +135,7 @@ class BrowserWorkerPool:
         self._workers: dict[int, Worker] = {}
         self._worker_tasks: dict[int, asyncio.Task] = {}
         self._next_worker_id = 0
-        self._used_ports: set[int] = set()  # Ports currently in use by workers
-        self._available_nodriver_ports: list[int] = []  # Existing nodriver Chrome to reuse
+        self._used_ports: set[int] = set()  # Ports assigned to workers in this pool
 
         # Job management - two queues for priority support
         self._job_queue: asyncio.Queue[Job] = asyncio.Queue()  # Normal priority
@@ -183,18 +180,8 @@ class BrowserWorkerPool:
 
         self._running = True
 
-        # Find existing nodriver Chrome instances to reuse (exclude in-use via CDP)
-        # CDP-based detection is more reliable than file-based locking:
-        # - No stale lock cleanup needed
-        # - No race conditions
-        # - Automatically releases when process dies
-        self._available_nodriver_ports = find_nodriver_chromes()
-        if self._available_nodriver_ports:
-            logger.info(
-                f"Found {len(self._available_nodriver_ports)} available nodriver Chrome: {self._available_nodriver_ports}"
-            )
-
         # Start initial workers
+        # Port allocation and CDP contention handled by ensure_chrome_running()
         for _ in range(self._num_workers):
             await self.add_worker()
 
@@ -245,9 +232,8 @@ class BrowserWorkerPool:
     async def add_worker(self) -> int:
         """Add a new worker to the pool.
 
-        Port allocation strategy:
-        1. First, try to reuse existing nodriver Chrome instances (exclude in-use via CDP)
-        2. If none available, find an available port and launch new Chrome
+        Port allocation: finds next available port, CDP contention handled by
+        ensure_chrome_running() which auto-finds another port if needed.
 
         Returns:
             worker_id of the new worker
@@ -255,27 +241,9 @@ class BrowserWorkerPool:
         worker_id = self._next_worker_id
         self._next_worker_id += 1
 
-        # Smart port allocation - CDP-based detection prevents contention
-        port = None
-        reusing = False
-
-        # Try to reuse an existing nodriver Chrome
-        while self._available_nodriver_ports:
-            candidate = self._available_nodriver_ports.pop(0)
-            if candidate not in self._used_ports:
-                # Re-check CDP in-use status to handle race conditions
-                # Another process may have attached to this Chrome since we scanned
-                if is_chrome_in_use(candidate):
-                    logger.debug(f"Port {candidate} now in use by another process, skipping")
-                    continue
-                port = candidate
-                reusing = True
-                break
-
-        # If no reusable Chrome, find an available port
-        if port is None:
-            port = get_available_port(exclude=self._used_ports)
-
+        # Get next available port (exclude ports already assigned to other workers in this pool)
+        # CDP-based contention with other processes is handled by ensure_chrome_running()
+        port = get_available_port(exclude=self._used_ports)
         self._used_ports.add(port)
 
         # Create worker
@@ -294,8 +262,7 @@ class BrowserWorkerPool:
         try:
             await client.__aenter__()
             worker.client = client
-            action = "reusing" if reusing else "launched new"
-            logger.info(f"Worker {worker_id} started ({action} Chrome on port {port})")
+            logger.info(f"Worker {worker_id} started on port {port}")
         except Exception as e:
             logger.error(f"Failed to start worker {worker_id}: {e}")
             worker.status = WorkerStatus.ERROR

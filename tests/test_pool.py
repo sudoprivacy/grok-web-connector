@@ -234,7 +234,6 @@ class TestBrowserWorkerPoolInit:
         assert pool._max_retries == -1
         assert pool._running is False
         assert pool._used_ports == set()
-        assert pool._available_nodriver_ports == []
 
     def test_pool_init_custom(self):
         """Pool accepts custom parameters."""
@@ -775,42 +774,16 @@ class TestSharedTarget:
 
 
 class TestPoolCDPDetection:
-    """Tests for BrowserWorkerPool CDP-based Chrome detection."""
+    """Tests for BrowserWorkerPool port allocation."""
 
     @pytest.mark.asyncio
-    async def test_add_worker_uses_available_ports(self):
-        """add_worker uses ports from _available_nodriver_ports."""
+    async def test_add_worker_uses_get_available_port(self):
+        """add_worker uses get_available_port for port allocation."""
         from unittest.mock import AsyncMock, MagicMock, patch
 
         from grok_web.pool import BrowserWorkerPool
 
         pool = BrowserWorkerPool(num_workers=0)
-        pool._available_nodriver_ports = [9222, 9223]
-
-        with (
-            patch("grok_web.pool.worker_pool.NodriverClient") as mock_client_cls,
-        ):
-            mock_client = MagicMock()
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=None)
-            mock_client_cls.return_value = mock_client
-
-            pool._running = True
-            await pool.add_worker()
-
-            # Should have used port 9222 (first available)
-            assert 9222 in pool._used_ports
-            assert 9222 not in pool._available_nodriver_ports
-
-    @pytest.mark.asyncio
-    async def test_add_worker_gets_new_port_when_none_available(self):
-        """add_worker gets new port when no nodriver Chrome available."""
-        from unittest.mock import AsyncMock, MagicMock, patch
-
-        from grok_web.pool import BrowserWorkerPool
-
-        pool = BrowserWorkerPool(num_workers=0)
-        pool._available_nodriver_ports = []
 
         with (
             patch("grok_web.pool.worker_pool.get_available_port", return_value=9225),
@@ -824,6 +797,7 @@ class TestPoolCDPDetection:
             pool._running = True
             await pool.add_worker()
 
+            # Port should be tracked in _used_ports
             assert 9225 in pool._used_ports
 
     @pytest.mark.asyncio

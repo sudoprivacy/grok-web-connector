@@ -140,14 +140,6 @@ from .pool import BrowserWorkerPool
 
 __version__ = "0.6.0"
 
-# Track ports actively used by clients in this process
-_active_ports: set[int] = set()
-
-
-def _release_port(port: int) -> None:
-    """Release a port back to the available pool."""
-    _active_ports.discard(port)
-
 
 def get_client(
     cookies: GrokCookies | None = None,
@@ -163,16 +155,16 @@ def get_client(
     Uses HTTP for fast read operations and automatically falls back
     to browser when needed (e.g., video creation blocked by 403).
 
-    Port allocation strategy (when browser_port is not specified):
-    1. First, try to reuse an existing Chrome with remote debugging enabled
-       (excluding those with attached debuggers via CDP detection)
-    2. If none available, SmartGrokClient will auto-launch a new Chrome
+    Port allocation is handled automatically by ensure_chrome_running():
+    - If browser_port is specified, uses that port (auto-finds another if in use)
+    - If browser_port is None, defaults to 9222 (auto-finds another if in use)
+    - CDP-based detection prevents connecting to Chrome already in use
 
     Args:
         cookies: Pre-loaded GrokCookies (optional, loads from config if None)
         config_path: Path to config file (default: ~/.grok-config.json)
-        browser_host: Chrome debugging host (optional, auto-finds if not set)
-        browser_port: Chrome debugging port (optional, auto-finds if not set)
+        browser_host: Chrome debugging host (optional, defaults to 127.0.0.1)
+        browser_port: Chrome debugging port (optional, defaults to 9222)
         headless: Run browser in headless mode (default: False)
 
     Returns:
@@ -187,33 +179,13 @@ def get_client(
             # or txt2vid
             video = await client.create_video("a cat playing with yarn")
     """
-    # Auto-find available Chrome if port not specified
-    # Use exclude_in_use=True to avoid Chrome instances with attached debuggers
-    allocated_port = None
-    if browser_port is None:
-        available_ports = find_nodriver_chromes(exclude_in_use=True)
-        for port in available_ports:
-            if port not in _active_ports:
-                browser_port = port
-                browser_host = browser_host or "127.0.0.1"
-                allocated_port = port
-                _active_ports.add(port)
-                break
-
-    client = SmartGrokClient(
+    return SmartGrokClient(
         cookies=cookies,
         config_path=config_path,
         browser_host=browser_host,
         browser_port=browser_port,
         browser_headless=headless,
     )
-
-    # Store allocated port for release on exit
-    if allocated_port is not None:
-        client._allocated_port = allocated_port
-        client._release_port_callback = _release_port
-
-    return client
 
 
 __all__ = [
