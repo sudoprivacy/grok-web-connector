@@ -15,6 +15,7 @@ from ..browser import (
     find_nodriver_chromes,
     get_available_port,
     get_pid_on_port,
+    is_chrome_in_use,
 )
 from ..client import NodriverClient
 from ..models import GrokCookies
@@ -187,7 +188,7 @@ class BrowserWorkerPool:
         # - No stale lock cleanup needed
         # - No race conditions
         # - Automatically releases when process dies
-        self._available_nodriver_ports = find_nodriver_chromes(exclude_in_use=True)
+        self._available_nodriver_ports = find_nodriver_chromes()
         if self._available_nodriver_ports:
             logger.info(
                 f"Found {len(self._available_nodriver_ports)} available nodriver Chrome: {self._available_nodriver_ports}"
@@ -262,6 +263,11 @@ class BrowserWorkerPool:
         while self._available_nodriver_ports:
             candidate = self._available_nodriver_ports.pop(0)
             if candidate not in self._used_ports:
+                # Re-check CDP in-use status to handle race conditions
+                # Another process may have attached to this Chrome since we scanned
+                if is_chrome_in_use(candidate):
+                    logger.debug(f"Port {candidate} now in use by another process, skipping")
+                    continue
                 port = candidate
                 reusing = True
                 break

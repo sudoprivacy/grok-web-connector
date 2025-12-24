@@ -282,7 +282,7 @@ def is_chrome_in_use(port: int, timeout: float = 2.0) -> bool:
 
 def find_nodriver_chromes(
     port_range: tuple[int, int] = (9222, 9300),
-    exclude_in_use: bool = False,
+    exclude_in_use: bool = True,
 ) -> list[int]:
     """Find all ports with nodriver Chrome instances (temp profiles).
 
@@ -290,9 +290,9 @@ def find_nodriver_chromes(
 
     Args:
         port_range: Tuple of (start_port, end_port) to scan
-        exclude_in_use: If True, skip ports where Chrome has attached debugger
-                       sessions (detected via CDP). Requires Chrome to be launched
-                       with --remote-allow-origins=* flag.
+        exclude_in_use: If True (default), skip ports where Chrome has attached
+                       debugger sessions (detected via CDP). Requires Chrome to
+                       be launched with --remote-allow-origins=* flag.
 
     Returns:
         List of ports with nodriver Chrome instances.
