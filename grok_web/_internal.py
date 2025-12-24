@@ -689,9 +689,27 @@ class SyncClientBase(ResponseParser, ABC):
         )
 
         if old_match:
-            # Old format: we have parent_id, fetch details directly
-            parent_id = old_match.group(1)
-            return self._match_by_parent_id(parent_id, local_size, filename)
+            # Old format: grok-video-{uuid}.mp4
+            # The UUID could be: (1) parent_id, (2) video_id, or (3) unknown grok internal ID
+            extracted_uuid = old_match.group(1)
+
+            # Try 1: Treat as parent_id
+            try:
+                return self._match_by_parent_id(extracted_uuid, local_size, filename)
+            except GrokNotFoundError:
+                pass  # Parent doesn't exist, try next
+
+            # Try 2: Treat as video_id
+            try:
+                return self._match_by_video_id(extracted_uuid, local_size, filename)
+            except (GrokNotFoundError, GrokAPIError):
+                pass  # Video doesn't exist, try fallback
+
+            # Try 3: Fallback - search all liked posts by file size
+            return self._match_by_file_size_via_favorites(
+                local_size, filename, hint_uuid=extracted_uuid
+            )
+
         elif web_match:
             # Web format: we have video_id, need to search favorites
             video_id = web_match.group(1)
@@ -787,6 +805,75 @@ class SyncClientBase(ResponseParser, ABC):
         self._logic.verify_file_size_match(video_id, filename, local_size, web_size)
         return self._logic.build_video_match_result(
             parent_id, video_id, is_parent_video, details, local_size
+        )
+
+    def _match_by_file_size_via_favorites(
+        self, local_size: int, filename: str, hint_uuid: str | None = None, max_posts: int = 200
+    ) -> VideoMatchResult:
+        """Fallback: Search all liked posts to find video by file size.
+
+        This handles the case where the UUID in the filename doesn't match any
+        known parent_id or video_id (e.g., grok.com uses internal session IDs
+        for download filenames).
+        """
+        posts = self.list_posts(limit=max_posts, source="MEDIA_POST_SOURCE_LIKED")
+
+        for post_summary in posts:
+            try:
+                details = self.get_post_details(post_summary.id)
+
+                # Check parent video (for txt2vid posts)
+                if details.mode == GenerationMode.TEXT_TO_VIDEO and details.hd_media_url:
+                    try:
+                        web_size = self.get_asset_file_size(details.hd_media_url)
+                        if web_size == local_size:
+                            return VideoMatchResult(
+                                parent_id=details.id,
+                                video_id=details.id,
+                                is_parent_video=True,
+                                mode=details.mode,
+                                original_prompt=details.original_prompt,
+                                file_size=local_size,
+                                new_filename=f"grok-video_{details.id}_{details.id}.mp4",
+                            )
+                    except Exception:
+                        pass
+
+                # Check all children
+                for child in details.children:
+                    url = child.hd_media_url or child.media_url
+                    if not url:
+                        continue
+
+                    try:
+                        web_size = self.get_asset_file_size(url)
+                        if web_size == local_size:
+                            return VideoMatchResult(
+                                parent_id=post_summary.id,
+                                video_id=child.id,
+                                is_parent_video=False,
+                                mode=details.mode,
+                                original_prompt=child.original_prompt,
+                                file_size=local_size,
+                                new_filename=f"grok-video_{post_summary.id}_{child.id}.mp4",
+                            )
+                    except Exception:
+                        continue
+
+            except Exception:
+                continue
+
+        # Not found
+        hint_msg = f" (extracted UUID: {hint_uuid})" if hint_uuid else ""
+        raise GrokAPIError(
+            f"No matching video found by file size in recent {max_posts} favorites.\n"
+            f"Local file: {filename}{hint_msg}\n"
+            f"Local size: {local_size} bytes\n\n"
+            f"The UUID in the filename doesn't match any known post or video ID.\n"
+            f"Possible causes:\n"
+            f"1. The video's parent post is not in your favorites - add it first\n"
+            f"2. The video may have been deleted from grok.com\n"
+            f"3. Try increasing max_posts if you have many favorites"
         )
 
     # =========================================================================
@@ -1116,9 +1203,27 @@ class AsyncClientBase(ResponseParser, ABC):
         )
 
         if old_match:
-            # Old format: we have parent_id, fetch details directly
-            parent_id = old_match.group(1)
-            return await self._match_by_parent_id(parent_id, local_size, filename)
+            # Old format: grok-video-{uuid}.mp4
+            # The UUID could be: (1) parent_id, (2) video_id, or (3) unknown grok internal ID
+            extracted_uuid = old_match.group(1)
+
+            # Try 1: Treat as parent_id
+            try:
+                return await self._match_by_parent_id(extracted_uuid, local_size, filename)
+            except GrokNotFoundError:
+                pass  # Parent doesn't exist, try next
+
+            # Try 2: Treat as video_id
+            try:
+                return await self._match_by_video_id(extracted_uuid, local_size, filename)
+            except (GrokNotFoundError, GrokAPIError):
+                pass  # Video doesn't exist, try fallback
+
+            # Try 3: Fallback - search all liked posts by file size
+            return await self._match_by_file_size_via_favorites(
+                local_size, filename, hint_uuid=extracted_uuid
+            )
+
         elif web_match:
             # Web format: we have video_id, need to search favorites
             video_id = web_match.group(1)
@@ -1223,7 +1328,7 @@ class AsyncClientBase(ResponseParser, ABC):
         )
 
     async def _match_by_video_id_via_favorites(
-        self, video_id: str, local_size: int, filename: str, max_posts: int = 100
+        self, video_id: str, local_size: int, filename: str, max_posts: int = 200
     ) -> VideoMatchResult:
         """Fallback: Search recent favorites to find parent of orphaned child video.
 
@@ -1294,6 +1399,87 @@ class AsyncClientBase(ResponseParser, ABC):
             f"1. The video may be in older favorites - increase search limit\n"
             f"2. Manually provide parent_id if you know it\n"
             f"3. Visit https://grok.com/imagine/post/{video_id} to check if it exists"
+        )
+
+    async def _match_by_file_size_via_favorites(
+        self, local_size: int, filename: str, hint_uuid: str | None = None, max_posts: int = 200
+    ) -> VideoMatchResult:
+        """Fallback: Search all liked posts to find video by file size.
+
+        This handles the case where the UUID in the filename doesn't match any
+        known parent_id or video_id (e.g., grok.com uses internal session IDs
+        for download filenames).
+
+        Args:
+            local_size: Local file size in bytes
+            filename: Local filename (for error messages)
+            hint_uuid: The UUID extracted from filename (for logging)
+            max_posts: Maximum number of posts to search (default: 100)
+
+        Returns:
+            VideoMatchResult if found
+
+        Raises:
+            GrokAPIError: If no matching video found by file size
+        """
+        posts = await self.list_posts(limit=max_posts, source="MEDIA_POST_SOURCE_LIKED")
+
+        for post_summary in posts:
+            try:
+                details = await self.get_post_details(post_summary.id)
+
+                # Check parent video (for txt2vid posts)
+                if details.mode == GenerationMode.TEXT_TO_VIDEO and details.hd_media_url:
+                    try:
+                        web_size = await self.get_asset_file_size(details.hd_media_url)
+                        if web_size == local_size:
+                            return VideoMatchResult(
+                                parent_id=details.id,
+                                video_id=details.id,
+                                is_parent_video=True,
+                                mode=details.mode,
+                                original_prompt=details.original_prompt,
+                                file_size=local_size,
+                                new_filename=f"grok-video_{details.id}_{details.id}.mp4",
+                            )
+                    except Exception:
+                        pass
+
+                # Check all children
+                for child in details.children:
+                    url = child.hd_media_url or child.media_url
+                    if not url:
+                        continue
+
+                    try:
+                        web_size = await self.get_asset_file_size(url)
+                        if web_size == local_size:
+                            return VideoMatchResult(
+                                parent_id=post_summary.id,
+                                video_id=child.id,
+                                is_parent_video=False,
+                                mode=details.mode,
+                                original_prompt=child.original_prompt,
+                                file_size=local_size,
+                                new_filename=f"grok-video_{post_summary.id}_{child.id}.mp4",
+                            )
+                    except Exception:
+                        continue
+
+            except Exception:
+                continue
+
+        # Not found
+        hint_msg = f" (extracted UUID: {hint_uuid})" if hint_uuid else ""
+        raise GrokAPIError(
+            f"No matching video found by file size in recent {max_posts} favorites.\n"
+            f"Local file: {filename}{hint_msg}\n"
+            f"Local size: {local_size} bytes\n\n"
+            f"The UUID in the filename doesn't match any known post or video ID.\n"
+            f"Possible causes:\n"
+            f"1. The video's parent post is not in your favorites - add it first\n"
+            f"2. The video may have been deleted from grok.com\n"
+            f"3. Try increasing max_posts if you have many favorites"
         )
 
     # =========================================================================
