@@ -4,7 +4,6 @@ Handles automatic Chrome launching with isolated profiles for reliable automatio
 """
 
 import asyncio
-import datetime
 import logging
 import os
 import platform
@@ -16,15 +15,6 @@ import tempfile
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
-
-# Debug: Write to file at import time to verify MCP is using new code
-_BROWSER_PY_VERSION = "v35-unified-popen"
-try:
-    _debug_path = Path(tempfile.gettempdir()) / "grok_browser_import.log"
-    with open(_debug_path, "a") as f:
-        f.write(f"[{datetime.datetime.now().isoformat()}] browser.py {_BROWSER_PY_VERSION} imported\n")
-except Exception:
-    pass
 
 # Default debugging port for Chrome
 DEFAULT_DEBUG_PORT = 9222
@@ -480,52 +470,28 @@ async def ensure_chrome_running(
             logger.debug(f"Reusing existing Chrome on port {port}")
             return None, port
 
-    # Launch Chrome with debug logging to temp file
-    debug_log_path = Path(tempfile.gettempdir()) / "grok_chrome_debug.log"
-
-    def debug_log(msg: str) -> None:
-        """Write debug message to temp file for MCP debugging."""
-        try:
-            with open(debug_log_path, "a") as f:
-                import datetime
-                f.write(f"[{datetime.datetime.now().isoformat()}] {msg}\n")
-        except Exception:
-            pass
-
-    debug_log(f"=== Starting Chrome launch on port {port} ===")
-    debug_log(f"host={host}, headless={headless}, timeout={timeout}, platform={platform.system()}")
-
+    # Launch Chrome
     process = launch_chrome_with_debug_port(port=port, headless=headless)
-    debug_log(f"Launcher process created, PID: {process.pid}")
 
     is_windows = platform.system() == "Windows"
 
     # Wait for Chrome to be ready
     start_time = asyncio.get_event_loop().time()
-    check_count = 0
     while not is_port_in_use(host, port):
         elapsed = asyncio.get_event_loop().time() - start_time
-        check_count += 1
 
         # On Unix, check if process is still running
         if not is_windows:
             poll_result = process.poll()
             if poll_result is not None:
-                debug_log(f"Chrome process exited with code {poll_result}")
                 raise RuntimeError(f"Chrome process exited with code {poll_result}")
 
-        if check_count % 5 == 0:  # Log every 5 checks (1 second)
-            debug_log(f"Waiting for Chrome... {elapsed:.1f}s")
-
         if elapsed > timeout:
-            debug_log(f"Timeout after {elapsed:.1f}s!")
             raise TimeoutError(
                 f"Chrome failed to start on port {port} within {timeout} seconds. "
                 f"Port may be occupied or Chrome instance failed to launch."
             )
         await asyncio.sleep(0.2)
-
-    debug_log(f"Chrome is ready on port {port} after {asyncio.get_event_loop().time() - start_time:.1f}s")
 
     # Give Chrome a moment to fully initialize
     await asyncio.sleep(0.5)
