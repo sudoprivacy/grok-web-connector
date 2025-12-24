@@ -459,18 +459,48 @@ async def ensure_chrome_running(
     """
     # Check if Chrome is already running on the requested port
     if is_port_in_use(host, port):
-        # Check if it's a temp Chrome from a previous session
-        is_temp, pid = is_temp_chrome_on_port(port)
-        if is_temp:
-            # Reuse existing temp Chrome - it may have logged-in session
-            logger.debug(f"Reusing existing temp Chrome (PID {pid}) on port {port}")
-            return None, port
+        # Check if Chrome is in use by another debugger (CDP attached)
+        if is_chrome_in_use(port):
+            # Port is in use by another debugger - find an available port
+            logger.warning(
+                f"Chrome on port {port} is in use by another debugger session. "
+                f"Searching for available port..."
+            )
+            # Search for an available port in range 9222-9300
+            for candidate_port in range(9222, 9300):
+                if candidate_port == port:
+                    continue
+                if not is_port_in_use(host, candidate_port):
+                    # Found unused port - launch new Chrome
+                    logger.info(f"Launching new Chrome on available port {candidate_port}")
+                    port = candidate_port
+                    break
+                # Check if existing Chrome on this port is available
+                if not is_chrome_in_use(candidate_port):
+                    is_temp, pid = is_temp_chrome_on_port(candidate_port)
+                    if is_temp:
+                        logger.info(f"Reusing available temp Chrome on port {candidate_port}")
+                        return None, candidate_port
+            else:
+                # No available port found
+                raise RuntimeError(
+                    f"No available Chrome debugging ports in range 9222-9299. "
+                    f"All ports are in use by other debugger sessions."
+                )
         else:
-            # User's Chrome with real profile - reuse it
-            logger.debug(f"Reusing existing Chrome on port {port}")
-            return None, port
+            # Port has Chrome but not attached - safe to reuse
+            # Check if it's a temp Chrome from a previous session
+            is_temp, pid = is_temp_chrome_on_port(port)
+            if is_temp:
+                # Reuse existing temp Chrome - it may have logged-in session
+                logger.debug(f"Reusing existing temp Chrome (PID {pid}) on port {port}")
+                return None, port
+            else:
+                # User's Chrome with real profile - reuse it
+                logger.debug(f"Reusing existing Chrome on port {port}")
+                return None, port
 
-    # Launch Chrome
+    # Launch Chrome on the (possibly updated) port
     process = launch_chrome_with_debug_port(port=port, headless=headless)
 
     is_windows = platform.system() == "Windows"
