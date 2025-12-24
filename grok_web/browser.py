@@ -302,7 +302,11 @@ def find_nodriver_chromes(
 
 
 def get_available_port(start: int = 9222, end: int = 9300, exclude: set[int] | None = None) -> int:
-    """Find an available port for Chrome.
+    """Find an available port for Chrome, preferring to reuse existing nodriver Chromes.
+
+    Port selection strategy:
+    1. First, look for existing nodriver Chrome (temp profile) not in use by another debugger
+    2. If none found, find an unused port for launching new Chrome
 
     Args:
         start: Start of port range to search
@@ -317,6 +321,17 @@ def get_available_port(start: int = 9222, end: int = 9300, exclude: set[int] | N
     """
     exclude = exclude or set()
 
+    # Strategy 1: Try to reuse existing nodriver Chrome (temp profile) not in use
+    for port in range(start, end):
+        if port in exclude:
+            continue
+        if is_port_in_use(DEFAULT_DEBUG_HOST, port):
+            is_temp, _ = is_temp_chrome_on_port(port)
+            if is_temp and not is_chrome_in_use(port):
+                logger.debug(f"Found reusable nodriver Chrome on port {port}")
+                return port
+
+    # Strategy 2: Find unused port for new Chrome
     for port in range(start, end):
         if port in exclude:
             continue
