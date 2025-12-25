@@ -271,8 +271,9 @@ class TestFindNodriverChromes:
             return (False, None)
 
         with patch("grok_web.browser.is_temp_chrome_on_port", side_effect=mock_is_temp):
-            result = find_nodriver_chromes(port_range=(9222, 9227))
-            assert result == [9223, 9225]
+            with patch("grok_web.browser.is_chrome_in_use", return_value=False):
+                result = find_nodriver_chromes(port_range=(9222, 9227))
+                assert result == [9223, 9225]
 
     def test_returns_empty_list_when_no_nodriver_chromes(self):
         """Returns empty list when no nodriver Chromes found."""
