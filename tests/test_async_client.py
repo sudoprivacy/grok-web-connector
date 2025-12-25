@@ -548,12 +548,22 @@ class TestAsyncClientMatchLocalVideo:
             f.write(b"x" * 1000)
 
         try:
-            # Mock get_post_details to raise not found, then fallback searches favorites
-            mock_client.get_post_details = AsyncMock(
-                side_effect=GrokNotFoundError(f"Post not found: {video_id}")
-            )
-            # Mock list_posts to return empty (no favorites)
-            mock_client.list_posts = AsyncMock(return_value=[])
+            # Mock _api_request to:
+            # 1. First call (get_post_details): raise GrokNotFoundError
+            # 2. Second call (list_posts): return empty posts
+            call_count = 0
+
+            async def mock_api_request(method, endpoint, json_data=None):
+                nonlocal call_count
+                call_count += 1
+                if call_count == 1:
+                    # First call is get_post_details - raise not found
+                    raise GrokNotFoundError(f"Post not found: {video_id}")
+                else:
+                    # Subsequent calls are list_posts - return empty
+                    return {"posts": []}
+
+            mock_client._api_request = mock_api_request
 
             # Should raise GrokAPIError saying video not found in recent favorites
             with pytest.raises(GrokAPIError, match="Video not found in recent"):
@@ -572,12 +582,20 @@ class TestAsyncClientMatchLocalVideo:
             f.write(b"x" * 1000)
 
         try:
-            # Mock get_post_details to raise not found, then fallback searches favorites
-            mock_client.get_post_details = AsyncMock(
-                side_effect=GrokNotFoundError(f"Post not found: {video_id}")
-            )
-            # Mock list_posts to return empty (no favorites)
-            mock_client.list_posts = AsyncMock(return_value=[])
+            # Mock _api_request to:
+            # 1. First call (get_post_details): raise GrokNotFoundError
+            # 2. Second call (list_posts): return empty posts
+            call_count = 0
+
+            async def mock_api_request(method, endpoint, json_data=None):
+                nonlocal call_count
+                call_count += 1
+                if call_count == 1:
+                    raise GrokNotFoundError(f"Post not found: {video_id}")
+                else:
+                    return {"posts": []}
+
+            mock_client._api_request = mock_api_request
 
             # Should raise GrokAPIError saying video not found in recent favorites
             with pytest.raises(GrokAPIError, match="Video not found in recent"):
@@ -596,12 +614,20 @@ class TestAsyncClientMatchLocalVideo:
             f.write(b"x" * 1000)
 
         try:
-            # Mock get_post_details to raise not found, then fallback searches favorites
-            mock_client.get_post_details = AsyncMock(
-                side_effect=GrokNotFoundError(f"Post not found: {video_id}")
-            )
-            # Mock list_posts to return empty (no favorites)
-            mock_client.list_posts = AsyncMock(return_value=[])
+            # Mock _api_request to:
+            # 1. First call (get_post_details): raise GrokNotFoundError
+            # 2. Second call (list_posts): return empty posts
+            call_count = 0
+
+            async def mock_api_request(method, endpoint, json_data=None):
+                nonlocal call_count
+                call_count += 1
+                if call_count == 1:
+                    raise GrokNotFoundError(f"Post not found: {video_id}")
+                else:
+                    return {"posts": []}
+
+            mock_client._api_request = mock_api_request
 
             # Should raise GrokAPIError saying video not found in recent favorites
             with pytest.raises(GrokAPIError, match="Video not found in recent"):
