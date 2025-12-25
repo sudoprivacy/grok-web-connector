@@ -187,11 +187,13 @@ class TestEnsureChromeRunning:
         from grok_web.browser import ensure_chrome_running
 
         with patch("grok_web.browser.is_port_in_use", return_value=True):
-            # Not a temp Chrome (user's real Chrome)
-            with patch("grok_web.browser.is_temp_chrome_on_port", return_value=(False, 12345)):
-                result_tuple = await ensure_chrome_running()
-                # Function now returns (process, port) tuple
-                assert result_tuple == (None, 9222)
+            # Chrome not attached by another debugger (available)
+            with patch("grok_web.browser.is_chrome_in_use", return_value=False):
+                # Not a temp Chrome (user's real Chrome)
+                with patch("grok_web.browser.is_temp_chrome_on_port", return_value=(False, 12345)):
+                    result_tuple = await ensure_chrome_running()
+                    # Function now returns (process, port) tuple
+                    assert result_tuple == (None, 9222)
 
     @pytest.mark.asyncio
     async def test_reuses_temp_chrome_when_running(self):
@@ -199,12 +201,14 @@ class TestEnsureChromeRunning:
         from grok_web.browser import ensure_chrome_running
 
         with patch("grok_web.browser.is_port_in_use", return_value=True):
-            # It's a temp Chrome from previous session
-            with patch("grok_web.browser.is_temp_chrome_on_port", return_value=(True, 99999)):
-                process, port = await ensure_chrome_running()
-                # Should reuse (return None) instead of killing and launching new
-                assert process is None
-                assert port == 9222
+            # Chrome not attached by another debugger (available)
+            with patch("grok_web.browser.is_chrome_in_use", return_value=False):
+                # It's a temp Chrome from previous session
+                with patch("grok_web.browser.is_temp_chrome_on_port", return_value=(True, 99999)):
+                    process, port = await ensure_chrome_running()
+                    # Should reuse (return None) instead of killing and launching new
+                    assert process is None
+                    assert port == 9222
 
     @pytest.mark.asyncio
     async def test_launches_chrome_when_not_running(self):
@@ -302,13 +306,14 @@ class TestGetAvailablePort:
         """Returns first available port in range."""
         from grok_web.browser import get_available_port
 
-        # Port 9222 in use, 9223 free
-        def mock_port_in_use(host, port):
+        # Port 9222 in use (but NOT a reusable nodriver Chrome), 9223 free
+        def mock_port_in_use(host, port, timeout=0.1):
             return port == 9222
 
         with patch("grok_web.browser.is_port_in_use", side_effect=mock_port_in_use):
-            result = get_available_port(start=9222, end=9230)
-            assert result == 9223
+            with patch("grok_web.browser.is_temp_chrome_on_port", return_value=(False, None)):
+                result = get_available_port(start=9222, end=9230)
+                assert result == 9223
 
     def test_skips_excluded_ports(self):
         """Skips ports in exclude set."""
@@ -322,9 +327,11 @@ class TestGetAvailablePort:
         """Raises RuntimeError when no port available in range."""
         from grok_web.browser import get_available_port
 
+        # All ports in use but none are reusable nodriver Chromes
         with patch("grok_web.browser.is_port_in_use", return_value=True):
-            with pytest.raises(RuntimeError, match="No available port found"):
-                get_available_port(start=9222, end=9225)
+            with patch("grok_web.browser.is_temp_chrome_on_port", return_value=(False, None)):
+                with pytest.raises(RuntimeError, match="No available port found"):
+                    get_available_port(start=9222, end=9225)
 
     def test_returns_first_port_when_all_free(self):
         """Returns first port when all are free."""

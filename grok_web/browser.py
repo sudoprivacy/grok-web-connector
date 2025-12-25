@@ -68,12 +68,13 @@ def get_chrome_executable() -> str | None:
     return None
 
 
-def is_port_in_use(host: str, port: int) -> bool:
+def is_port_in_use(host: str, port: int, timeout: float = 0.1) -> bool:
     """Check if a port is in use (Chrome might be listening).
 
     Args:
         host: Host to check
         port: Port to check
+        timeout: Connection timeout in seconds (default 0.1s for fast scanning)
 
     Returns:
         True if port is in use, False otherwise.
@@ -81,7 +82,7 @@ def is_port_in_use(host: str, port: int) -> bool:
     # Check IPv4
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.settimeout(1)
+            sock.settimeout(timeout)
             sock.connect((host, port))
             return True
     except (TimeoutError, ConnectionRefusedError, OSError):
@@ -90,7 +91,7 @@ def is_port_in_use(host: str, port: int) -> bool:
     # Check IPv6 (Chrome on Windows might only listen on IPv6)
     try:
         with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as sock:
-            sock.settimeout(1)
+            sock.settimeout(timeout)
             # Map IPv4 loopback to IPv6
             ipv6_host = "::1" if host in ("127.0.0.1", "localhost") else host
             sock.connect((ipv6_host, port))
@@ -211,7 +212,7 @@ def is_temp_chrome_on_port(port: int) -> tuple[bool, int | None]:
     return False, pid
 
 
-def is_chrome_in_use(port: int, timeout: float = 2.0) -> bool:
+def is_chrome_in_use(port: int, timeout: float = 0.5) -> bool:
     """Check if Chrome on this port is being used by another script via CDP.
 
     This is more reliable than file-based locking because:
@@ -482,20 +483,28 @@ async def ensure_chrome_running(
                 f"Searching for available port..."
             )
             # Search for an available port in range 9222-9300
+            # Strategy: First find any unused port (fast), then check if there are idle temp Chromes
+            unused_port = None
             for candidate_port in range(9222, 9300):
                 if candidate_port == port:
                     continue
                 if not is_port_in_use(host, candidate_port):
-                    # Found unused port - launch new Chrome
-                    logger.info(f"Launching new Chrome on available port {candidate_port}")
-                    port = candidate_port
-                    break
-                # Check if existing Chrome on this port is available
-                if not is_chrome_in_use(candidate_port):
-                    is_temp, pid = is_temp_chrome_on_port(candidate_port)
-                    if is_temp:
+                    # Found unused port - remember it as fallback
+                    if unused_port is None:
+                        unused_port = candidate_port
+                    continue
+                # Port is in use - quickly check if it's our temp Chrome (process check is fast)
+                is_temp, pid = is_temp_chrome_on_port(candidate_port)
+                if is_temp:
+                    # It's our Chrome - check if available via CDP (only for our Chromes)
+                    if not is_chrome_in_use(candidate_port):
                         logger.info(f"Reusing available temp Chrome on port {candidate_port}")
                         return None, candidate_port
+
+            # Use unused port if found
+            if unused_port is not None:
+                logger.info(f"Launching new Chrome on available port {unused_port}")
+                port = unused_port
             else:
                 # No available port found
                 raise RuntimeError(
