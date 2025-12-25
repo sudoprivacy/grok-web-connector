@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .exceptions import GrokAPIError, GrokAuthError, GrokNotFoundError
+from .exceptions import GrokAPIError, GrokAuthError, GrokNotFoundError, GrokRateLimitError
 from .models import (
     ChildVideo,
     GenerationMode,
@@ -110,7 +110,14 @@ def parse_video_ndjson_response(
     parent_post_id: str,
     statsig_id: str,
 ) -> VideoGenerationResult:
-    """Parse NDJSON response from video generation API."""
+    """Parse NDJSON response from video generation API.
+
+    Raises:
+        GrokRateLimitError: When API returns "Too many requests" (error code 8).
+            This is a GLOBAL rate limit - stop all requests and wait.
+            As of December 2025, rate limits reset every hour.
+        GrokAPIError: For other parsing failures.
+    """
     import json
 
     conversation_id = None
@@ -121,6 +128,20 @@ def parse_video_ndjson_response(
             continue
         try:
             data = json.loads(line)
+
+            # Check for rate limit error (code 8: "Too many requests")
+            if "error" in data:
+                error = data["error"]
+                error_code = error.get("code")
+                error_message = error.get("message", "Unknown error")
+
+                if error_code == 8 or "too many requests" in error_message.lower():
+                    raise GrokRateLimitError(
+                        f"Rate limit exceeded: {error_message}. "
+                        "This is a GLOBAL limit - stop all requests and wait. "
+                        "Rate limits reset every hour (as of December 2025)."
+                    )
+
             result = data.get("result", {})
 
             if "conversation" in result:

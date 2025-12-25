@@ -123,6 +123,7 @@ from .exceptions import (
     GrokConfigError,
     GrokError,
     GrokNotFoundError,
+    GrokRateLimitError,
 )
 from .models import (
     ChildVideo,
@@ -210,6 +211,7 @@ __all__ = [
     "GrokAPIError",
     "GrokNotFoundError",
     "GrokConfigError",
+    "GrokRateLimitError",
     # Auth utilities
     "load_cookies",
     "save_cookies",

@@ -42,3 +42,32 @@ class GrokConfigError(GrokError):
     """Raised when configuration is invalid or missing."""
 
     pass
+
+
+class GrokRateLimitError(GrokAPIError):
+    """
+    Raised when Grok API returns "Too many requests" (error code 8).
+
+    IMPORTANT: Rate limits are GLOBAL, not per-request!
+
+    When you encounter this error:
+    1. DO NOT immediately retry - this wastes retry attempts
+    2. STOP all workers/requests and wait globally
+    3. As of December 2025, Grok rate limits reset every hour
+
+    Recommended handling:
+    - Catch this exception at the pool/orchestrator level
+    - Pause all workers for 5-10 minutes minimum
+    - Consider implementing exponential backoff
+    - If persistent, wait until the next hour boundary
+
+    Example:
+        try:
+            result = await client.create_video(...)
+        except GrokRateLimitError:
+            # Stop all workers, wait globally
+            await asyncio.sleep(600)  # Wait 10 minutes
+            # Or wait until next hour if near boundary
+    """
+
+    pass
