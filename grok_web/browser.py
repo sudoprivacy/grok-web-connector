@@ -514,6 +514,16 @@ async def ensure_chrome_running(
         else:
             # Port has Chrome but not attached - safe to reuse
             # Check if it's a temp Chrome from a previous session
+            #
+            # TODO: Add health check before reusing Chrome
+            # There's a corner case where Chrome process exists and port is listening,
+            # but DevTools HTTP endpoint (/json/version) doesn't respond (zombie state).
+            # This happens when Chrome crashes or hangs but process doesn't exit cleanly.
+            # Current checks (is_port_in_use, is_temp_chrome, is_chrome_in_use) all pass,
+            # but nodriver.start() fails with "Failed to connect to browser".
+            # Fix: Before returning, verify http://127.0.0.1:{port}/json/version responds.
+            # If not, kill the zombie process and launch fresh Chrome.
+            #
             is_temp, pid = is_temp_chrome_on_port(port)
             if is_temp:
                 # Reuse existing temp Chrome - it may have logged-in session
