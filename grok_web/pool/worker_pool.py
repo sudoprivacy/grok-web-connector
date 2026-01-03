@@ -659,7 +659,7 @@ class BrowserWorkerPool:
                     import time
 
                     start_time = time.time()
-                    result_data = await self._execute_job(worker, job)
+                    result_data, business_success = await self._execute_job(worker, job)
                     elapsed = time.time() - start_time
 
                     # Check fail_condition (soft failure)
@@ -669,10 +669,11 @@ class BrowserWorkerPool:
                             worker, job, f"fail_condition returned True: {result_data}"
                         )
                     else:
-                        # Success
+                        # Success: AND business_success with other conditions
+                        # business_success comes from result.success (e.g., VideoGenerationResult)
                         result = JobResult(
                             job_id=job.job_id,
-                            success=True,
+                            success=business_success,
                             data=result_data,
                             worker_id=worker.worker_id,
                         )
@@ -765,6 +766,7 @@ class BrowserWorkerPool:
         Returns:
             Callback that reports progress and returns False when target reached.
         """
+
         async def callback(current_success: int) -> bool:
             shared_state[job_id] = current_success
             total = sum(shared_state.values())
@@ -772,6 +774,7 @@ class BrowserWorkerPool:
             if not should_continue:
                 logger.info(f"[shared_target] Total {total} >= {target}, signaling stop")
             return should_continue
+
         return callback
 
     def _wrap_selector(
@@ -792,6 +795,7 @@ class BrowserWorkerPool:
         Returns:
             Wrapped selector that tracks selection phase.
         """
+
         async def wrapped_selector(item_count: int, scan_favorites) -> list[int]:
             self._jobs_in_selection.add(job_id)
             logger.info(f"[selection] Job {job_id[:8]}... entering selection phase")
@@ -800,6 +804,7 @@ class BrowserWorkerPool:
             finally:
                 self._jobs_in_selection.discard(job_id)
                 logger.info(f"[selection] Job {job_id[:8]}... exited selection phase")
+
         return wrapped_selector
 
     def _serialize_result(self, result: Any) -> Any:
@@ -842,7 +847,7 @@ class BrowserWorkerPool:
         # Return as-is (will fail during JSON serialization if not compatible)
         return result
 
-    async def _execute_job(self, worker: Worker, job: Job) -> Any:
+    async def _execute_job(self, worker: Worker, job: Job) -> tuple[Any, bool]:
         """Execute a job by dynamically calling the client method.
 
         The task_type directly maps to NodriverClient method names.
@@ -859,7 +864,9 @@ class BrowserWorkerPool:
             job: The job to execute
 
         Returns:
-            JSON-serializable result data (automatically serialized via _serialize_result)
+            Tuple of (result_data, business_success):
+            - result_data: JSON-serializable result (automatically serialized)
+            - business_success: True if result.success is True or not defined
 
         Raises:
             RuntimeError: If worker has no client
@@ -921,8 +928,15 @@ class BrowserWorkerPool:
             # Call the method with job args/kwargs
             result = await method(*job.args, **kwargs)
 
+            # Check if result has a .success property (business-level success)
+            # e.g., VideoGenerationResult.success = progress == 100 and not moderated
+            if hasattr(result, "success") and isinstance(result.success, bool):
+                business_success = result.success
+            else:
+                business_success = True  # Default to True if no .success property
+
             # Serialize result to JSON-compatible format
-            return self._serialize_result(result)
+            return self._serialize_result(result), business_success
 
         finally:
             # Restore original ui_delay

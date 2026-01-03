@@ -409,14 +409,29 @@ class TestBrowserWorkerPoolExecuteJob:
         return worker
 
     @pytest.mark.asyncio
-    async def test_execute_delete_video(self, pool, mock_worker):
-        """_execute_job handles delete_video task."""
+    async def test_execute_returns_tuple(self, pool, mock_worker):
+        """_execute_job returns tuple of (result_data, business_success)."""
         mock_worker.client.delete_video = AsyncMock(return_value=True)
         job = Job(task_type="delete_video", args=("video-123",))
 
         result = await pool._execute_job(mock_worker, job)
 
-        assert result is True
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+        result_data, business_success = result
+        assert result_data is True
+        assert business_success is True  # No .success property, defaults to True
+
+    @pytest.mark.asyncio
+    async def test_execute_delete_video(self, pool, mock_worker):
+        """_execute_job handles delete_video task."""
+        mock_worker.client.delete_video = AsyncMock(return_value=True)
+        job = Job(task_type="delete_video", args=("video-123",))
+
+        result_data, business_success = await pool._execute_job(mock_worker, job)
+
+        assert result_data is True
+        assert business_success is True
         mock_worker.client.delete_video.assert_called_once_with("video-123")
 
     @pytest.mark.asyncio
@@ -425,9 +440,10 @@ class TestBrowserWorkerPoolExecuteJob:
         mock_worker.client.favorite_post = AsyncMock(return_value=True)
         job = Job(task_type="favorite_post", args=("post-123",))
 
-        result = await pool._execute_job(mock_worker, job)
+        result_data, business_success = await pool._execute_job(mock_worker, job)
 
-        assert result is True
+        assert result_data is True
+        assert business_success is True
         mock_worker.client.favorite_post.assert_called_once_with("post-123")
 
     @pytest.mark.asyncio
@@ -436,9 +452,10 @@ class TestBrowserWorkerPoolExecuteJob:
         mock_worker.client.unfavorite_post = AsyncMock(return_value=True)
         job = Job(task_type="unfavorite_post", args=("post-123",))
 
-        result = await pool._execute_job(mock_worker, job)
+        result_data, business_success = await pool._execute_job(mock_worker, job)
 
-        assert result is True
+        assert result_data is True
+        assert business_success is True
         mock_worker.client.unfavorite_post.assert_called_once_with("post-123")
 
     @pytest.mark.asyncio
@@ -447,9 +464,10 @@ class TestBrowserWorkerPoolExecuteJob:
         mock_worker.client.like_post = AsyncMock(return_value=True)
         job = Job(task_type="like_post", args=("post-123",))
 
-        result = await pool._execute_job(mock_worker, job)
+        result_data, business_success = await pool._execute_job(mock_worker, job)
 
-        assert result is True
+        assert result_data is True
+        assert business_success is True
         mock_worker.client.like_post.assert_called_once_with("post-123")
 
     @pytest.mark.asyncio
@@ -458,9 +476,10 @@ class TestBrowserWorkerPoolExecuteJob:
         mock_worker.client.dislike_post = AsyncMock(return_value=True)
         job = Job(task_type="dislike_post", args=("post-123",))
 
-        result = await pool._execute_job(mock_worker, job)
+        result_data, business_success = await pool._execute_job(mock_worker, job)
 
-        assert result is True
+        assert result_data is True
+        assert business_success is True
         mock_worker.client.dislike_post.assert_called_once_with("post-123")
 
     @pytest.mark.asyncio
@@ -469,9 +488,10 @@ class TestBrowserWorkerPoolExecuteJob:
         mock_worker.client.upgrade_video = AsyncMock(return_value=True)
         job = Job(task_type="upgrade_video", args=("video-123",))
 
-        result = await pool._execute_job(mock_worker, job)
+        result_data, business_success = await pool._execute_job(mock_worker, job)
 
-        assert result is True
+        assert result_data is True
+        assert business_success is True
         mock_worker.client.upgrade_video.assert_called_once_with("video-123")
 
     @pytest.mark.asyncio
@@ -497,6 +517,52 @@ class TestBrowserWorkerPoolExecuteJob:
 
         # ui_delay should be restored to original
         assert mock_worker.client._ui_delay == 1.0
+
+    @pytest.mark.asyncio
+    async def test_execute_with_success_property_true(self, pool, mock_worker):
+        """_execute_job uses result.success when available (True case)."""
+        # Create a mock result object with .success property
+        mock_result = MagicMock()
+        mock_result.success = True
+        mock_result.model_dump = MagicMock(return_value={"video_id": "v1", "moderated": False})
+
+        mock_worker.client.create_video = AsyncMock(return_value=mock_result)
+        job = Job(task_type="create_video", kwargs={"source_post_id": "post-123"})
+
+        result_data, business_success = await pool._execute_job(mock_worker, job)
+
+        assert business_success is True
+        assert result_data == {"video_id": "v1", "moderated": False}
+
+    @pytest.mark.asyncio
+    async def test_execute_with_success_property_false(self, pool, mock_worker):
+        """_execute_job uses result.success when available (False case - moderated)."""
+        # Create a mock result object with .success = False (e.g., moderated video)
+        mock_result = MagicMock()
+        mock_result.success = False  # Video was moderated
+        mock_result.model_dump = MagicMock(
+            return_value={"video_id": "v1", "moderated": True, "progress": 100}
+        )
+
+        mock_worker.client.create_video = AsyncMock(return_value=mock_result)
+        job = Job(task_type="create_video", kwargs={"source_post_id": "post-123"})
+
+        result_data, business_success = await pool._execute_job(mock_worker, job)
+
+        assert business_success is False  # Should be False because result.success is False
+        assert result_data["moderated"] is True
+
+    @pytest.mark.asyncio
+    async def test_execute_without_success_property(self, pool, mock_worker):
+        """_execute_job defaults to True when result has no .success property."""
+        # Return a simple dict (no .success property)
+        mock_worker.client.list_posts = AsyncMock(return_value=[{"id": "post1"}, {"id": "post2"}])
+        job = Job(task_type="list_posts", kwargs={"limit": 10})
+
+        result_data, business_success = await pool._execute_job(mock_worker, job)
+
+        assert business_success is True  # Default to True when no .success property
+        assert result_data == [{"id": "post1"}, {"id": "post2"}]
 
 
 # =============================================================================
@@ -759,12 +825,13 @@ class TestSharedTarget:
 
         # Manually add results to simulate completion
         from grok_web.pool.job import JobResult
+
         pool._results[job1] = JobResult(job_id=job1, success=True, data={"success_count": 5})
         pool._results[job2] = JobResult(job_id=job2, success=True, data={"success_count": 5})
 
         # Call wait - it should set up shared targets
         # Note: This will return immediately since jobs are already "complete"
-        results = await pool.wait(job_ids=[job1, job2], min_success=10)
+        await pool.wait(job_ids=[job1, job2], min_success=10)
 
         # Verify shared targets were set up
         assert job1 in pool._shared_targets
