@@ -81,23 +81,21 @@ async with get_client(browser_host="127.0.0.1", browser_port=9222) as client:
 
 **Key insight**: Browser fallback for read APIs uses JavaScript `fetch()` inside the browser context, which automatically uses the browser's authenticated session cookies. Write operations like `create_video` use UI automation.
 
-## Authentication Setup
+## Authentication
+
+Authentication is **fully automatic**:
+
+1. **First use**: Browser opens, you log in once, cookies are saved to `~/.grok-config.json`
+2. **Subsequent uses**: Cookies are loaded automatically
+3. **Auto-refresh**: Cookies are updated after each successful browser operation
 
 ```bash
-# Launch Chrome, login to Grok, cookies are extracted automatically
-python -m grok_web.auth_manager setup
-
-# Check authentication status
+# Optional: Check authentication status
 python -m grok_web.auth_manager status
 
-# Clear saved authentication
+# Optional: Clear saved authentication
 python -m grok_web.auth_manager clear
 ```
-
-The setup command will:
-1. Launch Chrome and navigate to grok.com
-2. Wait for you to log in (if not already logged in)
-3. Automatically extract and save cookies to `~/.grok-config.json`
 
 ## API Reference
 
@@ -351,9 +349,13 @@ The direct API (`create_video_from_image`) is often blocked with 403. SmartGrokC
 
 ### cf_clearance expired
 
-Run `python -m grok_web.auth_manager setup` to refresh cookies automatically.
+Cookies are automatically refreshed after each successful browser operation. If you still encounter issues, clear and re-authenticate:
 
-Or use browser fallback which handles this automatically.
+```bash
+python -m grok_web.auth_manager clear
+```
+
+Then run your code again - the browser will open for you to log in.
 
 ## License
 

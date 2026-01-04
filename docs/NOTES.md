@@ -317,7 +317,7 @@ result = client.create_video_from_image(
 - `cf_clearance` binds to browser TLS fingerprint
 - `GrokClient` (curl_cffi) works on macOS/Linux
 - `PlaywrightClient` needed if curl_cffi gets 403
-- Cookies expire periodically, need manual refresh
+- Cookies auto-refresh after each successful browser operation
 
 ---
 
