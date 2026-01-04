@@ -17,6 +17,7 @@ Public API:
 """
 
 import logging
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, overload
 
@@ -38,7 +39,7 @@ from ._internal import (
     parse_video_ndjson_response,
     resolve_preset,
 )
-from .auth import load_config
+from .auth import DEFAULT_CONFIG_PATH, load_config, save_cookies
 from .exceptions import GrokAPIError, GrokAuthError, GrokNotFoundError
 from .models import (
     GrokCookies,
@@ -321,6 +322,9 @@ class NodriverClient(AsyncClientBase):
         """
         super().__init__()  # Initialize business logic layer
 
+        # Store config path for cookie auto-save
+        self._config_path = Path(config_path) if config_path else DEFAULT_CONFIG_PATH
+
         if cookies is None:
             config = load_config(config_path)
             cookies = config["cookies"]
@@ -432,7 +436,37 @@ class NodriverClient(AsyncClientBase):
         # Don't stop Chrome - keep it running for reuse by subsequent calls
         # The Chrome process stays open in background, which is the desired behavior
         # for fast batch processing
-        pass
+
+        # Auto-save cookies on successful exit (no exception)
+        if exc_type is None and self._initialized and self._browser:
+            await self._auto_save_cookies()
+
+    async def _auto_save_cookies(self) -> None:
+        """Extract cookies from browser and save to config file."""
+        try:
+            all_cookies = await self._browser.cookies.get_all()
+
+            # Extract the cookies we need
+            cookie_dict = {}
+            required = {"sso", "sso-rw", "x-userid", "cf_clearance"}
+
+            for cookie in all_cookies:
+                domain = getattr(cookie, "domain", "")
+                name = getattr(cookie, "name", "")
+                value = getattr(cookie, "value", "")
+
+                if ("grok.com" in domain or "x.ai" in domain) and name in required:
+                    cookie_dict[name] = value
+
+            # Only save if we got all required cookies
+            if all(cookie_dict.get(name) for name in required):
+                fresh_cookies = GrokCookies(**cookie_dict)
+                save_cookies(fresh_cookies, self._config_path)
+                logging.debug(f"Auto-saved cookies to {self._config_path}")
+
+        except Exception as e:
+            # Don't fail the operation if cookie save fails
+            logging.debug(f"Failed to auto-save cookies: {e}")
 
     async def _api_request(
         self,
@@ -623,7 +657,9 @@ class NodriverClient(AsyncClientBase):
         try:
             # Get the main frame ID for the current page
             frame_tree = await self._tab.send(cdp.page.get_frame_tree())
-            frame_id = frame_tree.frame.id_  # Note: id_ (with underscore) because 'id' is a Python keyword
+            frame_id = (
+                frame_tree.frame.id_
+            )  # Note: id_ (with underscore) because 'id' is a Python keyword
 
             # Use CDP Network.loadNetworkResource to fetch headers
             # This bypasses CORS and is more reliable than fetch()
@@ -632,9 +668,8 @@ class NodriverClient(AsyncClientBase):
                     frame_id=frame_id,
                     url=asset_url,
                     options=cdp.network.LoadNetworkResourceOptions(
-                        disable_cache=False,
-                        include_credentials=True
-                    )
+                        disable_cache=False, include_credentials=True
+                    ),
                 )
             )
 
@@ -668,8 +703,7 @@ class NodriverClient(AsyncClientBase):
             raise
         except Exception as e:
             raise GrokAPIError(
-                f"CDP network request failed for asset. "
-                f"URL: {asset_url}, Error: {e}"
+                f"CDP network request failed for asset. " f"URL: {asset_url}, Error: {e}"
             ) from e
 
     # =========================================================================
@@ -1839,8 +1873,12 @@ class NodriverClient(AsyncClientBase):
 
         # Check if we got any jobs at all - if not, something went wrong
         if len(captured_data["jobs"]) == 0:
-            logger.error("[create_image] No jobs received after initial wait. Navigation or WebSocket may have failed.")
-            raise GrokAPIError("No image generation jobs received. The page may not have loaded correctly.")
+            logger.error(
+                "[create_image] No jobs received after initial wait. Navigation or WebSocket may have failed."
+            )
+            raise GrokAPIError(
+                "No image generation jobs received. The page may not have loaded correctly."
+            )
 
         # Step 7: Scroll down to generate more if needed
         # min_success means non-moderated images, so we keep scrolling until we have enough
@@ -1849,7 +1887,6 @@ class NodriverClient(AsyncClientBase):
         scroll_count = 0
         jobs_before_scroll = 0
         consecutive_no_new_jobs = 0
-        base_scroll_delay = 3 * d  # Base delay after scroll
         while scroll_count < max_scroll:
             # Wait until ALL current jobs have completed (progress=100)
             # This ensures moderated status has been received for all images
@@ -1861,7 +1898,7 @@ class NodriverClient(AsyncClientBase):
             while stable_count < 3:  # Wait for 3 consecutive stable checks
                 # Timeout check
                 if asyncio.get_event_loop().time() - stable_wait_start > max_stable_wait:
-                    logger.debug(f"[scroll] stable wait timeout after 30s")
+                    logger.debug("[scroll] stable wait timeout after 30s")
                     break
 
                 all_jobs = list(captured_data["jobs"].values())
@@ -1887,13 +1924,17 @@ class NodriverClient(AsyncClientBase):
             success_count = sum(1 for job in completed if not job.get("moderated"))
             moderated_count = sum(1 for job in completed if job.get("moderated"))
 
-            logger.info(f"[scroll {scroll_count}] jobs={len(completed)}, success={success_count}, moderated={moderated_count}, target={min_success}")
+            logger.info(
+                f"[scroll {scroll_count}] jobs={len(completed)}, success={success_count}, moderated={moderated_count}, target={min_success}"
+            )
 
             # Check shared target callback (used by pool for multi-worker coordination)
             if progress_callback is not None:
                 should_continue = await progress_callback(success_count)
                 if not should_continue:
-                    logger.info(f"[scroll] progress_callback signaled stop at {success_count} success")
+                    logger.info(
+                        f"[scroll] progress_callback signaled stop at {success_count} success"
+                    )
                     break
 
             if success_count >= min_success:
@@ -1903,7 +1944,9 @@ class NodriverClient(AsyncClientBase):
             # Check if scrolling is generating new jobs
             if scroll_count > 0 and len(completed) == jobs_before_scroll:
                 consecutive_no_new_jobs += 1
-                logger.warning(f"[scroll] no new jobs after scroll {scroll_count}, jobs still at {len(completed)} (consecutive: {consecutive_no_new_jobs})")
+                logger.warning(
+                    f"[scroll] no new jobs after scroll {scroll_count}, jobs still at {len(completed)} (consecutive: {consecutive_no_new_jobs})"
+                )
             else:
                 consecutive_no_new_jobs = 0  # Reset when new jobs appear
             jobs_before_scroll = len(completed)
@@ -1972,13 +2015,16 @@ class NodriverClient(AsyncClientBase):
                                 cdp.network.get_request_post_data(event.request_id)
                             )
                             post_data = result
-                            logger.debug(f"[post_id_capture] Fetched post_data: {post_data[:100] if post_data else 'None'}...")
+                            logger.debug(
+                                f"[post_id_capture] Fetched post_data: {post_data[:100] if post_data else 'None'}..."
+                            )
                         except Exception as e:
                             logger.warning(f"[post_id_capture] Failed to get post data: {e}")
 
                     if post_data:
                         try:
                             import re
+
                             # Try JSON parse first
                             data = json_mod.loads(post_data)
                             post_id = data.get("id")
@@ -1992,7 +2038,9 @@ class NodriverClient(AsyncClientBase):
                                 post_id = match.group(1)
                                 if post_id not in captured_like_ids:
                                     captured_like_ids.append(post_id)
-                                    logger.info(f"[post_id_capture] Captured post_id (regex): {post_id}")
+                                    logger.info(
+                                        f"[post_id_capture] Captured post_id (regex): {post_id}"
+                                    )
 
             self._tab.add_handler(cdp.network.RequestWillBeSent, capture_like_request)
 
@@ -2698,12 +2746,9 @@ class SmartGrokClient:
             enable_browser_fallback: If True (default), enable browser fallback
                           for video creation. Chrome will be auto-launched if needed.
         """
-        if cookies is None:
-            config = load_config(config_path)
-            cookies = config["cookies"]
-
-        self.cookies = cookies
-        self._config_path = config_path
+        self._provided_cookies = cookies  # Store for deferred loading
+        self._config_path = Path(config_path) if config_path else DEFAULT_CONFIG_PATH
+        self.cookies: GrokCookies | None = None  # Will be set in __aenter__
         self._http_client: AsyncClient | None = None
         self._browser_client: NodriverClient | None = None
         self._browser_host = browser_host
@@ -2713,9 +2758,40 @@ class SmartGrokClient:
 
     async def __aenter__(self):
         """Initialize HTTP client (lightweight, no browser)."""
+        # Load cookies (with auto-setup if missing)
+        if self._provided_cookies is not None:
+            self.cookies = self._provided_cookies
+        else:
+            self.cookies = await self._load_or_setup_cookies()
+
         self._http_client = AsyncClient(self.cookies)
         await self._http_client.__aenter__()
         return self
+
+    async def _load_or_setup_cookies(self) -> GrokCookies:
+        """Load cookies from config, or trigger interactive setup if missing."""
+        from .exceptions import GrokConfigError
+
+        try:
+            config = load_config(self._config_path)
+            return config["cookies"]
+        except GrokConfigError:
+            # No valid config - trigger interactive setup
+            print("⚠️  No valid Grok cookies found. Starting interactive login...")
+            from .auth_manager import AuthManager
+
+            auth = AuthManager(config_path=self._config_path)
+            success = await auth.setup_auth(timeout_minutes=5, headless=False)
+
+            if not success:
+                raise GrokConfigError(
+                    "Authentication setup failed.\n"
+                    "Please run: python -m grok_web.auth_manager setup"
+                ) from None
+
+            # Reload config after successful setup
+            config = load_config(self._config_path)
+            return config["cookies"]
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any):
         """Clean up both clients."""
@@ -2729,6 +2805,7 @@ class SmartGrokClient:
         if self._browser_client is None:
             self._browser_client = NodriverClient(
                 cookies=self.cookies,
+                config_path=self._config_path,
                 host=self._browser_host,
                 port=self._browser_port,
                 headless=self._browser_headless,

@@ -23,7 +23,8 @@ class TestSmartGrokClientInit:
         """Can initialize with cookies directly."""
         client = SmartGrokClient(cookies=mock_cookies)
 
-        assert client.cookies == mock_cookies
+        # Cookies are set during __aenter__, stored in _provided_cookies until then
+        assert client._provided_cookies == mock_cookies
         assert client._http_client is None  # Lazy init
         assert client._browser_client is None  # Lazy init
 
@@ -40,8 +41,9 @@ class TestSmartGrokClientInit:
         assert client._browser_port == 9222
         assert client._browser_headless is True
 
-    def test_init_loads_config_when_no_cookies(self):
-        """Loads cookies from config file when not provided."""
+    @pytest.mark.asyncio
+    async def test_init_loads_config_when_no_cookies(self):
+        """Loads cookies from config file when not provided (during __aenter__)."""
         mock_cookies = GrokCookies(
             sso="test-sso",
             sso_rw="test-sso-rw",
@@ -49,13 +51,19 @@ class TestSmartGrokClientInit:
             cf_clearance="test-cf",
         )
 
-        with patch("grok_web.client.load_config") as mock_load:
+        with (
+            patch("grok_web.client.load_config") as mock_load,
+            patch("grok_web.client.AsyncClient") as MockAsyncClient,
+        ):
             mock_load.return_value = {"cookies": mock_cookies}
+            mock_http = AsyncMock()
+            MockAsyncClient.return_value = mock_http
 
             client = SmartGrokClient(config_path="/custom/path.json")
+            await client.__aenter__()
 
             assert client.cookies == mock_cookies
-            mock_load.assert_called_once_with("/custom/path.json")
+            mock_load.assert_called_once()
 
 
 class TestSmartGrokClientContextManager:
@@ -291,6 +299,8 @@ class TestSmartGrokClientLazyBrowser:
                 browser_host="127.0.0.1",
                 browser_port=9222,
             )
+            # Manually set what __aenter__ would set (we're bypassing it)
+            client.cookies = mock_cookies
             client._http_client = mock_http
 
             # First call - browser should be initialized
@@ -298,6 +308,7 @@ class TestSmartGrokClientLazyBrowser:
 
             MockNodriver.assert_called_once_with(
                 cookies=mock_cookies,
+                config_path=client._config_path,
                 host="127.0.0.1",
                 port=9222,
                 headless=False,

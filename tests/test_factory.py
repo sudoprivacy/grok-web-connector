@@ -1,7 +1,5 @@
 """Tests for factory function (get_client)."""
 
-from unittest.mock import patch
-
 from grok_web import get_client
 from grok_web.client import SmartGrokClient
 from grok_web.models import GrokCookies
@@ -36,11 +34,10 @@ class TestGetClient:
         assert client._browser_headless is True
 
     def test_passes_config_path(self, mock_cookies: GrokCookies):
-        """Config path is passed to client."""
-        with patch("grok_web.client.load_config") as mock_load:
-            mock_load.return_value = {"cookies": mock_cookies, "impersonate": "chrome136"}
+        """Config path is stored for deferred loading."""
+        from pathlib import Path
 
-            client = get_client(config_path="/custom/path.json")
+        client = get_client(config_path="/custom/path.json", cookies=mock_cookies)
 
-            assert isinstance(client, SmartGrokClient)
-            mock_load.assert_called_with("/custom/path.json")
+        assert isinstance(client, SmartGrokClient)
+        assert client._config_path == Path("/custom/path.json")
