@@ -83,30 +83,21 @@ async with get_client(browser_host="127.0.0.1", browser_port=9222) as client:
 
 ## Authentication Setup
 
-### 1. Extract Cookies from Browser
+```bash
+# Launch Chrome, login to Grok, cookies are extracted automatically
+python -m grok_web.auth_manager setup
 
-1. Open https://grok.com in Chrome
-2. Open DevTools (F12) → Application → Cookies
-3. Copy these 4 cookie values:
-   - `sso`
-   - `sso-rw`
-   - `x-userid`
-   - `cf_clearance`
+# Check authentication status
+python -m grok_web.auth_manager status
 
-### 2. Create Config File
-
-Create `~/.grok-config.json`:
-
-```json
-{
-  "cookies": {
-    "sso": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9...",
-    "sso-rw": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9...",
-    "x-userid": "<redacted-user-id>",
-    "cf_clearance": "..."
-  }
-}
+# Clear saved authentication
+python -m grok_web.auth_manager clear
 ```
+
+The setup command will:
+1. Launch Chrome and navigate to grok.com
+2. Wait for you to log in (if not already logged in)
+3. Automatically extract and save cookies to `~/.grok-config.json`
 
 ## API Reference
 
@@ -360,12 +351,9 @@ The direct API (`create_video_from_image`) is often blocked with 403. SmartGrokC
 
 ### cf_clearance expired
 
-If you're not using browser fallback and cf_clearance expires:
-1. Open Chrome, go to https://grok.com
-2. Copy new `cf_clearance` cookie value
-3. Update `~/.grok-config.json`
+Run `python -m grok_web.auth_manager setup` to refresh cookies automatically.
 
-Or just use browser fallback which handles this automatically.
+Or use browser fallback which handles this automatically.
 
 ## License
 

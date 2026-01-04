@@ -17,7 +17,11 @@ dependencies = [
     "curl_cffi>=0.13.0",  # For GrokClient (TLS fingerprint impersonation)
     "playwright>=1.40.0",  # For PlaywrightClient (reliable Cloudflare bypass)
     "websocket-client>=1.6.0",  # For CDP-based Chrome contention detection
+    "nodriver>=0.38",  # For auth_manager browser automation
 ]
+
+[project.scripts]
+grok-auth = "grok_web.auth_manager:main"
 
 [project.optional-dependencies]
 dev = [
