@@ -10,10 +10,11 @@ Do not import from this module directly. Use the public API from grok_web instea
 
 import re
 from abc import ABC, abstractmethod
+from collections.abc import Generator
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Generator, TypeVar
+from typing import Any, TypeVar
 
 from .exceptions import GrokAPIError, GrokAuthError, GrokNotFoundError, GrokRateLimitError
 from .models import (
@@ -382,9 +383,7 @@ class ClientLogic(ResponseParser):
         """Extract media URL from PostDetails."""
         url = details.hd_media_url or details.media_url
         if not url:
-            raise GrokAPIError(
-                f"No media URL found for video: {video_id}\nLocal file: {filename}"
-            )
+            raise GrokAPIError(f"No media URL found for video: {video_id}\nLocal file: {filename}")
         return url
 
     # =========================================================================
@@ -503,7 +502,7 @@ class ClientLogic(ResponseParser):
             try:
                 result = yield from self._match_by_parent_id(extracted_uuid, local_size, filename)
                 return result
-            except GrokNotFoundError:
+            except (GrokNotFoundError, GrokAPIError):
                 pass
 
             # Try 2: Treat as video_id
