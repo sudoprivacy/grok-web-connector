@@ -13,10 +13,35 @@ Python client library for interacting with Grok Imagine web API.
 - **Dynamic task dispatch** - Zero-maintenance worker pool (new client methods auto-available)
 - Type-safe with Pydantic models
 
+## Project Structure
+
+```
+grok-web-connector/
+├── grok_web/                    # Main package
+│   ├── __init__.py              # Public API exports
+│   ├── client.py                # SmartGrokClient, NodriverClient
+│   ├── _internal.py             # Effect Pattern implementation (DRY sync/async)
+│   ├── browser.py               # Chrome/nodriver management
+│   ├── auth.py                  # HTTP authentication
+│   ├── auth_manager.py          # Cookie management CLI
+│   ├── models.py                # Pydantic data models
+│   ├── exceptions.py            # Custom exceptions
+│   ├── selectors.py             # UI element selectors
+│   ├── nodriver_cf_verify.py    # Cloudflare bypass
+│   └── pool/                    # BrowserWorkerPool
+│       ├── __init__.py
+│       ├── worker.py            # Worker process
+│       └── manager.py           # Pool manager
+├── examples/                    # Example scripts
+│   ├── batch_camera_test.py     # Parallel video generation
+│   └── retry_moderated_child_video.py
+└── tests/                       # Test suite
+```
+
 ## Installation
 
 ```bash
-pip install git+https://github.com/user/grok-web-connector.git
+pip install git+https://github.com/elfenlieds7/grok-web-connector.git
 ```
 
 ## Quick Start
@@ -239,7 +264,7 @@ await client.create_video(
 
 When `prompt` is provided with `source_post_id`, it overrides `preset` and uses 'custom' mode.
 
-See **[grok-imagine-expert/docs/CAMERA_CONTROL.md](https://github.com/user/grok-imagine-expert/blob/main/docs/CAMERA_CONTROL.md)** for camera-specific examples with tested demo URLs.
+See **[grok-imagine-expert/docs/CAMERA_CONTROL.md](https://github.com/elfenlieds7/grok-imagine-expert/blob/main/docs/CAMERA_CONTROL.md)** for camera-specific examples with tested demo URLs.
 
 ## Client Options
 
