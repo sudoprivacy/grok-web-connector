@@ -195,8 +195,11 @@ class BrowserWorkerPool:
         for worker in self._workers.values():
             worker.mark_stopping()
 
-        # Wait for all worker tasks to complete
+        # Cancel all worker tasks to avoid hanging on queue.get() timeout
         if self._worker_tasks:
+            for task in self._worker_tasks.values():
+                task.cancel()
+            # Wait for cancellation to complete (return_exceptions handles CancelledError)
             await asyncio.gather(*self._worker_tasks.values(), return_exceptions=True)
 
         # Close all browser clients and optionally terminate Chrome
