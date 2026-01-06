@@ -206,22 +206,22 @@ class BrowserWorkerPool:
         for worker in self._workers.values():
             if worker.client:
                 try:
-                    # Terminate Chrome process if close_chrome is True AND we launched it
+                    # First, call __aexit__ to save cookies and release CDP connection
+                    # This must happen BEFORE killing Chrome, otherwise cookies can't be saved
+                    await worker.client.__aexit__(None, None, None)
+
+                    # Then, terminate Chrome process if close_chrome is True AND we launched it
                     # (if we reused existing Chrome, _chrome_process will be None)
+                    # We only kill Chrome we started - reused Chrome belongs to other scripts
                     if self._close_chrome and hasattr(worker.client, "_chrome_process"):
                         chrome_process = worker.client._chrome_process
                         if chrome_process is not None:
-                            # Chrome launches child processes and the parent exits quickly
-                            # Find the actual Chrome PID by port
                             actual_pid = get_pid_on_port(worker.port)
                             if actual_pid:
                                 logger.info(
                                     f"Killing Chrome process tree (PID: {actual_pid}) for worker {worker.worker_id}"
                                 )
-                                # Kill the entire process tree (parent + all children)
                                 _kill_process_tree(actual_pid)
-
-                    await worker.client.__aexit__(None, None, None)
                 except Exception as e:
                     logger.warning(f"Error closing worker {worker.worker_id}: {e}")
 
@@ -309,22 +309,22 @@ class BrowserWorkerPool:
         # Close browser client and optionally terminate Chrome
         if worker.client:
             try:
-                # Terminate Chrome process if close_chrome is True AND we launched it
+                # First, call __aexit__ to save cookies and release CDP connection
+                # This must happen BEFORE killing Chrome, otherwise cookies can't be saved
+                await worker.client.__aexit__(None, None, None)
+
+                # Then, terminate Chrome process if close_chrome is True AND we launched it
                 # (if we reused existing Chrome, _chrome_process will be None)
+                # We only kill Chrome we started - reused Chrome belongs to other scripts
                 if self._close_chrome and hasattr(worker.client, "_chrome_process"):
                     chrome_process = worker.client._chrome_process
                     if chrome_process is not None:
-                        # Chrome launches child processes and the parent exits quickly
-                        # Find the actual Chrome PID by port
                         actual_pid = get_pid_on_port(worker.port)
                         if actual_pid:
                             logger.info(
                                 f"Killing Chrome process tree (PID: {actual_pid}) for worker {worker_id}"
                             )
-                            # Kill the entire process tree (parent + all children)
                             _kill_process_tree(actual_pid)
-
-                await worker.client.__aexit__(None, None, None)
             except Exception as e:
                 logger.warning(f"Error closing worker {worker_id}: {e}")
 

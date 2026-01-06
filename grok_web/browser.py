@@ -453,6 +453,7 @@ async def ensure_chrome_running(
     port: int = DEFAULT_DEBUG_PORT,
     headless: bool = False,
     timeout: float = 10.0,
+    force_new: bool = False,
 ) -> subprocess.Popen | None:
     """Ensure Chrome is running with remote debugging.
 
@@ -465,6 +466,9 @@ async def ensure_chrome_running(
         port: Remote debugging port (will auto-scan 9222-9230 if not available)
         headless: Run in headless mode if launching new instance
         timeout: Max seconds to wait for Chrome to start
+        force_new: If True, always launch new Chrome (skip reuse logic).
+            Use this in BrowserWorkerPool to avoid race conditions where
+            multiple workers might try to reuse the same idle Chrome.
 
     Returns:
         Tuple of (Popen process or None, actual_port_used).
@@ -473,8 +477,22 @@ async def ensure_chrome_running(
         TimeoutError: If Chrome doesn't start within timeout.
         FileNotFoundError: If Chrome executable not found.
     """
+    # When force_new=True, skip to finding an unused port
+    if force_new:
+        # Find an unused port
+        for candidate_port in range(port, port + 78):  # 9222-9299
+            if not is_port_in_use(host, candidate_port):
+                port = candidate_port
+                break
+        else:
+            raise RuntimeError(
+                f"No available Chrome debugging ports in range {port}-{port+77}. "
+                f"All ports are in use."
+            )
+        # Skip to launch section below
+
     # Check if Chrome is already running on the requested port
-    if is_port_in_use(host, port):
+    elif is_port_in_use(host, port):
         # Check if Chrome is in use by another debugger (CDP attached)
         if is_chrome_in_use(port):
             # Port is in use by another debugger - find an available port

@@ -305,6 +305,7 @@ class NodriverClient(AsyncClientBase):
         port: int | None = None,
         auto_launch: bool = True,
         ui_delay: float = 1.0,
+        force_new_chrome: bool = False,
     ):
         """
         Initialize NodriverClient.
@@ -319,6 +320,8 @@ class NodriverClient(AsyncClientBase):
                         Set to False to only connect to existing Chrome.
             ui_delay: Multiplier for UI operation delays (default: 1.0).
                      Increase for slower connections, decrease for faster ones.
+            force_new_chrome: If True, always launch new Chrome (skip reuse logic).
+                     Use this in BrowserWorkerPool to avoid race conditions.
         """
         super().__init__()  # Initialize business logic layer
 
@@ -341,6 +344,7 @@ class NodriverClient(AsyncClientBase):
         self._remote_host = host or self.DEFAULT_DEBUG_HOST
         self._remote_port = port or self.DEFAULT_DEBUG_PORT
         self._auto_launch = auto_launch
+        self._force_new_chrome = force_new_chrome
 
     async def __aenter__(self):
         import asyncio
@@ -358,6 +362,7 @@ class NodriverClient(AsyncClientBase):
                     host=self._remote_host,
                     port=self._remote_port,
                     headless=self._headless,
+                    force_new=self._force_new_chrome,
                 )
             except FileNotFoundError as e:
                 raise GrokAPIError(str(e)) from e
@@ -438,8 +443,22 @@ class NodriverClient(AsyncClientBase):
         # for fast batch processing
 
         # Auto-save cookies on successful exit (no exception)
+        # Use timeout to avoid hanging if Chrome was already killed
         if exc_type is None and self._initialized and self._browser:
-            await self._auto_save_cookies()
+            try:
+                import asyncio
+                await asyncio.wait_for(self._auto_save_cookies(), timeout=5.0)
+            except Exception:
+                pass  # Ignore errors (Chrome may already be dead)
+
+        # Disconnect from tab to release attached state and allow Chrome reuse
+        # This properly detaches from the page target, making is_chrome_in_use() return False
+        if self._tab:
+            try:
+                import asyncio
+                await asyncio.wait_for(self._tab.disconnect(), timeout=5.0)
+            except Exception:
+                pass  # Ignore disconnect errors (including timeout)
 
     async def _auto_save_cookies(self) -> None:
         """Extract cookies from browser and save to config file."""
