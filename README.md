@@ -382,6 +382,62 @@ python -m grok_web.auth_manager clear
 
 Then run your code again - the browser will open for you to log in.
 
+## Browser Automation Research
+
+> **Note**: The browser automation module (`nodriver` + `BrowserWorkerPool`) may be extracted into a separate library in the future, as other projects (e.g., notebooklm-skill, gemini-share-skill) also need similar capabilities.
+
+### Comparison of Browser Automation Approaches
+
+| Feature | **Nodriver** (this repo) | **Patchright** (notebooklm-skill) | **Dev Browser** |
+|---------|--------------------------|-----------------------------------|-----------------|
+| **Underlying Tech** | CDP (Chrome DevTools Protocol) | Playwright fork (patched) | Playwright |
+| **Anti-Detection** | ✅ Built-in (no WebDriver traces) | ✅ Built-in (removes `--enable-automation`, fixes CDP leak) | ❌ None |
+| **State Persistence** | ✅ Persistent profile | ✅ Persistent context (cookies saved) | ✅ Stateful server |
+| **Architecture** | Script-based / Pool concurrency | Script-based (new browser context each time) | Server + Agent model |
+| **Claude Code Integration** | None | Skill (manual script calls) | Plugin (native integration) |
+| **Concurrency** | ✅ `BrowserWorkerPool` | ❌ Single instance | ❌ Single instance |
+| **Use Case** | Automation + parallel scraping | Post-login automation | **Dev testing/verification** |
+
+### When to Use What
+
+| Scenario | Recommended |
+|----------|-------------|
+| Google services automation (NotebookLM, Gemini) | **Patchright** - anti-detection required |
+| Parallel batch processing / scraping | **Nodriver** - has `BrowserWorkerPool` |
+| Interactive dev testing (verify UI) | **Dev Browser** - native Claude integration |
+| Control existing logged-in Chrome | **Dev Browser** - Chrome Extension mode |
+| Cloudflare bypass | **Nodriver** or **Patchright** |
+
+### Key Insights
+
+1. **Dev Browser** ([github.com/SawyerHood/dev-browser](https://github.com/SawyerHood/dev-browser))
+   - Designed for **development testing**, not unattended automation
+   - Native Claude Code plugin with natural language control
+   - LLM-optimized DOM snapshots for AI comprehension
+   - Chrome Extension allows controlling existing tabs with cookies
+   - Benchmark: 3m53s/$0.88 vs Playwright MCP 4m31s/$1.45
+   - **No anti-detection** → will be blocked by Google services
+
+2. **Patchright** ([github.com/AresConnor/patchright](https://github.com/AresConnor/patchright))
+   - Playwright fork with stealth patches
+   - Removes automation fingerprints (Runtime.enable leak, automation flags)
+   - Best for Google services that actively detect bots
+   - Used by: `notebooklm-skill`, `gemini-share-skill`
+
+3. **Nodriver** (this repo)
+   - Pure CDP implementation, no Selenium/WebDriver
+   - Built-in anti-detection at protocol level
+   - `BrowserWorkerPool` for parallel task execution with retry logic
+   - Best for batch operations and scraping
+
+### Future Considerations
+
+If extracting browser module into separate library:
+- Core: `nodriver` wrapper with anti-detection
+- Pool: `BrowserWorkerPool` with retry, state persistence, fail conditions
+- Optional: Patchright adapter for Google services
+- Interface: Unified API across both backends
+
 ## License
 
 MIT
