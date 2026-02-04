@@ -1,201 +1,44 @@
 """Browser management utilities for NodriverClient.
 
-Handles automatic Chrome launching with isolated profiles for reliable automation.
+Delegates to ai-dev-browser for common browser operations.
+Keeps grok-specific profile prefix for temp Chrome identification.
 """
 
 import asyncio
 import logging
 import os
-import platform
-import shutil
 import signal
-import socket
-import subprocess
 import tempfile
 from pathlib import Path
 
+# Import from ai-dev-browser instead of duplicating code
+from ai_dev_browser import (
+    find_chrome,
+    get_pid_on_port,
+    get_process_cmdline,
+    is_chrome_in_use,
+    is_port_in_use,
+    launch_chrome,
+)
+from ai_dev_browser.core.config import DEFAULT_DEBUG_HOST, DEFAULT_PORT_RANGE
+
 logger = logging.getLogger(__name__)
 
-# Default debugging port for Chrome
-DEFAULT_DEBUG_PORT = 9222
-DEFAULT_DEBUG_HOST = "127.0.0.1"
+# Grok-specific temp profile prefix (different from ai-dev-browser's)
+GROK_TEMP_PROFILE_PREFIX = "grok_chrome_"
 
-# Prefix used for temp Chrome profiles launched by this library
-TEMP_PROFILE_PREFIX = "grok_chrome_"
-
-
-def get_chrome_executable() -> str | None:
-    """Find Chrome executable path based on platform.
-
-    Returns:
-        Path to Chrome executable, or None if not found.
-    """
-    system = platform.system()
-
-    if system == "Darwin":  # macOS
-        candidates = [
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-            "/Applications/Chromium.app/Contents/MacOS/Chromium",
-            str(Path.home() / "Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
-        ]
-    elif system == "Windows":
-        candidates = [
-            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-            str(Path.home() / r"AppData\Local\Google\Chrome\Application\chrome.exe"),
-        ]
-    else:  # Linux
-        candidates = [
-            "/usr/bin/google-chrome",
-            "/usr/bin/google-chrome-stable",
-            "/usr/bin/chromium",
-            "/usr/bin/chromium-browser",
-            "/snap/bin/chromium",
-        ]
-
-    # Check which candidates
-    for candidate in candidates:
-        if Path(candidate).exists():
-            return candidate
-
-    # Try to find via 'which' on Unix-like systems
-    if system != "Windows":
-        for cmd in ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"]:
-            result = shutil.which(cmd)
-            if result:
-                return result
-
-    return None
+# Re-export for backwards compatibility
+DEFAULT_DEBUG_PORT = DEFAULT_PORT_RANGE[0]  # 9350
 
 
-def is_port_in_use(host: str, port: int, timeout: float = 0.1) -> bool:
-    """Check if a port is in use (Chrome might be listening).
-
-    Args:
-        host: Host to check
-        port: Port to check
-        timeout: Connection timeout in seconds (default 0.1s for fast scanning)
-
-    Returns:
-        True if port is in use, False otherwise.
-    """
-    # Check IPv4
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.settimeout(timeout)
-            sock.connect((host, port))
-            return True
-    except (TimeoutError, ConnectionRefusedError, OSError):
-        pass
-
-    # Check IPv6 (Chrome on Windows might only listen on IPv6)
-    try:
-        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as sock:
-            sock.settimeout(timeout)
-            # Map IPv4 loopback to IPv6
-            ipv6_host = "::1" if host in ("127.0.0.1", "localhost") else host
-            sock.connect((ipv6_host, port))
-            return True
-    except (TimeoutError, ConnectionRefusedError, OSError):
-        pass
-
-    return False
-
-
-def get_pid_on_port(port: int) -> int | None:
-    """Get the PID of the process listening on a port.
-
-    Args:
-        port: Port number to check
-
-    Returns:
-        PID if found, None otherwise.
-    """
-    system = platform.system()
-
-    if system == "Darwin" or system == "Linux":
-        # Use lsof on Unix-like systems
-        try:
-            result = subprocess.run(
-                ["lsof", "-i", f":{port}", "-t", "-sTCP:LISTEN"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                # lsof -t returns just the PID
-                return int(result.stdout.strip().split("\n")[0])
-        except (subprocess.TimeoutExpired, ValueError, FileNotFoundError):
-            pass
-    elif system == "Windows":
-        # Use netstat on Windows (without -p TCP to include IPv6 listeners)
-        try:
-            result = subprocess.run(
-                ["netstat", "-ano"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            for line in result.stdout.split("\n"):
-                if f":{port}" in line and "LISTENING" in line and "TCP" in line:
-                    parts = line.split()
-                    if parts:
-                        return int(parts[-1])
-        except (subprocess.TimeoutExpired, ValueError, FileNotFoundError):
-            pass
-
-    return None
-
-
-def get_process_cmdline(pid: int) -> str | None:
-    """Get the command line arguments of a process.
-
-    Args:
-        pid: Process ID
-
-    Returns:
-        Command line string if found, None otherwise.
-    """
-    system = platform.system()
-
-    if system == "Darwin" or system == "Linux":
-        try:
-            result = subprocess.run(
-                ["ps", "-p", str(pid), "-o", "args="],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            if result.returncode == 0:
-                return result.stdout.strip()
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            pass
-    elif system == "Windows":
-        try:
-            result = subprocess.run(
-                ["wmic", "process", "where", f"ProcessId={pid}", "get", "CommandLine"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            if result.returncode == 0:
-                lines = [line.strip() for line in result.stdout.split("\n") if line.strip()]
-                if len(lines) > 1:
-                    return lines[1]  # Skip header
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            pass
-
-    return None
-
-
-def is_temp_chrome_on_port(port: int) -> tuple[bool, int | None]:
-    """Check if the Chrome on a port is a temp profile launched by us.
+def is_grok_temp_chrome_on_port(port: int) -> tuple[bool, int | None]:
+    """Check if the Chrome on a port is a grok temp profile.
 
     Args:
         port: Port to check
 
     Returns:
-        Tuple of (is_temp_chrome, pid). If not a temp Chrome or no Chrome, returns (False, None).
+        Tuple of (is_grok_temp_chrome, pid).
     """
     pid = get_pid_on_port(port)
     if pid is None:
@@ -205,377 +48,211 @@ def is_temp_chrome_on_port(port: int) -> tuple[bool, int | None]:
     if cmdline is None:
         return False, pid
 
-    # Check if it's Chrome with our temp profile prefix
-    if "chrome" in cmdline.lower() and TEMP_PROFILE_PREFIX in cmdline:
+    # Check if it's Chrome with our grok temp profile prefix
+    if "chrome" in cmdline.lower() and GROK_TEMP_PROFILE_PREFIX in cmdline:
         return True, pid
 
     return False, pid
 
 
-def is_chrome_in_use(port: int, timeout: float = 0.5) -> bool:
-    """Check if Chrome on this port is being used by another script via CDP.
-
-    This is more reliable than file-based locking because:
-    1. No cleanup needed - when script dies, CDP attachment is automatically released
-    2. No race conditions - CDP state is always current
-    3. No stale lock detection needed
-
-    Args:
-        port: Chrome debugging port to check
-        timeout: Connection timeout in seconds
-
-    Returns:
-        True if Chrome has attached debugger sessions (in use by another script),
-        False if no attached sessions or Chrome is not available.
-    """
-    import json
-    import urllib.request
-    import urllib.error
-
-    try:
-        # Get browser WebSocket URL
-        version_url = f"http://127.0.0.1:{port}/json/version"
-        req = urllib.request.Request(version_url)
-        with urllib.request.urlopen(req, timeout=timeout) as response:
-            version = json.loads(response.read())
-            browser_ws = version.get("webSocketDebuggerUrl")
-
-        if not browser_ws:
-            return False
-
-        # Use synchronous WebSocket to check targets
-        # We need to do this synchronously for compatibility with find_nodriver_chromes
-        import websocket
-
-        ws = websocket.create_connection(browser_ws, timeout=timeout)
-        try:
-            # Get all targets
-            ws.send(json.dumps({"id": 1, "method": "Target.getTargets"}))
-            response = json.loads(ws.recv())
-
-            # Check if any page targets are attached
-            for target in response.get("result", {}).get("targetInfos", []):
-                if target.get("type") == "page" and target.get("attached", False):
-                    logger.debug(
-                        f"Port {port} is in use: page '{target.get('title', 'unknown')[:30]}' "
-                        f"has attached debugger"
-                    )
-                    return True
-
-            return False
-        finally:
-            ws.close()
-
-    except Exception as e:
-        logger.debug(f"Could not check CDP state for port {port}: {e}")
-        return False
-
-
-def find_nodriver_chromes(
-    port_range: tuple[int, int] = (9222, 9300),
+def find_grok_chromes(
+    port_range: tuple[int, int] = DEFAULT_PORT_RANGE,
     exclude_in_use: bool = True,
 ) -> list[int]:
-    """Find all ports with nodriver Chrome instances (temp profiles).
-
-    Scans the given port range for Chrome instances launched by this library.
+    """Find all ports with grok temp Chrome instances.
 
     Args:
         port_range: Tuple of (start_port, end_port) to scan
-        exclude_in_use: If True (default), skip ports where Chrome has attached
-                       debugger sessions (detected via CDP). Requires Chrome to
-                       be launched with --remote-allow-origins=* flag.
+        exclude_in_use: If True, skip ports with attached debugger sessions
 
     Returns:
-        List of ports with nodriver Chrome instances.
+        List of ports with grok Chrome instances.
     """
-    nodriver_ports = []
+    grok_ports = []
     for port in range(port_range[0], port_range[1]):
-        is_temp, _ = is_temp_chrome_on_port(port)
-        if is_temp:
-            # Check CDP-based in-use detection
-            if exclude_in_use:
-                if is_chrome_in_use(port):
-                    logger.debug(f"Skipping in-use Chrome on port {port} (has attached debugger)")
-                    continue
-
-            nodriver_ports.append(port)
-    return nodriver_ports
+        is_grok, _ = is_grok_temp_chrome_on_port(port)
+        if is_grok:
+            if exclude_in_use and is_chrome_in_use(port):
+                logger.debug(f"Skipping in-use Chrome on port {port}")
+                continue
+            grok_ports.append(port)
+    return grok_ports
 
 
-def get_available_port(start: int = 9222, end: int = 9300, exclude: set[int] | None = None) -> int:
-    """Find an available port for Chrome, preferring to reuse existing nodriver Chromes.
-
-    Port selection strategy:
-    1. First, look for existing nodriver Chrome (temp profile) not in use by another debugger
-    2. If none found, find an unused port for launching new Chrome
+def get_available_port(
+    start: int = DEFAULT_PORT_RANGE[0],
+    end: int = DEFAULT_PORT_RANGE[1],
+    exclude: set[int] | None = None,
+) -> int:
+    """Find an available port, preferring to reuse existing grok Chromes.
 
     Args:
-        start: Start of port range to search
-        end: End of port range to search
-        exclude: Set of ports to skip (e.g., already assigned to workers)
+        start: Start of port range
+        end: End of port range
+        exclude: Ports to skip
 
     Returns:
-        An available port number
+        Available port number
 
     Raises:
-        RuntimeError: If no available port found in range
+        RuntimeError: If no available port found
     """
     exclude = exclude or set()
 
-    # Strategy 1: Try to reuse existing nodriver Chrome (temp profile) not in use
+    # Strategy 1: Reuse existing grok Chrome not in use
     for port in range(start, end):
         if port in exclude:
             continue
-        if is_port_in_use(DEFAULT_DEBUG_HOST, port):
-            is_temp, _ = is_temp_chrome_on_port(port)
-            if is_temp and not is_chrome_in_use(port):
-                logger.debug(f"Found reusable nodriver Chrome on port {port}")
+        if is_port_in_use(port=port):
+            is_grok, _ = is_grok_temp_chrome_on_port(port)
+            if is_grok and not is_chrome_in_use(port):
+                logger.debug(f"Found reusable grok Chrome on port {port}")
                 return port
 
-    # Strategy 2: Find unused port for new Chrome
+    # Strategy 2: Find unused port
     for port in range(start, end):
         if port in exclude:
             continue
-        if not is_port_in_use(DEFAULT_DEBUG_HOST, port):
+        if not is_port_in_use(port=port):
             return port
 
     raise RuntimeError(f"No available port found in range {start}-{end}")
 
 
-def kill_stale_temp_chrome(port: int) -> bool:
-    """Kill a stale temp Chrome process on the given port.
-
-    Only kills Chrome if it was launched by us (has grok_chrome_ temp profile).
+def kill_stale_grok_chrome(port: int) -> bool:
+    """Kill a stale grok temp Chrome on the given port.
 
     Args:
         port: Port where Chrome might be listening
 
     Returns:
-        True if a temp Chrome was killed, False otherwise.
+        True if killed, False otherwise.
     """
-    is_temp, pid = is_temp_chrome_on_port(port)
+    is_grok, pid = is_grok_temp_chrome_on_port(port)
 
-    if not is_temp or pid is None:
+    if not is_grok or pid is None:
         return False
 
     try:
         os.kill(pid, signal.SIGTERM)
-        logger.info(f"Killed stale temp Chrome (PID {pid}) on port {port}")
+        logger.info(f"Killed stale grok Chrome (PID {pid}) on port {port}")
         return True
     except (ProcessLookupError, PermissionError) as e:
-        logger.warning(f"Failed to kill temp Chrome (PID {pid}): {e}")
+        logger.warning(f"Failed to kill grok Chrome (PID {pid}): {e}")
         return False
 
 
-def launch_chrome_with_debug_port(
+def launch_grok_chrome(
     port: int = DEFAULT_DEBUG_PORT,
     headless: bool = False,
     user_data_dir: str | Path | None = None,
-) -> subprocess.Popen:
-    """Launch Chrome with remote debugging enabled.
+):
+    """Launch Chrome with grok temp profile.
 
     Args:
-        port: Remote debugging port (default: 9222)
+        port: Remote debugging port
         headless: Run in headless mode
-        user_data_dir: Custom user data directory. If None, creates a temp directory.
+        user_data_dir: Custom user data dir. If None, creates grok temp dir.
 
     Returns:
-        Popen process handle for the Chrome instance.
-
-    Raises:
-        FileNotFoundError: If Chrome executable not found.
-        RuntimeError: If Chrome fails to start.
+        Popen process handle
     """
-    chrome_path = get_chrome_executable()
-    if not chrome_path:
-        raise FileNotFoundError(
-            "Chrome executable not found. Please install Google Chrome or set the path manually."
-        )
-
-    # Create isolated user data directory if not provided
+    # Create grok-specific temp directory if not provided
     if user_data_dir is None:
-        user_data_dir = tempfile.mkdtemp(prefix="grok_chrome_")
+        user_data_dir = tempfile.mkdtemp(prefix=GROK_TEMP_PROFILE_PREFIX)
 
-    # Build Chrome arguments (cross-platform)
-    args = [
-        chrome_path,
-        f"--remote-debugging-port={port}",
-        f"--user-data-dir={user_data_dir}",
-        "--remote-allow-origins=*",  # Allow CDP connections for is_chrome_in_use() detection
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--disable-background-networking",
-        "--disable-client-side-phishing-detection",
-        "--disable-default-apps",
-        "--disable-extensions",
-        "--disable-hang-monitor",
-        "--disable-popup-blocking",
-        "--disable-prompt-on-repost",
-        "--disable-sync",
-        "--disable-translate",
-        "--metrics-recording-only",
-        "--safebrowsing-disable-auto-update",
-    ]
-
-    if headless:
-        args.append("--headless=new")
-
-    # Start Chrome process
-    try:
-        # Use subprocess.Popen on all platforms
-        # On Unix, use start_new_session to detach from parent
-        # On Windows, CREATE_NEW_PROCESS_GROUP for similar isolation
-        if platform.system() == "Windows":
-            popen_kwargs = {
-                "stdout": subprocess.DEVNULL,
-                "stderr": subprocess.PIPE,
-                "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP,
-            }
-        else:
-            popen_kwargs = {
-                "stdout": subprocess.DEVNULL,
-                "stderr": subprocess.PIPE,
-                "start_new_session": True,
-            }
-
-        logger.debug(f"Launching Chrome with args: {args[:3]}...")
-        process = subprocess.Popen(args, **popen_kwargs)
-
-        logger.debug(f"Chrome process created, PID: {process.pid}")
-    except Exception as e:
-        raise RuntimeError(f"Failed to launch Chrome: {e}") from e
-
-    return process
+    return launch_chrome(
+        port=port,
+        headless=headless,
+        start_url="about:blank",
+        user_data_dir=str(user_data_dir),
+    )
 
 
 async def ensure_chrome_running(
-    host: str = DEFAULT_DEBUG_HOST,
+    host: str = DEFAULT_DEBUG_HOST,  # noqa: ARG001 - kept for API compatibility
     port: int = DEFAULT_DEBUG_PORT,
     headless: bool = False,
     timeout: float = 10.0,
     force_new: bool = False,
-) -> subprocess.Popen | None:
+):
     """Ensure Chrome is running with remote debugging.
-
-    If any Chrome is already running on the port (user's or temp), reuses it.
-    This preserves logged-in sessions from previous NodriverClient instances.
-    Otherwise, launches a new Chrome instance.
 
     Args:
         host: Remote debugging host
-        port: Remote debugging port (will auto-scan 9222-9230 if not available)
+        port: Remote debugging port
         headless: Run in headless mode if launching new instance
         timeout: Max seconds to wait for Chrome to start
-        force_new: If True, always launch new Chrome (skip reuse logic).
-            Use this in BrowserWorkerPool to avoid race conditions where
-            multiple workers might try to reuse the same idle Chrome.
+        force_new: If True, always launch new Chrome
 
     Returns:
-        Tuple of (Popen process or None, actual_port_used).
-
-    Raises:
-        TimeoutError: If Chrome doesn't start within timeout.
-        FileNotFoundError: If Chrome executable not found.
+        Tuple of (Popen process or None, actual_port_used)
     """
-    # When force_new=True, skip to finding an unused port
+    port_range = (port, port + 100)
+
     if force_new:
-        # Find an unused port
-        for candidate_port in range(port, port + 78):  # 9222-9299
-            if not is_port_in_use(host, candidate_port):
-                port = candidate_port
+        # Find unused port
+        for candidate in range(port, port + 100):
+            if not is_port_in_use(port=candidate):
+                port = candidate
                 break
         else:
-            raise RuntimeError(
-                f"No available Chrome debugging ports in range {port}-{port+77}. "
-                f"All ports are in use."
-            )
-        # Skip to launch section below
+            raise RuntimeError(f"No available ports in range {port}-{port+99}")
 
-    # Check if Chrome is already running on the requested port
-    elif is_port_in_use(host, port):
-        # Check if Chrome is in use by another debugger (CDP attached)
+    elif is_port_in_use(port=port):
         if is_chrome_in_use(port):
-            # Port is in use by another debugger - find an available port
-            logger.warning(
-                f"Chrome on port {port} is in use by another debugger session. "
-                f"Searching for available port..."
-            )
-            # Search for an available port in range 9222-9300
-            # Strategy: First find any unused port (fast), then check if there are idle temp Chromes
-            unused_port = None
-            for candidate_port in range(9222, 9300):
-                if candidate_port == port:
-                    continue
-                if not is_port_in_use(host, candidate_port):
-                    # Found unused port - remember it as fallback
-                    if unused_port is None:
-                        unused_port = candidate_port
-                    continue
-                # Port is in use - quickly check if it's our temp Chrome (process check is fast)
-                is_temp, pid = is_temp_chrome_on_port(candidate_port)
-                if is_temp:
-                    # It's our Chrome - check if available via CDP (only for our Chromes)
-                    if not is_chrome_in_use(candidate_port):
-                        logger.info(f"Reusing available temp Chrome on port {candidate_port}")
-                        return None, candidate_port
+            # Port busy, find available one
+            logger.warning(f"Chrome on port {port} is in use, searching...")
 
-            # Use unused port if found
+            # Look for idle grok Chrome or unused port
+            unused_port = None
+            for candidate in range(port_range[0], port_range[1]):
+                if candidate == port:
+                    continue
+                if not is_port_in_use(port=candidate):
+                    if unused_port is None:
+                        unused_port = candidate
+                    continue
+                is_grok, _ = is_grok_temp_chrome_on_port(candidate)
+                if is_grok and not is_chrome_in_use(candidate):
+                    logger.info(f"Reusing idle grok Chrome on port {candidate}")
+                    return None, candidate
+
             if unused_port is not None:
-                logger.info(f"Launching new Chrome on available port {unused_port}")
                 port = unused_port
             else:
-                # No available port found
-                raise RuntimeError(
-                    f"No available Chrome debugging ports in range 9222-9299. "
-                    f"All ports are in use by other debugger sessions."
-                )
+                raise RuntimeError(f"No available ports in range {port_range[0]}-{port_range[1]}")
         else:
-            # Port has Chrome but not attached - safe to reuse
-            # Check if it's a temp Chrome from a previous session
-            #
-            # TODO: Add health check before reusing Chrome
-            # There's a corner case where Chrome process exists and port is listening,
-            # but DevTools HTTP endpoint (/json/version) doesn't respond (zombie state).
-            # This happens when Chrome crashes or hangs but process doesn't exit cleanly.
-            # Current checks (is_port_in_use, is_temp_chrome, is_chrome_in_use) all pass,
-            # but nodriver.start() fails with "Failed to connect to browser".
-            # Fix: Before returning, verify http://127.0.0.1:{port}/json/version responds.
-            # If not, kill the zombie process and launch fresh Chrome.
-            #
-            is_temp, pid = is_temp_chrome_on_port(port)
-            if is_temp:
-                # Reuse existing temp Chrome - it may have logged-in session
-                logger.debug(f"Reusing existing temp Chrome (PID {pid}) on port {port}")
-                return None, port
+            # Port has Chrome but not attached - reuse it
+            is_grok, pid = is_grok_temp_chrome_on_port(port)
+            if is_grok:
+                logger.debug(f"Reusing grok Chrome (PID {pid}) on port {port}")
             else:
-                # User's Chrome with real profile - reuse it
                 logger.debug(f"Reusing existing Chrome on port {port}")
-                return None, port
+            return None, port
 
-    # Launch Chrome on the (possibly updated) port
-    process = launch_chrome_with_debug_port(port=port, headless=headless)
-
-    is_windows = platform.system() == "Windows"
+    # Launch new Chrome
+    process = launch_grok_chrome(port=port, headless=headless)
 
     # Wait for Chrome to be ready
     start_time = asyncio.get_event_loop().time()
-    while not is_port_in_use(host, port):
+    while not is_port_in_use(port=port):
         elapsed = asyncio.get_event_loop().time() - start_time
-
-        # On Unix, check if process is still running
-        if not is_windows:
-            poll_result = process.poll()
-            if poll_result is not None:
-                raise RuntimeError(f"Chrome process exited with code {poll_result}")
-
+        poll_result = process.poll()
+        if poll_result is not None:
+            raise RuntimeError(f"Chrome process exited with code {poll_result}")
         if elapsed > timeout:
-            raise TimeoutError(
-                f"Chrome failed to start on port {port} within {timeout} seconds. "
-                f"Port may be occupied or Chrome instance failed to launch."
-            )
+            raise TimeoutError(f"Chrome failed to start on port {port} within {timeout}s")
         await asyncio.sleep(0.2)
 
-    # Give Chrome a moment to fully initialize
     await asyncio.sleep(0.5)
-
     return process, port
+
+
+# Backwards compatibility re-exports
+get_chrome_executable = find_chrome
+is_temp_chrome_on_port = is_grok_temp_chrome_on_port
+find_nodriver_chromes = find_grok_chromes
+kill_stale_temp_chrome = kill_stale_grok_chrome
+launch_chrome_with_debug_port = launch_grok_chrome
+TEMP_PROFILE_PREFIX = GROK_TEMP_PROFILE_PREFIX

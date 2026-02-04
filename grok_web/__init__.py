@@ -110,13 +110,14 @@ Last updated: 2025-12-16
 
 from pathlib import Path
 
+from ai_dev_browser import is_chrome_in_use
+
 from .auth import load_cookies, save_cookies
 from .browser import (
-    find_nodriver_chromes,
-    is_chrome_in_use,
+    find_grok_chromes,
+    is_grok_temp_chrome_on_port,
 )
 from .client import SmartGrokClient
-from .selectors import select_all, timeout_selector, signal_file_selector
 from .exceptions import (
     GrokAPIError,
     GrokAuthError,
@@ -138,8 +139,12 @@ from .models import (
     VideoPreset,
 )
 from .pool import BrowserWorkerPool
+from .selectors import select_all, signal_file_selector, timeout_selector
 
 __version__ = "0.6.0"
+
+# Backwards compatibility alias
+find_nodriver_chromes = find_grok_chromes
 
 
 def get_client(
@@ -158,14 +163,14 @@ def get_client(
 
     Port allocation is handled automatically by ensure_chrome_running():
     - If browser_port is specified, uses that port (auto-finds another if in use)
-    - If browser_port is None, defaults to 9222 (auto-finds another if in use)
+    - If browser_port is None, defaults to 9350 (auto-finds another if in use)
     - CDP-based detection prevents connecting to Chrome already in use
 
     Args:
         cookies: Pre-loaded GrokCookies (optional, loads from config if None)
         config_path: Path to config file (default: ~/.grok-config.json)
         browser_host: Chrome debugging host (optional, defaults to 127.0.0.1)
-        browser_port: Chrome debugging port (optional, defaults to 9222)
+        browser_port: Chrome debugging port (optional, defaults to 9350)
         headless: Run browser in headless mode (default: False)
 
     Returns:
@@ -220,6 +225,8 @@ __all__ = [
     "timeout_selector",
     "signal_file_selector",
     # Browser utilities
-    "find_nodriver_chromes",
+    "find_grok_chromes",
+    "find_nodriver_chromes",  # Backwards compatibility
+    "is_grok_temp_chrome_on_port",
     "is_chrome_in_use",
 ]
