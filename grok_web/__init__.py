@@ -110,13 +110,7 @@ Last updated: 2025-12-16
 
 from pathlib import Path
 
-from ai_dev_browser import is_chrome_in_use
-
 from .auth import load_cookies, save_cookies
-from .browser import (
-    find_grok_chromes,
-    is_grok_temp_chrome_on_port,
-)
 from .client import SmartGrokClient
 from .exceptions import (
     GrokAPIError,
@@ -142,9 +136,6 @@ from .pool import BrowserWorkerPool
 from .selectors import select_all, signal_file_selector, timeout_selector
 
 __version__ = "0.6.0"
-
-# Backwards compatibility alias
-find_nodriver_chromes = find_grok_chromes
 
 
 def get_client(
@@ -224,9 +215,4 @@ __all__ = [
     "select_all",
     "timeout_selector",
     "signal_file_selector",
-    # Browser utilities
-    "find_grok_chromes",
-    "find_nodriver_chromes",  # Backwards compatibility
-    "is_grok_temp_chrome_on_port",
-    "is_chrome_in_use",
 ]

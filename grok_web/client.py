@@ -306,6 +306,7 @@ class NodriverClient(AsyncClientBase):
         auto_launch: bool = True,
         ui_delay: float = 1.0,
         force_new_chrome: bool = False,
+        profile: str | None = None,
     ):
         """
         Initialize NodriverClient.
@@ -322,6 +323,8 @@ class NodriverClient(AsyncClientBase):
                      Increase for slower connections, decrease for faster ones.
             force_new_chrome: If True, always launch new Chrome (skip reuse logic).
                      Use this in BrowserWorkerPool to avoid race conditions.
+            profile: Chrome profile name for start_browser (default: "grok-chrome").
+                     Worker pool uses per-worker profiles like "grok-chrome-w0".
         """
         super().__init__()  # Initialize business logic layer
 
@@ -340,11 +343,12 @@ class NodriverClient(AsyncClientBase):
         self._chrome_process = None  # Track Chrome process we launched
         self._ui_delay = ui_delay
 
-        # Browser connection settings (always use reuse mode now)
+        # Browser connection settings
         self._remote_host = host or self.DEFAULT_DEBUG_HOST
         self._remote_port = port or self.DEFAULT_DEBUG_PORT
         self._auto_launch = auto_launch
         self._force_new_chrome = force_new_chrome
+        self._profile = profile
 
     async def __aenter__(self):
         import asyncio
@@ -363,6 +367,7 @@ class NodriverClient(AsyncClientBase):
                     port=self._remote_port,
                     headless=self._headless,
                     force_new=self._force_new_chrome,
+                    profile=self._profile,
                 )
             except FileNotFoundError as e:
                 raise GrokAPIError(str(e)) from e
@@ -377,7 +382,10 @@ class NodriverClient(AsyncClientBase):
                     f"--user-data-dir=/tmp/chrome_debug"
                 )
 
-        # Connect to Chrome using the actual port (may differ from requested if auto-scanned)
+        # Store actual port (may differ from requested if auto-assigned)
+        self._remote_port = actual_port
+
+        # Connect to Chrome using the actual port
         try:
             self._browser = await nodriver.start(
                 host=self._remote_host,
@@ -385,7 +393,7 @@ class NodriverClient(AsyncClientBase):
             )
         except Exception as e:
             raise GrokAPIError(
-                f"Failed to connect to Chrome at {self._remote_host}:{self._remote_port}: {e}"
+                f"Failed to connect to Chrome at {self._remote_host}:{actual_port}: {e}"
             ) from e
 
         # Try to reuse existing grok.com tab, or use first available page tab
@@ -447,6 +455,7 @@ class NodriverClient(AsyncClientBase):
         if exc_type is None and self._initialized and self._browser:
             try:
                 import asyncio
+
                 await asyncio.wait_for(self._auto_save_cookies(), timeout=5.0)
             except Exception:
                 pass  # Ignore errors (Chrome may already be dead)
@@ -456,6 +465,7 @@ class NodriverClient(AsyncClientBase):
         if self._tab:
             try:
                 import asyncio
+
                 await asyncio.wait_for(self._tab.disconnect(), timeout=5.0)
             except Exception:
                 pass  # Ignore disconnect errors (including timeout)

@@ -4,17 +4,14 @@ import asyncio
 import contextlib
 import inspect
 import logging
-import platform
-import subprocess
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from ..browser import (
-    get_available_port,
-    get_pid_on_port,
-)
+from ai_dev_browser.core import stop_browser
+
+from ..browser import GROK_CHROME_PROFILE
 from ..client import NodriverClient
 from ..models import GrokCookies
 from .job import Job, JobResult, JobStatus
@@ -30,35 +27,6 @@ class _SharedTarget:
 
     target: int
     state: dict[str, int] = field(default_factory=dict)  # job_id -> success_count
-
-
-def _kill_process_tree(pid: int) -> None:
-    """Kill a process and all its children (process tree).
-
-    On Windows, Chrome spawns child processes that continue running even after
-    the parent is killed. We need to kill the entire process tree.
-
-    Args:
-        pid: Process ID to kill (including all descendants)
-    """
-    try:
-        if platform.system() == "Windows":
-            # Use taskkill /T to kill process tree on Windows
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(pid)],
-                capture_output=True,
-                timeout=10,
-            )
-        else:
-            # On Unix-like systems, use SIGKILL
-            import contextlib
-            import os
-            import signal
-
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(os.getpgid(pid), signal.SIGKILL)
-    except Exception as e:
-        logger.warning(f"Failed to kill process tree for PID {pid}: {e}")
 
 
 class BrowserWorkerPool:
@@ -210,18 +178,15 @@ class BrowserWorkerPool:
                     # This must happen BEFORE killing Chrome, otherwise cookies can't be saved
                     await worker.client.__aexit__(None, None, None)
 
-                    # Then, terminate Chrome process if close_chrome is True AND we launched it
-                    # (if we reused existing Chrome, _chrome_process will be None)
-                    # We only kill Chrome we started - reused Chrome belongs to other scripts
-                    if self._close_chrome and hasattr(worker.client, "_chrome_process"):
-                        chrome_process = worker.client._chrome_process
-                        if chrome_process is not None:
-                            actual_pid = get_pid_on_port(worker.port)
-                            if actual_pid:
-                                logger.info(
-                                    f"Killing Chrome process tree (PID: {actual_pid}) for worker {worker.worker_id}"
-                                )
-                                _kill_process_tree(actual_pid)
+                    # Then, terminate Chrome if close_chrome is True
+                    if self._close_chrome and worker.port:
+                        try:
+                            stop_browser(port=worker.port)
+                            logger.info(
+                                f"Stopped Chrome on port {worker.port} for worker {worker.worker_id}"
+                            )
+                        except Exception:
+                            pass  # Chrome may already be gone
                 except Exception as e:
                     logger.warning(f"Error closing worker {worker.worker_id}: {e}")
 
@@ -235,8 +200,8 @@ class BrowserWorkerPool:
     async def add_worker(self) -> int:
         """Add a new worker to the pool.
 
-        Port allocation: finds next available port, CDP contention handled by
-        ensure_chrome_running() which auto-finds another port if needed.
+        Each worker gets a named profile (e.g., "grok-chrome-w0") for Chrome
+        reuse across runs. Port allocation is handled by start_browser().
 
         Returns:
             worker_id of the new worker
@@ -244,33 +209,29 @@ class BrowserWorkerPool:
         worker_id = self._next_worker_id
         self._next_worker_id += 1
 
-        # Get next available port (exclude ports already assigned to other workers in this pool)
-        # CDP-based contention with other processes is handled by ensure_chrome_running()
-        port = get_available_port(exclude=self._used_ports)
-        self._used_ports.add(port)
+        # Each worker gets its own named profile for Chrome reuse
+        profile = f"{GROK_CHROME_PROFILE}-w{worker_id}"
 
-        # Create worker
-        worker = Worker(worker_id=worker_id, port=port)
-        self._workers[worker_id] = worker
-
-        # Initialize browser client
+        # Initialize browser client with per-worker profile
         client = NodriverClient(
             cookies=self._cookies,
             config_path=self._config_path,
             headless=self._headless,
-            port=port,
             auto_launch=True,
+            profile=profile,
         )
 
         try:
             await client.__aenter__()
+            # Port is determined by start_browser, read it back
+            actual_port = client._remote_port
+            worker = Worker(worker_id=worker_id, port=actual_port)
+            self._workers[worker_id] = worker
+            self._used_ports.add(actual_port)
             worker.client = client
-            logger.info(f"Worker {worker_id} started on port {port}")
+            logger.info(f"Worker {worker_id} started on port {actual_port} (profile: {profile})")
         except Exception as e:
             logger.error(f"Failed to start worker {worker_id}: {e}")
-            worker.status = WorkerStatus.ERROR
-            self._used_ports.discard(port)
-            del self._workers[worker_id]
             raise
 
         # Start worker loop
@@ -313,28 +274,22 @@ class BrowserWorkerPool:
                 # This must happen BEFORE killing Chrome, otherwise cookies can't be saved
                 await worker.client.__aexit__(None, None, None)
 
-                # Then, terminate Chrome process if close_chrome is True AND we launched it
-                # (if we reused existing Chrome, _chrome_process will be None)
-                # We only kill Chrome we started - reused Chrome belongs to other scripts
-                if self._close_chrome and hasattr(worker.client, "_chrome_process"):
-                    chrome_process = worker.client._chrome_process
-                    if chrome_process is not None:
-                        actual_pid = get_pid_on_port(worker.port)
-                        if actual_pid:
-                            logger.info(
-                                f"Killing Chrome process tree (PID: {actual_pid}) for worker {worker_id}"
-                            )
-                            _kill_process_tree(actual_pid)
+                # Then, terminate Chrome if close_chrome is True
+                if self._close_chrome and worker.port:
+                    try:
+                        stop_browser(port=worker.port)
+                        logger.info(f"Stopped Chrome on port {worker.port} for worker {worker_id}")
+                    except Exception:
+                        pass  # Chrome may already be gone
             except Exception as e:
                 logger.warning(f"Error closing worker {worker_id}: {e}")
 
         # Release the port
-        port = worker.port
-        self._used_ports.discard(port)
+        self._used_ports.discard(worker.port)
 
         worker.mark_stopped()
         del self._workers[worker_id]
-        logger.info(f"Worker {worker_id} removed (port {port} released)")
+        logger.info(f"Worker {worker_id} removed (port {worker.port} released)")
 
     # =========================================================================
     # Job Management

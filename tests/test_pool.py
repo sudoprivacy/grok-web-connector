@@ -844,28 +844,32 @@ class TestPoolCDPDetection:
     """Tests for BrowserWorkerPool port allocation."""
 
     @pytest.mark.asyncio
-    async def test_add_worker_uses_get_available_port(self):
-        """add_worker uses get_available_port for port allocation."""
+    async def test_add_worker_uses_named_profile(self):
+        """add_worker uses per-worker named profile for Chrome reuse."""
         from unittest.mock import AsyncMock, MagicMock, patch
 
         from grok_web.pool import BrowserWorkerPool
 
         pool = BrowserWorkerPool(num_workers=0)
 
-        with (
-            patch("grok_web.pool.worker_pool.get_available_port", return_value=9225),
-            patch("grok_web.pool.worker_pool.NodriverClient") as mock_client_cls,
-        ):
+        with patch("grok_web.pool.worker_pool.NodriverClient") as mock_client_cls:
             mock_client = MagicMock()
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
             mock_client.__aexit__ = AsyncMock(return_value=None)
+            mock_client._remote_port = 9350
             mock_client_cls.return_value = mock_client
 
             pool._running = True
             await pool.add_worker()
 
+            # Client should be created with per-worker profile
+            mock_client_cls.assert_called_once()
+            call_kwargs = mock_client_cls.call_args[1]
+            assert call_kwargs["profile"] == "grok-chrome-w0"
+            assert "port" not in call_kwargs  # Port determined by start_browser
+
             # Port should be tracked in _used_ports
-            assert 9225 in pool._used_ports
+            assert 9350 in pool._used_ports
 
     @pytest.mark.asyncio
     async def test_remove_worker_releases_port(self):
