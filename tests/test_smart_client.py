@@ -33,12 +33,12 @@ class TestSmartGrokClientInit:
         client = SmartGrokClient(
             cookies=mock_cookies,
             browser_host="127.0.0.1",
-            browser_port=9222,
+            browser_port=9350,
             browser_headless=True,
         )
 
         assert client._browser_host == "127.0.0.1"
-        assert client._browser_port == 9222
+        assert client._browser_port == 9350
         assert client._browser_headless is True
 
     @pytest.mark.asyncio
@@ -218,7 +218,7 @@ class TestSmartGrokClientVideoCreation:
             client = SmartGrokClient(
                 cookies=mock_cookies,
                 browser_host="127.0.0.1",
-                browser_port=9222,
+                browser_port=9350,
             )
             client._http_client = mock_http
 
@@ -264,7 +264,7 @@ class TestSmartGrokClientLazyBrowser:
         client = SmartGrokClient(
             cookies=mock_cookies,
             browser_host="127.0.0.1",
-            browser_port=9222,
+            browser_port=9350,
         )
         client._http_client = mock_http
 
@@ -297,7 +297,7 @@ class TestSmartGrokClientLazyBrowser:
             client = SmartGrokClient(
                 cookies=mock_cookies,
                 browser_host="127.0.0.1",
-                browser_port=9222,
+                browser_port=9350,
             )
             # Manually set what __aenter__ would set (we're bypassing it)
             client.cookies = mock_cookies
@@ -310,7 +310,7 @@ class TestSmartGrokClientLazyBrowser:
                 cookies=mock_cookies,
                 config_path=client._config_path,
                 host="127.0.0.1",
-                port=9222,
+                port=9350,
                 headless=False,
             )
 

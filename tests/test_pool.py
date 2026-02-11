@@ -404,7 +404,7 @@ class TestBrowserWorkerPoolExecuteJob:
     @pytest.fixture
     def mock_worker(self) -> Worker:
         """Create worker with mock client."""
-        worker = Worker(worker_id=0, port=9222)
+        worker = Worker(worker_id=0, port=9350)
         worker.client = MagicMock()
         return worker
 
@@ -883,14 +883,14 @@ class TestPoolCDPDetection:
         pool._running = True
 
         # Manually add a worker
-        worker = Worker(worker_id=0, port=9222)
+        worker = Worker(worker_id=0, port=9350)
         worker.status = WorkerStatus.IDLE
         mock_client = MagicMock()
         mock_client.__aexit__ = AsyncMock(return_value=None)
         worker.client = mock_client
         pool._workers[0] = worker
-        pool._used_ports.add(9222)
+        pool._used_ports.add(9350)
 
         await pool.remove_worker(0)
 
-        assert 9222 not in pool._used_ports
+        assert 9350 not in pool._used_ports

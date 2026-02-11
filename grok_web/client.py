@@ -41,6 +41,7 @@ from ._internal import (
     resolve_preset,
 )
 from .auth import DEFAULT_CONFIG_PATH, load_config, save_cookies
+from .browser import DEFAULT_DEBUG_HOST
 from .exceptions import GrokAPIError, GrokAuthError, GrokNotFoundError
 from .models import (
     GrokCookies,
@@ -293,10 +294,6 @@ class NodriverClient(AsyncClientBase):
         - Chrome stays open between script runs for fast batch processing
     """
 
-    # Default port for Chrome remote debugging
-    DEFAULT_DEBUG_PORT = 9222
-    DEFAULT_DEBUG_HOST = "127.0.0.1"
-
     def __init__(
         self,
         cookies: GrokCookies | None = None,
@@ -317,7 +314,7 @@ class NodriverClient(AsyncClientBase):
             config_path: Path to config file. Defaults to ~/.grok-config.json
             headless: Run browser in headless mode (default: False for debugging)
             host: Remote debugging host. Defaults to "127.0.0.1".
-            port: Remote debugging port. Defaults to 9222.
+            port: Remote debugging port. None = auto-assigned by ai-dev-browser.
             auto_launch: If True (default), automatically launch Chrome if not running.
                         Set to False to only connect to existing Chrome.
             ui_delay: Multiplier for UI operation delays (default: 1.0).
@@ -345,8 +342,8 @@ class NodriverClient(AsyncClientBase):
         self._ui_delay = ui_delay
 
         # Browser connection settings
-        self._remote_host = host or self.DEFAULT_DEBUG_HOST
-        self._remote_port = port or self.DEFAULT_DEBUG_PORT
+        self._remote_host = host or DEFAULT_DEBUG_HOST
+        self._remote_port = port  # None = let start_browser auto-assign
         self._auto_launch = auto_launch
         self._force_new_chrome = force_new_chrome
         self._profile = profile
@@ -354,10 +351,10 @@ class NodriverClient(AsyncClientBase):
     async def __aenter__(self):
         import asyncio
 
-        import nodriver
+        from ai_dev_browser.core.connection import connect_browser
         from nodriver import cdp
 
-        from .browser import ensure_chrome_running, is_port_in_use
+        from .browser import ensure_chrome_running
 
         # Ensure Chrome is running (auto-launch if needed)
         actual_port = self._remote_port  # Default to requested port
@@ -372,23 +369,15 @@ class NodriverClient(AsyncClientBase):
                 )
             except FileNotFoundError as e:
                 raise GrokAPIError(str(e)) from e
-            except TimeoutError as e:
+            except (TimeoutError, RuntimeError) as e:
                 raise GrokAPIError(f"Chrome failed to start: {e}") from e
-        else:
-            # Check if Chrome is running when auto_launch is disabled
-            if not is_port_in_use(self._remote_host, self._remote_port):
-                raise GrokAPIError(
-                    f"Chrome not running on {self._remote_host}:{self._remote_port}. "
-                    f"Start Chrome with: chrome --remote-debugging-port={self._remote_port} "
-                    f"--user-data-dir=/tmp/chrome_debug"
-                )
 
         # Store actual port (may differ from requested if auto-assigned)
         self._remote_port = actual_port
 
-        # Connect to Chrome using the actual port
+        # Connect to Chrome via ai-dev-browser (connects to existing instance)
         try:
-            self._browser = await nodriver.start(
+            self._browser = await connect_browser(
                 host=self._remote_host,
                 port=actual_port,
             )
@@ -2748,10 +2737,7 @@ class SmartGrokClient:
     and the API returns 403.
 
     Example:
-        # Start Chrome with remote debugging:
-        # chrome --remote-debugging-port=9222
-
-        async with SmartGrokClient(browser_host="127.0.0.1", browser_port=9222) as client:
+        async with SmartGrokClient() as client:
             posts = await client.list_posts()  # HTTP (fast)
             video = await client.create_video(post_id, preset="fun")  # Browser fallback
     """
@@ -2774,7 +2760,7 @@ class SmartGrokClient:
             cookies: GrokCookies instance. If None, loads from config file.
             config_path: Path to config file. Defaults to ~/.grok-config.json
             browser_host: Remote debugging host. Defaults to "127.0.0.1".
-            browser_port: Remote debugging port. Defaults to 9222.
+            browser_port: Remote debugging port. None = auto-assigned by ai-dev-browser.
             browser_headless: Run browser in headless mode (default: False)
             enable_browser_fallback: If True (default), enable browser fallback
                           for video creation. Chrome will be auto-launched if needed.

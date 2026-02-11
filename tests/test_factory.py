@@ -19,12 +19,12 @@ class TestGetClient:
         client = get_client(
             cookies=mock_cookies,
             browser_host="127.0.0.1",
-            browser_port=9222,
+            browser_port=9350,
         )
 
         assert isinstance(client, SmartGrokClient)
         assert client._browser_host == "127.0.0.1"
-        assert client._browser_port == 9222
+        assert client._browser_port == 9350
 
     def test_passes_headless(self, mock_cookies: GrokCookies):
         """Headless mode is stored for browser initialization."""

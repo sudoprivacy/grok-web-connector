@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 # Named profile for grok Chrome (persistent across runs)
 GROK_CHROME_PROFILE = "grok-chrome"
 
-# Re-export for backwards compatibility
+# Re-export from ai-dev-browser (SSOT)
 DEFAULT_DEBUG_PORT = DEFAULT_PORT_RANGE[0]  # 9350
 
 

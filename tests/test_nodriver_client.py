@@ -47,14 +47,14 @@ class TestNodriverClientInit:
         """Initialize with default host/port values."""
         client = NodriverClient(cookies=mock_cookies)
         assert client._remote_host == "127.0.0.1"
-        assert client._remote_port == 9222
+        assert client._remote_port is None  # Auto-assigned by ai-dev-browser
         assert client._auto_launch is True
 
     def test_init_with_only_host(self, mock_cookies: GrokCookies):
         """Initialize with only host uses default port."""
         client = NodriverClient(cookies=mock_cookies, host="192.168.1.100")
         assert client._remote_host == "192.168.1.100"
-        assert client._remote_port == 9222
+        assert client._remote_port is None  # Auto-assigned by ai-dev-browser
 
     def test_init_with_only_port(self, mock_cookies: GrokCookies):
         """Initialize with only port uses default host."""
