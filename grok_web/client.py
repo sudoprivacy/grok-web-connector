@@ -17,6 +17,7 @@ Public API:
 """
 
 import logging
+import random
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, overload
@@ -2510,14 +2511,14 @@ class NodriverClient(AsyncClientBase):
         self._tab.add_handler(cdp.network.RequestWillBeSent, handle_request)
         self._tab.add_handler(cdp.network.LoadingFinished, handle_loading_finished)
 
-        # Wait for page to fully load (React hydration)
-        await asyncio.sleep(3)
+        # Wait for page to fully load (React hydration) + random jitter
+        await asyncio.sleep(3 + random.uniform(0, 2.0))
 
         # Scroll down to reveal the "Create Video" button (it's below the image)
         await self._tab.evaluate(
             "window.scrollTo(0, document.body.scrollHeight / 2)", await_promise=False
         )
-        await asyncio.sleep(1)
+        await asyncio.sleep(1 + random.uniform(0, 0.5))
 
         # If adjustment_prompt is provided, fill the textarea using React-compatible method
         if adjustment_prompt:
@@ -2687,11 +2688,14 @@ class NodriverClient(AsyncClientBase):
                 # Reset request_id for each attempt to detect new requests
                 captured_response["request_id"] = None
 
+                # Random pre-click delay (human-like)
+                await asyncio.sleep(random.uniform(0.3, 0.8))
+
                 clicked = await find_and_click_create_button()
                 if not clicked:
                     if click_attempt == max_click_retries:
                         raise GrokAPIError("Could not find 'Create Video' button after retries")
-                    await asyncio.sleep(2)  # Wait for page to stabilize before retry
+                    await asyncio.sleep(2 + random.uniform(0, 1.0))
                     continue
 
                 # Wait for request to be captured (indicates button click triggered API call)
@@ -2708,7 +2712,7 @@ class NodriverClient(AsyncClientBase):
 
                 # No request captured - wait before retry to let page stabilize
                 if click_attempt < max_click_retries:
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(2 + random.uniform(0, 1.5))
 
             # If still no request captured after all retries, raise error
             if captured_response["request_id"] is None:
