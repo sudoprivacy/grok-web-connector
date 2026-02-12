@@ -487,6 +487,33 @@ class NodriverClient(AsyncClientBase):
             # Don't fail the operation if cookie save fails
             logging.debug(f"Failed to auto-save cookies: {e}")
 
+    async def _evaluate_with_recovery(self, js_code: str, **kwargs) -> str:
+        """Evaluate JS with auto-recovery on ExceptionDetails.
+
+        When Chrome returns ExceptionDetails (execution context destroyed),
+        reloads the page and retries once.
+        """
+        import asyncio
+
+        result = await self._tab.evaluate(js_code, **kwargs)
+        if isinstance(result, str):
+            return result
+
+        # ExceptionDetails - execution context is dead, recover
+        logger.warning(
+            f"ExceptionDetails from tab.evaluate(), recovering browser state "
+            f"(got {type(result).__name__})"
+        )
+        await self._tab.get(f"{self.BASE_URL}/imagine")
+        await asyncio.sleep(2)
+
+        result = await self._tab.evaluate(js_code, **kwargs)
+        if not isinstance(result, str):
+            raise GrokAPIError(
+                f"Browser evaluation failed after recovery. " f"Received: {type(result).__name__}."
+            )
+        return result
+
     async def _api_request(
         self,
         method: str,
@@ -545,15 +572,9 @@ class NodriverClient(AsyncClientBase):
         }})()
         """
 
-        result_str = await self._tab.evaluate(js_code, await_promise=True, return_by_value=True)
-
-        # Handle ExceptionDetails from nodriver when evaluation fails
-        if not isinstance(result_str, str):
-            raise GrokAPIError(
-                f"Browser evaluation failed for {endpoint}. "
-                f"Received: {type(result_str).__name__}. "
-                f"This may indicate a browser automation error or page navigation issue."
-            )
+        result_str = await self._evaluate_with_recovery(
+            js_code, await_promise=True, return_by_value=True
+        )
 
         result = json_module.loads(result_str)
 
@@ -640,15 +661,9 @@ class NodriverClient(AsyncClientBase):
         }})()
         """
 
-        result_str = await self._tab.evaluate(js_code, await_promise=True, return_by_value=True)
-
-        # Handle ExceptionDetails from nodriver when evaluation fails
-        if not isinstance(result_str, str):
-            raise GrokAPIError(
-                f"Browser evaluation failed for {endpoint}. "
-                f"Received: {type(result_str).__name__}. "
-                f"This may indicate a browser automation error or page navigation issue."
-            )
+        result_str = await self._evaluate_with_recovery(
+            js_code, await_promise=True, return_by_value=True
+        )
 
         result = json_module.loads(result_str)
 
