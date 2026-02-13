@@ -14,7 +14,6 @@ authors = [
 ]
 dependencies = [
     "pydantic>=2.0.0",
-    "curl_cffi>=0.13.0",  # For GrokClient (TLS fingerprint impersonation)
     "ai-dev-browser @ git+https://github.com/sudoprivacy/ai-dev-browser.git",  # Browser management
 ]
 

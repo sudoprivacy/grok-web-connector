@@ -7,65 +7,12 @@ import tempfile
 import pytest
 
 from grok_web.auth import (
-    DEFAULT_CHROME_VERSION,
-    DEFAULT_IMPERSONATE,
-    get_platform_headers,
     load_config,
     load_cookies,
     save_cookies,
 )
 from grok_web.exceptions import GrokConfigError
 from grok_web.models import GrokCookies
-
-
-class TestDefaultConstants:
-    """Tests for default constants."""
-
-    def test_default_chrome_version(self):
-        """DEFAULT_CHROME_VERSION is set."""
-        assert DEFAULT_CHROME_VERSION is not None
-        assert isinstance(DEFAULT_CHROME_VERSION, str)
-
-    def test_default_impersonate(self):
-        """DEFAULT_IMPERSONATE matches chrome version."""
-        assert DEFAULT_IMPERSONATE.startswith("chrome")
-        assert DEFAULT_CHROME_VERSION in DEFAULT_IMPERSONATE
-
-
-class TestGetPlatformHeaders:
-    """Tests for get_platform_headers function."""
-
-    def test_contains_required_headers(self):
-        """Returns dict with required headers."""
-        result = get_platform_headers()
-        assert "user-agent" in result
-        assert "sec-ch-ua" in result
-        assert "sec-ch-ua-platform" in result
-        assert "Chrome" in result["user-agent"]
-
-    def test_custom_chrome_version(self):
-        """Accepts custom chrome version."""
-        result = get_platform_headers("142")
-        assert "142" in result["user-agent"]
-        assert "142" in result["sec-ch-ua"]
-
-    def test_windows_platform(self):
-        """Returns Windows-specific headers when on Windows."""
-        from unittest.mock import patch
-
-        with patch("grok_web.auth.platform.system", return_value="Windows"):
-            result = get_platform_headers()
-            assert "Windows" in result["user-agent"]
-            assert '"Windows"' in result["sec-ch-ua-platform"]
-
-    def test_linux_platform(self):
-        """Returns Linux-specific headers when on Linux."""
-        from unittest.mock import patch
-
-        with patch("grok_web.auth.platform.system", return_value="Linux"):
-            result = get_platform_headers()
-            assert "Linux" in result["user-agent"]
-            assert '"Linux"' in result["sec-ch-ua-platform"]
 
 
 class TestLoadCookies:
@@ -189,7 +136,6 @@ class TestLoadConfig:
                 "x-userid": "test_userid",
                 "cf_clearance": "test_cf",
             },
-            "impersonate": "chrome140",
         }
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
@@ -200,30 +146,7 @@ class TestLoadConfig:
             config = load_config(temp_path)
 
             assert "cookies" in config
-            assert "impersonate" in config
-            assert config["impersonate"] == "chrome140"
             assert isinstance(config["cookies"], GrokCookies)
-        finally:
-            os.unlink(temp_path)
-
-    def test_load_uses_default_impersonate(self):
-        """Uses default impersonate when not in config."""
-        config_data = {
-            "cookies": {
-                "sso": "test_sso",
-                "sso-rw": "test_sso_rw",
-                "x-userid": "test_userid",
-                "cf_clearance": "test_cf",
-            }
-        }
-
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump(config_data, f)
-            temp_path = f.name
-
-        try:
-            config = load_config(temp_path)
-            assert config["impersonate"] == DEFAULT_IMPERSONATE
         finally:
             os.unlink(temp_path)
 
@@ -256,7 +179,7 @@ class TestLoadConfig:
 
     def test_load_missing_cookies_key_raises(self):
         """Raise error when 'cookies' key is missing."""
-        config_data = {"impersonate": "chrome140"}
+        config_data = {"headers": {"X-Custom": "value"}}
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             json.dump(config_data, f)

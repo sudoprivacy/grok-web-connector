@@ -8,18 +8,7 @@ class GrokError(Exception):
 
 
 class GrokAuthError(GrokError):
-    """
-    Raised when request is blocked (401/403).
-
-    IMPORTANT: This usually means Cloudflare bot detection, NOT cookie expiration!
-
-    Common causes (in order of likelihood):
-    1. TLS fingerprint mismatch - curl_cffi impersonate version too old
-    2. Headers mismatch - sec-ch-ua doesn't match current Chrome
-    3. Cookie expiration - RARE, cookies typically last weeks/months
-
-    Solution: Update impersonate version in client.py before asking user for new cookies.
-    """
+    """Raised when request is blocked (401/403)."""
 
     pass
 

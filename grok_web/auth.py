@@ -1,7 +1,6 @@
 """Authentication and configuration management for Grok Web Connector."""
 
 import json
-import platform
 from pathlib import Path
 from typing import Any
 
@@ -9,53 +8,6 @@ from .exceptions import GrokConfigError
 from .models import GrokCookies
 
 DEFAULT_CONFIG_PATH = Path.home() / ".grok-config.json"
-
-# Default Chrome version for TLS fingerprint impersonation
-# IMPORTANT: Headers are auto-generated to match this version
-# Update this when Cloudflare starts blocking older versions
-# Note: curl_cffi max supported is chrome136 as of v0.13.0
-DEFAULT_CHROME_VERSION = "136"
-
-# curl_cffi impersonate string (must match DEFAULT_CHROME_VERSION)
-DEFAULT_IMPERSONATE = f"chrome{DEFAULT_CHROME_VERSION}"
-
-
-def get_platform_headers(chrome_version: str = DEFAULT_CHROME_VERSION) -> dict[str, str]:
-    """
-    Generate platform-specific headers based on current OS.
-
-    Args:
-        chrome_version: Chrome version number (e.g., "143")
-
-    Returns:
-        Dict with platform-specific headers for sec-ch-ua, sec-ch-ua-platform, and user-agent
-    """
-    system = platform.system()
-
-    if system == "Windows":
-        ua_platform = '"Windows"'
-        user_agent = (
-            f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            f"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome_version}.0.0.0 Safari/537.36"
-        )
-    elif system == "Darwin":  # macOS
-        ua_platform = '"macOS"'
-        user_agent = (
-            f"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            f"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome_version}.0.0.0 Safari/537.36"
-        )
-    else:  # Linux and others
-        ua_platform = '"Linux"'
-        user_agent = (
-            f"Mozilla/5.0 (X11; Linux x86_64) "
-            f"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome_version}.0.0.0 Safari/537.36"
-        )
-
-    return {
-        "sec-ch-ua": f'"Google Chrome";v="{chrome_version}", "Chromium";v="{chrome_version}", "Not A(Brand";v="24"',
-        "sec-ch-ua-platform": ua_platform,
-        "user-agent": user_agent,
-    }
 
 
 def load_config(config_path: Path | str | None = None) -> dict[str, Any]:
@@ -102,17 +54,9 @@ def load_config(config_path: Path | str | None = None) -> dict[str, Any]:
     except Exception as e:
         raise GrokConfigError(f"Invalid cookie configuration: {e}") from e
 
-    # Get custom headers from config (optional)
-    custom_headers = config.get("headers", {})
-
-    # Get impersonate version from config (optional)
-    # Can be overridden in config file: {"impersonate": "chrome142"}
-    impersonate = config.get("impersonate", DEFAULT_IMPERSONATE)
-
     return {
         "cookies": cookies,
-        "headers": custom_headers,
-        "impersonate": impersonate,
+        "headers": config.get("headers", {}),
     }
 
 

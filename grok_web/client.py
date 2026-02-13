@@ -20,8 +20,11 @@ from pathlib import Path
 from typing import Any, overload
 
 from ._internal import (
+    MEDIA_POST_GET_ENDPOINT,
     MEDIA_POST_LIKE_ENDPOINT,
-    AsyncClientBase,
+    MEDIA_POST_LIST_ENDPOINT,
+    MEDIA_POST_UNLIKE_ENDPOINT,
+    ResponseParser,
     build_video_payload,
     generate_statsig_id,
     parse_video_ndjson_response,
@@ -31,10 +34,14 @@ from .auth import DEFAULT_CONFIG_PATH, load_config, save_cookies
 from .browser import DEFAULT_DEBUG_HOST
 from .exceptions import GrokAPIError, GrokAuthError, GrokNotFoundError
 from .models import (
+    GenerationMode,
     GrokCookies,
     ImageEditResult,
     ImageGenerationResult,
+    PostDetails,
+    PostSummary,
     VideoGenerationResult,
+    VideoMatchResult,
     VideoPreset,
 )
 
@@ -51,8 +58,7 @@ logger = logging.getLogger(__name__)
 # x-statsig-id is required for chat API (create_video_from_image)
 # This appears to be a Statsig SDK client ID, reusable across requests
 DEFAULT_STATSIG_ID = (
-    "W6IFgVSv2YSVxFj5Yt971KvAL1ldD75XJoGIR285iLdGPIiPNM7S1C9An8vmKsYb"
-    "R9N5sF963w2iXoRhwSHYizPczaEUWA"
+    "W6IFgVSv2YSVxFj5Yt971KvAL1ldD75XJoGIR285iLdGPIiPNM7S1C9An8vmKsYbR9N5sF963w2iXoRhwSHYizPczaEUWA"
 )
 
 
@@ -61,7 +67,7 @@ DEFAULT_STATSIG_ID = (
 # =============================================================================
 
 
-class NodriverClient(AsyncClientBase):
+class NodriverClient(ResponseParser):
     """
     Stealth browser client using nodriver/CDP.
 
@@ -94,6 +100,8 @@ class NodriverClient(AsyncClientBase):
         - Chrome stays open between script runs for fast batch processing
     """
 
+    BASE_URL = "https://grok.com"
+
     def __init__(
         self,
         cookies: GrokCookies | None = None,
@@ -124,8 +132,6 @@ class NodriverClient(AsyncClientBase):
             profile: Chrome profile name for start_browser (default: "grok-chrome").
                      Worker pool uses per-worker profiles like "grok-chrome-w0".
         """
-        super().__init__()  # Initialize business logic layer
-
         # Store config path for cookie auto-save
         self._config_path = Path(config_path) if config_path else DEFAULT_CONFIG_PATH
 
@@ -310,7 +316,7 @@ class NodriverClient(AsyncClientBase):
         result = await self._tab.evaluate(js_code, **kwargs)
         if not isinstance(result, str):
             raise GrokAPIError(
-                f"Browser evaluation failed after recovery. " f"Received: {type(result).__name__}."
+                f"Browser evaluation failed after recovery. Received: {type(result).__name__}."
             )
         return result
 
@@ -537,8 +543,284 @@ class NodriverClient(AsyncClientBase):
             raise
         except Exception as e:
             raise GrokAPIError(
-                f"CDP network request failed for asset. " f"URL: {asset_url}, Error: {e}"
+                f"CDP network request failed for asset. URL: {asset_url}, Error: {e}"
             ) from e
+
+    # =========================================================================
+    # API Methods (business logic using the I/O primitives above)
+    # =========================================================================
+
+    async def list_posts(
+        self,
+        limit: int = 40,
+        source: str = "MEDIA_POST_SOURCE_LIKED",
+        include_raw_data: bool = False,
+    ) -> list[PostSummary]:
+        """List posts with basic metadata."""
+        json_data: dict[str, Any] = {"limit": limit}
+        if source:
+            json_data["filter"] = {"source": source}
+        else:
+            json_data["filter"] = {}
+
+        data = await self._api_request("POST", MEDIA_POST_LIST_ENDPOINT, json_data)
+
+        posts = []
+        for item in data.get("posts", []):
+            try:
+                summary = self._parse_post_summary(item, include_raw_data=include_raw_data)
+                posts.append(summary)
+            except Exception:
+                continue
+
+        return posts
+
+    async def get_post_details(self, post_id: str) -> PostDetails:
+        """Get full details of a post including all child videos."""
+        data = await self._api_request("POST", MEDIA_POST_GET_ENDPOINT, {"id": post_id})
+        post_data = data.get("post", data)
+        return self._parse_post_details(post_data, post_id, raw_data=data)
+
+    async def get_asset_file_size(self, asset_url: str) -> int:
+        """Get file size of a Grok asset via HEAD request."""
+        self._validate_asset_url(asset_url)
+        return await self._asset_request_head(asset_url)
+
+    async def validate_auth(self) -> bool:
+        """Check if current authentication is working."""
+        try:
+            await self._api_request("POST", MEDIA_POST_LIST_ENDPOINT, {"limit": 1, "filter": {}})
+            return True
+        except (GrokAuthError, GrokAPIError):
+            return False
+
+    async def favorite_post(self, post_id: str) -> bool:
+        """Add a post to favorites."""
+        await self._api_request("POST", MEDIA_POST_LIKE_ENDPOINT, {"id": post_id})
+        return True
+
+    async def unfavorite_post(self, post_id: str) -> bool:
+        """Remove a post from favorites."""
+        await self._api_request("POST", MEDIA_POST_UNLIKE_ENDPOINT, {"id": post_id})
+        return True
+
+    async def match_local_video(self, local_path: str | Path) -> VideoMatchResult:
+        """Match a local grok video to its web counterpart."""
+        local_path = Path(local_path)
+
+        if not local_path.exists():
+            raise GrokAPIError(f"File not found: {local_path}")
+
+        filename = local_path.name
+        local_size = local_path.stat().st_size
+
+        fmt, extracted_uuid = self._parse_video_filename(filename)
+
+        if fmt == "old":
+            # Try 1: Treat as parent_id
+            try:
+                return await self._match_by_parent_id(extracted_uuid, local_size, filename)
+            except (GrokNotFoundError, GrokAPIError):
+                pass
+
+            # Try 2: Treat as video_id
+            try:
+                return await self._match_by_video_id(extracted_uuid, local_size, filename)
+            except (GrokNotFoundError, GrokAPIError):
+                pass
+
+            # Try 3: Fallback - search by file size
+            return await self._match_by_file_size_via_favorites(
+                local_size, filename, hint_uuid=extracted_uuid
+            )
+
+        elif fmt == "web":
+            return await self._match_by_video_id(extracted_uuid, local_size, filename)
+
+        else:
+            raise GrokAPIError(
+                f"Invalid filename format. Expected 'grok-video-{{uuid}}.mp4' or "
+                f"'{{uuid}}.mp4' or '{{uuid}}_hd.mp4', got: {filename}"
+            )
+
+    async def _match_by_parent_id(
+        self, parent_id: str, local_size: int, filename: str
+    ) -> VideoMatchResult:
+        """Match video by parent ID."""
+        details = await self.get_post_details(parent_id)
+
+        videos_to_check = []
+
+        if details.mode == GenerationMode.TEXT_TO_VIDEO and details.hd_media_url:
+            videos_to_check.append(
+                {
+                    "video_id": details.id,
+                    "url": details.hd_media_url,
+                    "is_parent": True,
+                    "prompt": details.original_prompt,
+                }
+            )
+
+        for child in details.children:
+            url = child.hd_media_url or child.media_url
+            if url:
+                videos_to_check.append(
+                    {
+                        "video_id": child.id,
+                        "url": url,
+                        "is_parent": False,
+                        "prompt": child.original_prompt,
+                    }
+                )
+
+        for video in videos_to_check:
+            try:
+                web_size = await self.get_asset_file_size(video["url"])
+                if web_size == local_size:
+                    new_filename = f"grok-video_{parent_id}_{video['video_id']}.mp4"
+                    return VideoMatchResult(
+                        parent_id=parent_id,
+                        video_id=video["video_id"],
+                        is_parent_video=video["is_parent"],
+                        mode=details.mode,
+                        original_prompt=video["prompt"],
+                        file_size=local_size,
+                        new_filename=new_filename,
+                    )
+            except Exception:
+                continue
+
+        raise GrokAPIError(
+            f"No matching video found on web for local file: {filename}\n"
+            f"Local size: {local_size} bytes\n"
+            f"Parent ID: {parent_id}\n"
+            f"Videos checked: {len(videos_to_check)}"
+        )
+
+    async def _match_by_video_id(
+        self, video_id: str, local_size: int, filename: str
+    ) -> VideoMatchResult:
+        """Match video by video ID - O(1) direct lookup."""
+        try:
+            details = await self.get_post_details(video_id)
+        except GrokNotFoundError:
+            return await self._match_by_video_id_via_favorites(video_id, local_size, filename)
+        except GrokAuthError:
+            raise
+        except Exception as e:
+            raise GrokAPIError(
+                f"Failed to get video details: {video_id}\nLocal file: {filename}\nError: {e}"
+            ) from e
+
+        url = self._extract_media_url(details, video_id, filename)
+        web_size = await self.get_asset_file_size(url)
+
+        parent_id, is_parent_video = self._extract_parent_info(details, video_id)
+        self._verify_file_size_match(video_id, filename, local_size, web_size)
+        return self._build_video_match_result(
+            parent_id, video_id, is_parent_video, details, local_size
+        )
+
+    async def _match_by_video_id_via_favorites(
+        self, video_id: str, local_size: int, filename: str, max_posts: int = 200
+    ) -> VideoMatchResult:
+        """Search recent favorites to find parent of orphaned child video."""
+        posts = await self.list_posts(limit=max_posts, source="MEDIA_POST_SOURCE_LIKED")
+
+        for post_summary in posts:
+            try:
+                details = await self.get_post_details(post_summary.id)
+
+                for child in details.children:
+                    if child.id == video_id:
+                        parent_id = post_summary.id
+                        url = child.hd_media_url or child.media_url
+
+                        if not url:
+                            continue
+
+                        try:
+                            web_size = await self.get_asset_file_size(url)
+                        except Exception:
+                            web_size = local_size
+
+                        self._verify_file_size_match(video_id, filename, local_size, web_size)
+
+                        return VideoMatchResult(
+                            parent_id=parent_id,
+                            video_id=video_id,
+                            is_parent_video=False,
+                            mode=details.mode,
+                            original_prompt=child.original_prompt,
+                            file_size=local_size,
+                            new_filename=f"grok-video_{parent_id}_{video_id}.mp4",
+                        )
+            except Exception:
+                continue
+
+        raise GrokAPIError(
+            f"Video not found in recent {max_posts} favorites.\n"
+            f"Video ID: {video_id}\n"
+            f"Local file: {filename}\n"
+        )
+
+    async def _match_by_file_size_via_favorites(
+        self, local_size: int, filename: str, hint_uuid: str | None = None, max_posts: int = 200
+    ) -> VideoMatchResult:
+        """Search all liked posts to find video by file size."""
+        posts = await self.list_posts(limit=max_posts, source="MEDIA_POST_SOURCE_LIKED")
+
+        for post_summary in posts:
+            try:
+                details = await self.get_post_details(post_summary.id)
+
+                # Check parent video (for txt2vid posts)
+                if details.mode == GenerationMode.TEXT_TO_VIDEO and details.hd_media_url:
+                    try:
+                        web_size = await self.get_asset_file_size(details.hd_media_url)
+                        if web_size == local_size:
+                            return VideoMatchResult(
+                                parent_id=details.id,
+                                video_id=details.id,
+                                is_parent_video=True,
+                                mode=details.mode,
+                                original_prompt=details.original_prompt,
+                                file_size=local_size,
+                                new_filename=f"grok-video_{details.id}_{details.id}.mp4",
+                            )
+                    except Exception:
+                        pass
+
+                # Check all children
+                for child in details.children:
+                    url = child.hd_media_url or child.media_url
+                    if not url:
+                        continue
+
+                    try:
+                        web_size = await self.get_asset_file_size(url)
+                        if web_size == local_size:
+                            return VideoMatchResult(
+                                parent_id=post_summary.id,
+                                video_id=child.id,
+                                is_parent_video=False,
+                                mode=details.mode,
+                                original_prompt=child.original_prompt,
+                                file_size=local_size,
+                                new_filename=f"grok-video_{post_summary.id}_{child.id}.mp4",
+                            )
+                    except Exception:
+                        continue
+
+            except Exception:
+                continue
+
+        hint_msg = f" (extracted UUID: {hint_uuid})" if hint_uuid else ""
+        raise GrokAPIError(
+            f"No matching video found by file size in recent {max_posts} favorites.\n"
+            f"Local file: {filename}{hint_msg}\n"
+            f"Local size: {local_size} bytes\n"
+        )
 
     # =========================================================================
     # NodriverClient-specific methods
@@ -1429,7 +1711,7 @@ class NodriverClient(AsyncClientBase):
 
         if not post_id:
             raise GrokAPIError(
-                f"Upload timed out after {timeout}s. " "Page did not redirect to post URL."
+                f"Upload timed out after {timeout}s. Page did not redirect to post URL."
             )
 
         return post_id
