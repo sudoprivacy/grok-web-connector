@@ -68,8 +68,9 @@ def build_video_payload(
     parent_post_id: str,
     mode_value: str,
     aspect_ratio: str = "2:3",
-    video_length: int = 6,
+    video_length: int = 10,
     adjustment_prompt: str | None = None,
+    video_resolution: str = "720",
 ) -> dict:
     """Build the payload for video generation API."""
     if adjustment_prompt:
@@ -89,6 +90,7 @@ def build_video_payload(
                         "parentPostId": parent_post_id,
                         "aspectRatio": aspect_ratio,
                         "videoLength": video_length,
+                        "videoResolution": video_resolution,
                     }
                 }
             },
@@ -450,9 +452,10 @@ class ClientLogic(ResponseParser):
         image_url: str,
         parent_post_id: str,
         aspect_ratio: str = "2:3",
-        video_length: int = 6,
+        video_length: int = 10,
         statsig_id: str | None = None,
         preset: VideoPreset | str = "normal",
+        video_resolution: str = "720",
     ) -> EffectGenerator[VideoGenerationResult]:
         """Generate a video from an image using Grok's chat API."""
         if statsig_id is None:
@@ -460,7 +463,12 @@ class ClientLogic(ResponseParser):
 
         mode_value = resolve_preset(preset)
         payload = build_video_payload(
-            image_url, parent_post_id, mode_value, aspect_ratio, video_length
+            image_url,
+            parent_post_id,
+            mode_value,
+            aspect_ratio,
+            video_length,
+            video_resolution=video_resolution,
         )
 
         response_text = yield ApiRequestText(
@@ -843,14 +851,21 @@ class SyncClientBase(ABC):
         image_url: str,
         parent_post_id: str,
         aspect_ratio: str = "2:3",
-        video_length: int = 6,
+        video_length: int = 10,
         statsig_id: str | None = None,
         preset: VideoPreset | str = "normal",
+        video_resolution: str = "720",
     ) -> VideoGenerationResult:
         """Generate a video from an image using Grok's chat API."""
         return self._execute(
             self._logic.create_video_from_image(
-                image_url, parent_post_id, aspect_ratio, video_length, statsig_id, preset
+                image_url,
+                parent_post_id,
+                aspect_ratio,
+                video_length,
+                statsig_id,
+                preset,
+                video_resolution,
             )
         )
 
@@ -980,14 +995,21 @@ class AsyncClientBase(ABC):
         image_url: str,
         parent_post_id: str,
         aspect_ratio: str = "2:3",
-        video_length: int = 6,
+        video_length: int = 10,
         statsig_id: str | None = None,
         preset: VideoPreset | str = "normal",
+        video_resolution: str = "720",
     ) -> VideoGenerationResult:
         """Generate a video from an image using Grok's chat API."""
         return await self._execute(
             self._logic.create_video_from_image(
-                image_url, parent_post_id, aspect_ratio, video_length, statsig_id, preset
+                image_url,
+                parent_post_id,
+                aspect_ratio,
+                video_length,
+                statsig_id,
+                preset,
+                video_resolution,
             )
         )
 

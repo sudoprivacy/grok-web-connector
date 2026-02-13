@@ -15,7 +15,6 @@ authors = [
 dependencies = [
     "pydantic>=2.0.0",
     "curl_cffi>=0.13.0",  # For GrokClient (TLS fingerprint impersonation)
-    "playwright>=1.40.0",  # For PlaywrightClient (reliable Cloudflare bypass)
     "ai-dev-browser @ git+https://github.com/sudoprivacy/ai-dev-browser.git",  # Browser management
 ]
 

@@ -1,19 +1,16 @@
 """
 Grok Web Connector - API Clients
 
-Two internal client implementations:
-
-AsyncClient
-    - Async HTTP client using Playwright
-    - Used internally by SmartGrokClient for API requests
-
 NodriverClient
-    - Browser automation client using nodriver
-    - Used internally by SmartGrokClient for UI operations
+    - Browser automation client using nodriver/CDP
+    - Handles all Grok API operations (reads, writes, video generation)
+
+SmartGrokClient
+    - Thin wrapper around NodriverClient with cookie loading and interactive login
 
 Public API:
     Use get_client() from grok_web package - returns SmartGrokClient
-    which automatically routes to the appropriate internal client.
+    which automatically routes to NodriverClient.
 """
 
 import logging
@@ -21,16 +18,6 @@ import random
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, overload
-
-from playwright.async_api import (
-    APIRequestContext as AsyncAPIRequestContext,
-)
-from playwright.async_api import (
-    Playwright as AsyncPlaywright,
-)
-from playwright.async_api import (
-    async_playwright,
-)
 
 from ._internal import (
     MEDIA_POST_LIKE_ENDPOINT,
@@ -70,203 +57,16 @@ DEFAULT_STATSIG_ID = (
 
 
 # =============================================================================
-# Helper functions
-# =============================================================================
-
-
-def _get_browser_headers() -> dict[str, str]:
-    """Get headers that match Playwright's Chromium browser."""
-    return {
-        "Accept": "*/*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Content-Type": "application/json",
-        "Origin": "https://grok.com",
-        "Referer": "https://grok.com/",
-        "Sec-Ch-Ua": '"Chromium";v="122", "Not(A:Brand";v="24"',
-        "Sec-Ch-Ua-Mobile": "?0",
-        "Sec-Ch-Ua-Platform": '"macOS"',
-        "Sec-Fetch-Dest": "empty",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Site": "same-origin",
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    }
-
-
-# =============================================================================
-# AsyncClient - Async client using Playwright
-# =============================================================================
-
-
-class AsyncClient(AsyncClientBase):
-    """
-    Async Playwright-based Grok API client.
-
-    For use in async contexts (MCP servers, asyncio apps).
-    Must be used as an async context manager.
-
-    Example:
-        >>> async with AsyncClient() as client:
-        ...     posts = await client.list_posts(limit=10)
-    """
-
-    def __init__(
-        self,
-        cookies: GrokCookies | None = None,
-        config_path: Path | str | None = None,
-    ):
-        """Initialize (use as async context manager to start Playwright)."""
-        super().__init__()  # Initialize business logic layer
-
-        if cookies is None:
-            config = load_config(config_path)
-            cookies = config["cookies"]
-
-        self.cookies = cookies
-        self._cookie_str = "; ".join([f"{k}={v}" for k, v in cookies.to_dict().items()])
-
-        browser_headers = _get_browser_headers()
-        browser_headers["Cookie"] = self._cookie_str
-        self._headers = browser_headers
-
-        self._playwright: AsyncPlaywright | None = None
-        self._api_context: AsyncAPIRequestContext | None = None
-        self._asset_context: AsyncAPIRequestContext | None = None
-
-    async def __aenter__(self):
-        self._playwright = await async_playwright().start()
-        self._api_context = await self._playwright.request.new_context(
-            base_url=self.BASE_URL,
-            extra_http_headers=self._headers,
-        )
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        if self._api_context:
-            await self._api_context.dispose()
-        if self._asset_context:
-            await self._asset_context.dispose()
-        if self._playwright:
-            await self._playwright.stop()
-
-    async def _get_asset_context(self) -> AsyncAPIRequestContext:
-        """Get or create asset context (lazy initialization)."""
-        if self._asset_context is None:
-            self._asset_context = await self._playwright.request.new_context(
-                extra_http_headers={
-                    "Origin": "https://grok.com",
-                    "Referer": "https://grok.com/",
-                    "User-Agent": self._headers["User-Agent"],
-                    "Cookie": self._cookie_str,
-                }
-            )
-        return self._asset_context
-
-    # =========================================================================
-    # Transport layer (AsyncClientBase abstract methods)
-    # =========================================================================
-
-    async def _api_request(
-        self,
-        method: str,
-        endpoint: str,
-        json_data: dict | None = None,
-    ) -> dict[str, Any]:
-        """Make authenticated request to Grok API."""
-        try:
-            if method.upper() == "POST":
-                response = await self._api_context.post(endpoint, data=json_data)
-            elif method.upper() == "GET":
-                response = await self._api_context.get(endpoint)
-            else:
-                raise GrokAPIError(f"Unsupported HTTP method: {method}")
-        except Exception as e:
-            raise GrokAPIError(f"Request failed: {e}") from e
-
-        if response.status in (401, 403):
-            text = await response.text()
-            if "Just a moment" in text:
-                raise GrokAuthError("Cloudflare challenge. Refresh cf_clearance.")
-            raise GrokAuthError("Request blocked (401/403). Check cookies.")
-
-        if response.status == 404:
-            raise GrokNotFoundError("Resource not found")
-
-        if response.status >= 400:
-            raise GrokAPIError(f"API error: {response.status}")
-
-        try:
-            return await response.json()
-        except ValueError:
-            return {}
-
-    async def _api_request_text(
-        self,
-        method: str,
-        endpoint: str,
-        json_data: dict | None = None,
-        extra_headers: dict | None = None,
-    ) -> str:
-        """Make authenticated request and return raw text response."""
-        try:
-            if method.upper() == "POST":
-                response = await self._api_context.post(
-                    endpoint, data=json_data, headers=extra_headers, timeout=120000
-                )
-            elif method.upper() == "GET":
-                response = await self._api_context.get(
-                    endpoint, headers=extra_headers, timeout=120000
-                )
-            else:
-                raise GrokAPIError(f"Unsupported HTTP method: {method}")
-        except Exception as e:
-            raise GrokAPIError(f"Request failed: {e}") from e
-
-        if response.status in (401, 403):
-            text = await response.text()
-            if "Just a moment" in text:
-                raise GrokAuthError("Cloudflare challenge. Refresh cf_clearance.")
-            raise GrokAuthError("Request blocked (401/403). Check cookies.")
-
-        if response.status == 404:
-            raise GrokNotFoundError("Resource not found")
-
-        if response.status >= 400:
-            raise GrokAPIError(f"API error: {response.status}")
-
-        return await response.text()
-
-    async def _asset_request_head(self, asset_url: str) -> int:
-        """Make HEAD request to asset URL and return Content-Length."""
-        try:
-            context = await self._get_asset_context()
-            response = await context.head(asset_url)
-        except Exception as e:
-            raise GrokAPIError(f"Asset request failed: {e}") from e
-
-        if response.status == 403:
-            raise GrokAuthError("Asset access denied (403).")
-
-        if response.status != 200:
-            raise GrokAPIError(f"Asset request failed: {response.status}")
-
-        content_length = response.headers.get("content-length")
-        if not content_length:
-            raise GrokAPIError("No Content-Length header")
-
-        return int(content_length)
-
-
-# =============================================================================
-# NodriverClient - Stealth browser using nodriver (2025 RECOMMENDED)
+# NodriverClient - Stealth browser using nodriver
 # =============================================================================
 
 
 class NodriverClient(AsyncClientBase):
     """
-    Stealth browser client using nodriver - RECOMMENDED for 2025.
+    Stealth browser client using nodriver/CDP.
 
-    Best choice for video generation workflows. Uses Chrome DevTools Protocol
-    without WebDriver traces. Automatically handles Cloudflare Turnstile.
+    Uses Chrome DevTools Protocol without WebDriver traces.
+    Automatically handles Cloudflare Turnstile.
 
     Features:
         - Auto-launches isolated Chrome instance if not running
@@ -885,10 +685,11 @@ class NodriverClient(AsyncClientBase):
         image_url: str,
         parent_post_id: str,
         aspect_ratio: str = "2:3",
-        video_length: int = 6,
+        video_length: int = 10,
         statsig_id: str | None = None,
         preset: VideoPreset | str = "normal",
         adjustment_prompt: str | None = None,
+        video_resolution: str = "720",
     ) -> VideoGenerationResult:
         """Generate a video from an image using Grok's chat API.
 
@@ -898,13 +699,14 @@ class NodriverClient(AsyncClientBase):
             image_url: Source image URL
             parent_post_id: Parent post UUID
             aspect_ratio: Video aspect ratio (default "2:3")
-            video_length: Video duration in seconds (default 6)
+            video_length: Video duration in seconds (default 10)
             statsig_id: Optional style seed for reproducible styles
             preset: Video preset - 'normal', 'fun', or 'spicy'
             adjustment_prompt: Video generation prompt (same as typing in Grok UI after image).
                 Can include any instructions: camera movement, character actions, or both.
                 Examples: "Static Shot", "she turns her head", "camera zooms in while he walks".
                 If provided, overrides preset and uses 'custom' mode.
+            video_resolution: Video resolution - "480", "720", or "1080" (default "720")
         """
         # Try to get statsig_id from page context first, then generate if not found
         if statsig_id is None:
@@ -921,6 +723,7 @@ class NodriverClient(AsyncClientBase):
             aspect_ratio,
             video_length,
             adjustment_prompt=adjustment_prompt,
+            video_resolution=video_resolution,
         )
 
         # Get raw text response
@@ -2322,6 +2125,8 @@ class NodriverClient(AsyncClientBase):
         preset: VideoPreset | str = ...,
         aspect_ratio: str = ...,
         timeout: int = ...,
+        duration: int = ...,
+        resolution: str = ...,
     ) -> VideoGenerationResult:
         """img2vid: Generate video with custom prompt."""
         ...
@@ -2334,6 +2139,8 @@ class NodriverClient(AsyncClientBase):
         preset: VideoPreset | str,
         aspect_ratio: str = ...,
         timeout: int = ...,
+        duration: int = ...,
+        resolution: str = ...,
     ) -> VideoGenerationResult:
         """img2vid: Generate video with preset only (no prompt)."""
         ...
@@ -2346,6 +2153,8 @@ class NodriverClient(AsyncClientBase):
         source_image_path: str | Path,
         aspect_ratio: str = ...,
         timeout: int = ...,
+        duration: int = ...,
+        resolution: str = ...,
     ) -> VideoGenerationResult:
         """upload2vid: Upload local image and generate video from it."""
         ...
@@ -2360,6 +2169,8 @@ class NodriverClient(AsyncClientBase):
         aspect_ratio: str = "portrait",
         timeout: int = 300,
         wait_for_video: bool = True,
+        duration: int = 10,
+        resolution: str = "720p",
     ) -> VideoGenerationResult:
         """
         Unified video generation API supporting multiple modes.
@@ -2380,8 +2191,9 @@ class NodriverClient(AsyncClientBase):
                    Only used for img2vid mode.
             aspect_ratio: Video aspect ratio.
             timeout: Max seconds to wait for video generation (default 300).
-                    Video generation typically takes 2-5 minutes, especially for img2vid mode.
             wait_for_video: (txt2vid only) Wait for video element to load (default True).
+            duration: Video duration in seconds (default 10). Options: 6, 10.
+            resolution: Video resolution (default "720p"). Options: "480p", "720p".
 
         Returns:
             VideoGenerationResult with video_id and metadata.
@@ -2400,6 +2212,8 @@ class NodriverClient(AsyncClientBase):
                 preset=preset,
                 timeout=timeout,
                 adjustment_prompt=prompt if prompt else None,
+                duration=duration,
+                resolution=resolution,
             )
 
         # Mode: img2vid (from existing Grok image post)
@@ -2409,6 +2223,8 @@ class NodriverClient(AsyncClientBase):
                 preset=preset,
                 timeout=timeout,
                 adjustment_prompt=prompt if prompt else None,
+                duration=duration,
+                resolution=resolution,
             )
 
         # Mode: txt2vid (from text prompt only)
@@ -2426,6 +2242,8 @@ class NodriverClient(AsyncClientBase):
         timeout: int = 300,
         stable_id: str | None = None,
         adjustment_prompt: str | None = None,
+        duration: int = 10,
+        resolution: str = "720p",
     ) -> VideoGenerationResult:
         """
         Generate video by simulating UI button click (more reliable for anti-bot bypass).
@@ -2444,17 +2262,12 @@ class NodriverClient(AsyncClientBase):
                       Can include any instructions: camera movement, character actions, or both.
                       Examples: "Static Shot", "she turns her head", "camera zooms in while he walks".
                       When provided, overrides preset and sets result.mode='custom'.
+            duration: Video duration in seconds (default 10). Options: 6, 10.
+            resolution: Video resolution (default "720p"). Options: "480p", "720p".
 
         Returns:
             VideoGenerationResult with video_id (may be empty if moderated).
             When adjustment_prompt is used, result.mode will be 'custom'.
-
-        Example:
-            >>> result = await client.create_video_via_ui("abc-123", preset="fun")
-            >>> result.mode  # 'fun'
-            >>> result = await client.create_video_via_ui("abc-123", adjustment_prompt="Static Shot")
-            >>> result.mode  # 'custom'
-            >>> result = await client.create_video_via_ui("abc-123", adjustment_prompt="she smiles")
         """
         import asyncio
 
@@ -2595,57 +2408,71 @@ class NodriverClient(AsyncClientBase):
             # When using adjustment_prompt, skip preset selection and go directly to generate button
             # (adjustment_prompt uses custom mode which overrides preset)
 
-        # Non-default preset: selecting the preset auto-generates video
-        # Default (Normal): need to click "生成视频" button directly
+        # Open "视频选项" (Video Options) dropdown to set duration, resolution, and preset.
+        # The dropdown trigger is button[aria-label="视频选项"].
+        # Inside the Radix dropdown menu:
+        #   - Duration: button[aria-label="6s"] / button[aria-label="10s"]
+        #   - Resolution: button[aria-label="480p"] / button[aria-label="720p"]
+        #   - Preset: role="menuitem" with text "Spicy" / "Fun" / "Normal"
+        # IMPORTANT: This is a Radix dropdown — clicking ANY item closes the menu.
+        # We must reopen the dropdown between each selection.
         preset_selected = False
 
-        # Skip preset selection if using adjustment_prompt (it uses custom mode)
-        if adjustment_prompt:
-            preset_selected = False  # Force using generate button
-        elif preset_str != "normal":
-            # Select non-default preset via "视频选项" menu (auto-generates video)
-            try:
-                buttons = await self._tab.find_all("button, [role='button']")
+        async def _open_video_options():
+            """Open the Video Options dropdown. Returns True if opened."""
+            btn = await self._tab.find('button[aria-label="视频选项"]')
+            if not btn:
+                btn = await self._tab.find('button[aria-label="Video Options"]')
+            if btn:
+                await btn.mouse_click()
+                await asyncio.sleep(0.5)
+                return True
+            return False
 
-                # Find and click the "视频选项" (Video Options) button
-                video_options_btn = None
-                for btn in buttons:
-                    label = btn.attrs.get("aria-label", "")
-                    if label == "视频选项":
-                        video_options_btn = btn
+        try:
+            # Select duration (e.g., "10s") — open menu, click, menu closes
+            if await _open_video_options():
+                duration_label = f"{duration}s"
+                dur_btn = await self._tab.find(f'button[aria-label="{duration_label}"]')
+                if dur_btn:
+                    await dur_btn.mouse_click()
+                    await asyncio.sleep(0.3)
+
+            # Select resolution (e.g., "720p") — reopen menu, click, menu closes
+            if await _open_video_options():
+                res_label = resolution if resolution.endswith("p") else f"{resolution}p"
+                res_btn = await self._tab.find(f'button[aria-label="{res_label}"]')
+                if res_btn:
+                    await res_btn.mouse_click()
+                    await asyncio.sleep(0.3)
+
+            # Select preset if non-normal (clicking preset auto-generates video)
+            if not adjustment_prompt and preset_str != "normal" and await _open_video_options():
+                menu_items = await self._tab.find_all('[role="menuitem"]')
+                for item in menu_items:
+                    item_text = item.text.strip() if hasattr(item, "text") else ""
+                    if not item_text:
+                        idx = menu_items.index(item)
+                        item_text = await self._tab.evaluate(
+                            f"document.querySelectorAll('[role=\"menuitem\"]')[{idx}].textContent.trim()",
+                            await_promise=False,
+                        )
+                    if item_text == preset_menu_text:
+                        await item.mouse_click()
+
+                        # Wait for preset click to trigger API request
+                        preset_start = asyncio.get_event_loop().time()
+                        while captured_response["request_id"] is None:
+                            elapsed = asyncio.get_event_loop().time() - preset_start
+                            if elapsed > 3:
+                                break
+                            await asyncio.sleep(0.3)
+
+                        if captured_response["request_id"] is not None:
+                            preset_selected = True
                         break
-
-                if video_options_btn:
-                    await video_options_btn.mouse_click()
-                    await asyncio.sleep(0.5)
-
-                    # Find and click the preset option in the dropdown menu
-                    menu_items = await self._tab.find_all('[role="menuitem"]')
-                    for item in menu_items:
-                        item_text = item.text.strip() if hasattr(item, "text") else ""
-                        # Get text content via JavaScript if needed
-                        if not item_text:
-                            item_text = await self._tab.evaluate(
-                                f"document.querySelectorAll('[role=\"menuitem\"]')[{menu_items.index(item)}].textContent.trim()",
-                                await_promise=False,
-                            )
-                        if item_text == preset_menu_text:
-                            await item.mouse_click()
-
-                            # Wait for request to be captured (verify preset triggered API)
-                            preset_start = asyncio.get_event_loop().time()
-                            while captured_response["request_id"] is None:
-                                elapsed = asyncio.get_event_loop().time() - preset_start
-                                if elapsed > 3:  # 3s timeout for preset (local JS)
-                                    break
-                                await asyncio.sleep(0.3)
-
-                            if captured_response["request_id"] is not None:
-                                preset_selected = True
-                            break
-
-            except Exception:
-                pass  # If preset selection fails, fall back to clicking Create Video
+        except Exception:
+            pass  # If dropdown interaction fails, fall back to clicking Create Video
 
         # For Normal preset (or if preset selection failed), click "Create Video" button
         # with retry logic for UI non-determinism
@@ -2739,22 +2566,21 @@ class NodriverClient(AsyncClientBase):
 
 
 # =============================================================================
-# SmartGrokClient - Recommended client with auto-fallback
+# SmartGrokClient - Recommended client (delegates to NodriverClient)
 # =============================================================================
 
 
 class SmartGrokClient:
     """
-    Recommended client - HTTP for reads, browser fallback for video creation.
+    Recommended client - wraps NodriverClient with cookie loading.
 
-    Uses AsyncClient (lightweight HTTP) for all read operations.
-    Lazily initializes NodriverClient (browser) only when video creation is needed
-    and the API returns 403.
+    Provides interactive login setup if cookies are missing, then
+    delegates all operations to NodriverClient.
 
     Example:
         async with SmartGrokClient() as client:
-            posts = await client.list_posts()  # HTTP (fast)
-            video = await client.create_video(post_id, preset="fun")  # Browser fallback
+            posts = await client.list_posts()
+            video = await client.create_video("zoom in", source_post_id=post_id)
     """
 
     BASE_URL = "https://grok.com"
@@ -2766,7 +2592,6 @@ class SmartGrokClient:
         browser_host: str | None = None,
         browser_port: int | None = None,
         browser_headless: bool = False,
-        enable_browser_fallback: bool = True,
     ):
         """
         Initialize SmartGrokClient.
@@ -2777,29 +2602,31 @@ class SmartGrokClient:
             browser_host: Remote debugging host. Defaults to "127.0.0.1".
             browser_port: Remote debugging port. None = auto-assigned by ai-dev-browser.
             browser_headless: Run browser in headless mode (default: False)
-            enable_browser_fallback: If True (default), enable browser fallback
-                          for video creation. Chrome will be auto-launched if needed.
         """
         self._provided_cookies = cookies  # Store for deferred loading
         self._config_path = Path(config_path) if config_path else DEFAULT_CONFIG_PATH
         self.cookies: GrokCookies | None = None  # Will be set in __aenter__
-        self._http_client: AsyncClient | None = None
         self._browser_client: NodriverClient | None = None
         self._browser_host = browser_host
         self._browser_port = browser_port
         self._browser_headless = browser_headless
-        self._enable_browser_fallback = enable_browser_fallback
 
     async def __aenter__(self):
-        """Initialize HTTP client (lightweight, no browser)."""
+        """Load cookies and initialize NodriverClient."""
         # Load cookies (with auto-setup if missing)
         if self._provided_cookies is not None:
             self.cookies = self._provided_cookies
         else:
             self.cookies = await self._load_or_setup_cookies()
 
-        self._http_client = AsyncClient(self.cookies)
-        await self._http_client.__aenter__()
+        self._browser_client = NodriverClient(
+            cookies=self.cookies,
+            config_path=self._config_path,
+            host=self._browser_host,
+            port=self._browser_port,
+            headless=self._browser_headless,
+        )
+        await self._browser_client.__aenter__()
         return self
 
     async def _load_or_setup_cookies(self) -> GrokCookies:
@@ -2828,33 +2655,18 @@ class SmartGrokClient:
             return config["cookies"]
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any):
-        """Clean up both clients."""
-        if self._http_client:
-            await self._http_client.__aexit__(exc_type, exc_val, exc_tb)
+        """Clean up browser client."""
         if self._browser_client:
             await self._browser_client.__aexit__(exc_type, exc_val, exc_tb)
 
-    async def _get_browser_client(self) -> NodriverClient:
-        """Lazy browser initialization - only when needed."""
-        if self._browser_client is None:
-            self._browser_client = NodriverClient(
-                cookies=self.cookies,
-                config_path=self._config_path,
-                host=self._browser_host,
-                port=self._browser_port,
-                headless=self._browser_headless,
-            )
-            await self._browser_client.__aenter__()
-        return self._browser_client
-
     # =========================================================================
-    # Read APIs - HTTP first, browser fallback on Cloudflare challenge
+    # Read APIs - delegate to NodriverClient
     # =========================================================================
 
     async def list_posts(
         self, limit: int = 10, source: str | None = "favorites", include_raw_data: bool = False
     ):
-        """List posts (HTTP first, browser fallback on Cloudflare).
+        """List posts.
 
         Args:
             limit: Maximum number of posts to return
@@ -2868,67 +2680,30 @@ class SmartGrokClient:
         if source == "favorites":
             api_source = "MEDIA_POST_SOURCE_LIKED"
 
-        try:
-            return await self._http_client.list_posts(limit, api_source, include_raw_data)
-        except GrokAuthError:
-            if not self._enable_browser_fallback:
-                raise
-            browser = await self._get_browser_client()
-            return await browser.list_posts(limit, api_source, include_raw_data)
+        return await self._browser_client.list_posts(limit, api_source, include_raw_data)
 
     async def get_post_details(self, post_id: str):
-        """Get post details (HTTP first, browser fallback on Cloudflare)."""
-        try:
-            return await self._http_client.get_post_details(post_id)
-        except GrokAuthError:
-            if not self._enable_browser_fallback:
-                raise
-            browser = await self._get_browser_client()
-            return await browser.get_post_details(post_id)
+        """Get post details."""
+        return await self._browser_client.get_post_details(post_id)
 
     async def get_asset_file_size(self, asset_url: str) -> int:
-        """Get asset file size (HTTP first, browser fallback on Cloudflare)."""
-        try:
-            return await self._http_client.get_asset_file_size(asset_url)
-        except GrokAuthError:
-            if not self._enable_browser_fallback:
-                raise
-            browser = await self._get_browser_client()
-            return await browser.get_asset_file_size(asset_url)
+        """Get asset file size."""
+        return await self._browser_client.get_asset_file_size(asset_url)
 
     async def validate_auth(self) -> bool:
-        """Validate authentication (HTTP first, browser fallback on Cloudflare)."""
-        try:
-            return await self._http_client.validate_auth()
-        except GrokAuthError:
-            if not self._enable_browser_fallback:
-                raise
-            browser = await self._get_browser_client()
-            return await browser.validate_auth()
+        """Validate authentication."""
+        return await self._browser_client.validate_auth()
 
     async def match_local_video(self, local_path: str | Path):
-        """Match local video to web video (HTTP first, browser fallback on Cloudflare)."""
-        try:
-            return await self._http_client.match_local_video(local_path)
-        except GrokAuthError:
-            if not self._enable_browser_fallback:
-                raise
-            browser = await self._get_browser_client()
-            return await browser.match_local_video(local_path)
+        """Match local video to web video."""
+        return await self._browser_client.match_local_video(local_path)
 
     # =========================================================================
-    # Favorite APIs - HTTP first, browser fallback on Cloudflare
-    #
-    # Note: The HTTP endpoint /rest/media/post/like is for favorites (Save).
-    # API terminology: "like" = "save/favorite" in UI
-    # This is different from like_post() which is thumbs-up (赞).
+    # Favorite APIs - delegate to NodriverClient
     # =========================================================================
 
     async def favorite_post(self, post_id: str) -> bool:
-        """
-        Add a post to favorites (HTTP first, browser fallback on 403).
-
-        Note: API uses "like" terminology for what UI shows as "Save/保存".
+        """Add a post to favorites.
 
         Args:
             post_id: Post UUID to favorite
@@ -2936,21 +2711,10 @@ class SmartGrokClient:
         Returns:
             True if successful
         """
-        try:
-            return await self._http_client.favorite_post(post_id)
-        except GrokAuthError:
-            if not self._enable_browser_fallback:
-                raise
-            # Use API via browser fetch (not UI clicking)
-            # UI method relies on client-side state which may not match server state
-            browser = await self._get_browser_client()
-            return await browser.favorite_post(post_id)
+        return await self._browser_client.favorite_post(post_id)
 
     async def unfavorite_post(self, post_id: str) -> bool:
-        """
-        Remove a post from favorites (HTTP first, browser fallback on 403).
-
-        Note: API uses "unlike" terminology for what UI shows as "Unsave/取消保存".
+        """Remove a post from favorites.
 
         Args:
             post_id: Post UUID to unfavorite
@@ -2958,26 +2722,16 @@ class SmartGrokClient:
         Returns:
             True if successful
         """
-        try:
-            return await self._http_client.unfavorite_post(post_id)
-        except GrokAuthError:
-            if not self._enable_browser_fallback:
-                raise
-            # Use API via browser fetch (not UI clicking)
-            # UI method relies on client-side state which may not match server state
-            browser = await self._get_browser_client()
-            return await browser.unfavorite_post(post_id)
+        return await self._browser_client.unfavorite_post(post_id)
 
     # =========================================================================
-    # Social APIs - Browser only (no HTTP API exists)
+    # Social APIs
     # =========================================================================
 
     async def like_post(self, post_id: str) -> bool:
-        """
-        Give a thumbs-up to a post (browser only).
+        """Give a thumbs-up to a post.
 
         Note: This is different from favorite_post() which saves to favorites.
-        This is the "赞" (Like/thumbs up) action.
 
         Args:
             post_id: Post UUID to like
@@ -2985,12 +2739,10 @@ class SmartGrokClient:
         Returns:
             True if successful
         """
-        browser = await self._get_browser_client()
-        return await browser.like_post(post_id)
+        return await self._browser_client.like_post(post_id)
 
     async def dislike_post(self, post_id: str) -> bool:
-        """
-        Give a thumbs-down to a post (browser only).
+        """Give a thumbs-down to a post.
 
         Args:
             post_id: Post UUID to dislike
@@ -2998,16 +2750,14 @@ class SmartGrokClient:
         Returns:
             True if successful
         """
-        browser = await self._get_browser_client()
-        return await browser.dislike_post(post_id)
+        return await self._browser_client.dislike_post(post_id)
 
     # =========================================================================
     # Video APIs
     # =========================================================================
 
     async def delete_video(self, video_id: str) -> bool:
-        """
-        Delete a child video (browser only).
+        """Delete a child video.
 
         Args:
             video_id: The child video UUID to delete
@@ -3015,35 +2765,18 @@ class SmartGrokClient:
         Returns:
             True if deletion was successful
         """
-        browser = await self._get_browser_client()
-        return await browser.delete_video(video_id)
+        return await self._browser_client.delete_video(video_id)
 
     async def upgrade_video(self, video_id: str) -> bool:
-        """
-        Upgrade a video to HD quality (browser only).
-
-        After upgrading, the video's PostDetails will include an `hd_media_url` field
-        pointing to the higher quality version (~2x file size). Both URLs remain
-        available - use `media_url` for preview, `hd_media_url` for final output.
-
-        This is useful for MCTS workflows: generate many videos at normal quality,
-        then upgrade only the selected ones to HD before final export.
+        """Upgrade a video to HD quality.
 
         Args:
             video_id: The child video UUID to upgrade
 
         Returns:
             True if upgrade was initiated successfully
-
-        Example:
-            >>> # Check if video has HD, upgrade if not
-            >>> post = await client.get_post_details(parent_id)
-            >>> for video in post.children:
-            ...     if not video.hd_media_url:
-            ...         await client.upgrade_video(video.id)
         """
-        browser = await self._get_browser_client()
-        return await browser.upgrade_video(video_id)
+        return await self._browser_client.upgrade_video(video_id)
 
     async def download_video(
         self,
@@ -3122,35 +2855,7 @@ class SmartGrokClient:
         if not video_url:
             raise GrokNotFoundError(f"Video {video_id} not found")
 
-        # Add dl=1 parameter to trigger download
-        if "?" in video_url:
-            download_url = f"{video_url}&dl=1"
-        else:
-            download_url = f"{video_url}?dl=1"
-
-        # Try HTTP download first
-        try:
-            context = await self._http_client._get_asset_context()
-            response = await context.get(download_url)
-
-            if response.status == 403:
-                # Cloudflare blocked, fall back to browser
-                raise GrokAuthError("HTTP download blocked (403)")
-
-            if response.status != 200:
-                raise GrokAPIError(f"Download failed with status {response.status}")
-
-            # Write to file
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            body = await response.body()
-            output_path.write_bytes(body)
-
-            return output_path
-
-        except GrokAuthError:
-            # Fall back to browser-based download
-            browser = await self._get_browser_client()
-            return await browser.download_video(video_url, output_path)
+        return await self._browser_client.download_video(video_url, output_path)
 
     # =========================================================================
     # Image APIs
@@ -3159,10 +2864,7 @@ class SmartGrokClient:
     async def edit_image(
         self, post_id: str, edit_prompt: str, timeout: int = 60
     ) -> "ImageEditResult":
-        """
-        Edit an image to generate new variations (browser only).
-
-        Each edit generates 2 images. Some may be moderated (blocked).
+        """Edit an image to generate new variations.
 
         Args:
             post_id: The post UUID (parent image)
@@ -3172,9 +2874,7 @@ class SmartGrokClient:
         Returns:
             ImageEditResult with image URLs and moderation info
         """
-
-        browser = await self._get_browser_client()
-        return await browser.edit_image(post_id, edit_prompt, timeout)
+        return await self._browser_client.edit_image(post_id, edit_prompt, timeout)
 
     async def create_image(
         self,
@@ -3228,16 +2928,12 @@ class SmartGrokClient:
             ...     return await scan_favorites()
             >>> result = await client.create_image("a cat", thumbnail_selector=manual_selector)
         """
-        browser = await self._get_browser_client()
-        return await browser.create_image(
+        return await self._browser_client.create_image(
             prompt, aspect_ratio, min_success, max_scroll, timeout, thumbnail_selector
         )
 
     async def upload_image(self, image_path: str | Path, timeout: int = 30) -> str:
-        """
-        Upload a local image to Grok Imagine and create a new post.
-
-        The uploaded image can then be used for video generation or editing.
+        """Upload a local image to Grok Imagine and create a new post.
 
         Args:
             image_path: Path to the local image file (PNG, JPG, etc.)
@@ -3245,20 +2941,8 @@ class SmartGrokClient:
 
         Returns:
             The post ID of the newly created post.
-
-        Raises:
-            FileNotFoundError: If the image file doesn't exist.
-            GrokAPIError: If upload fails or times out.
-
-        Example:
-            >>> post_id = await client.upload_image("/path/to/photo.jpg")
-            >>> # Generate video from uploaded image
-            >>> video = await client.create_video("zoom in", source_post_id=post_id)
-            >>> # Or edit the uploaded image
-            >>> result = await client.edit_image(post_id, "add sunglasses")
         """
-        browser = await self._get_browser_client()
-        return await browser.upload_image(image_path, timeout)
+        return await self._browser_client.upload_image(image_path, timeout)
 
     # =========================================================================
     # Unified Video Generation API
@@ -3285,6 +2969,8 @@ class SmartGrokClient:
         preset: VideoPreset | str = ...,
         aspect_ratio: str = ...,
         timeout: int = ...,
+        duration: int = ...,
+        resolution: str = ...,
     ) -> VideoGenerationResult:
         """img2vid: Generate video with custom prompt."""
         ...
@@ -3297,6 +2983,8 @@ class SmartGrokClient:
         preset: VideoPreset | str,
         aspect_ratio: str = ...,
         timeout: int = ...,
+        duration: int = ...,
+        resolution: str = ...,
     ) -> VideoGenerationResult:
         """img2vid: Generate video with preset only (no prompt)."""
         ...
@@ -3309,6 +2997,8 @@ class SmartGrokClient:
         source_image_path: str | Path,
         aspect_ratio: str = ...,
         timeout: int = ...,
+        duration: int = ...,
+        resolution: str = ...,
     ) -> VideoGenerationResult:
         """upload2vid: Upload local image and generate video from it."""
         ...
@@ -3323,98 +3013,28 @@ class SmartGrokClient:
         aspect_ratio: str = "portrait",
         timeout: int = 300,
         wait_for_video: bool = True,
+        duration: int = 10,
+        resolution: str = "720p",
     ) -> VideoGenerationResult:
         """
         Unified video generation API supporting multiple modes.
 
-        The mode is automatically detected based on which source parameter is provided:
-        - No source → txt2vid (generate video from text prompt)
-        - source_post_id → img2vid (generate video from existing Grok image)
-        - source_image_path → upload2vid (upload local image and generate video)
-
         Args:
             prompt: For txt2vid: full video description.
                    For img2vid/upload2vid: adjustment instructions (camera, motion, style).
-
             source_post_id: (img2vid) Existing Grok image post ID to animate.
             source_image_path: (upload2vid) Local image path to upload and animate.
-
             preset: Video style preset - 'normal', 'fun', or 'spicy'.
-                   Only used for img2vid mode. Ignored if prompt contains custom instructions.
             aspect_ratio: Video aspect ratio.
-                         - txt2vid: "portrait" (9:16), "square" (1:1), "landscape" (16:9)
-                         - img2vid: "2:3", "1:1", "3:2"
             timeout: Max seconds to wait for video generation (default 300).
-                    Video generation typically takes 2-5 minutes, especially for img2vid mode.
             wait_for_video: (txt2vid only) Wait for video element to load (default True).
+            duration: Video duration in seconds (default 10). Options: 6, 10.
+            resolution: Video resolution (default "720p"). Options: "480p", "720p".
 
         Returns:
             VideoGenerationResult with video_id and metadata.
-
-        Raises:
-            ValueError: If both source_post_id and source_image_path are provided.
-            FileNotFoundError: If source_image_path file doesn't exist.
-            GrokAuthError: If API is blocked and browser fallback is disabled.
-
-        Examples:
-            # txt2vid - Generate video from text description
-            >>> video = await client.create_video("a cat playing with yarn")
-
-            # img2vid - Animate existing image with preset
-            >>> video = await client.create_video(
-            ...     "zoom in slowly",
-            ...     source_post_id="abc-123-def",
-            ...     preset="fun"
-            ... )
-
-            # img2vid - Animate with custom camera/motion instructions
-            >>> video = await client.create_video(
-            ...     "she turns her head, Pan Left, cinematic lighting",
-            ...     source_post_id="abc-123-def"
-            ... )
-
-            # upload2vid - Upload local image and animate (NOT YET IMPLEMENTED)
-            >>> video = await client.create_video(
-            ...     "make him smile",
-            ...     source_image_path="/path/to/photo.jpg"
-            ... )
         """
-        # Validate parameters
-        if source_post_id is not None and source_image_path is not None:
-            raise ValueError("Cannot specify both source_post_id and source_image_path.")
-
-        # upload2vid requires browser (no HTTP API)
-        if source_image_path is not None:
-            browser = await self._get_browser_client()
-            return await browser.create_video(
-                prompt=prompt,
-                source_image_path=source_image_path,
-                preset=preset,
-                aspect_ratio=aspect_ratio,
-                timeout=timeout,
-            )
-
-        # For img2vid with non-custom preset, try HTTP API first
-        if source_post_id is not None and (not prompt or preset != "normal"):
-            try:
-                post = await self.get_post_details(source_post_id)
-                return await self._http_client.create_video_from_image(
-                    image_url=post.media_url,
-                    parent_post_id=source_post_id,
-                    preset=preset,
-                    aspect_ratio=aspect_ratio,
-                    video_length=6,
-                )
-            except GrokAuthError:
-                if not self._enable_browser_fallback:
-                    raise GrokAuthError(
-                        "Video API blocked (403). Enable browser fallback or use browser client."
-                    ) from None
-                # Fall through to browser
-
-        # Delegate to NodriverClient.create_video (single source of truth)
-        browser = await self._get_browser_client()
-        return await browser.create_video(
+        return await self._browser_client.create_video(
             prompt=prompt,
             source_post_id=source_post_id,
             source_image_path=source_image_path,
@@ -3422,4 +3042,6 @@ class SmartGrokClient:
             aspect_ratio=aspect_ratio,
             timeout=timeout,
             wait_for_video=wait_for_video,
+            duration=duration,
+            resolution=resolution,
         )
