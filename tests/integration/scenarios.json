@@ -1,0 +1,177 @@
+{
+  "config": {
+    "language": "python",
+    "imports": [
+      "from grok_web import get_client, PostDetails, VideoGenerationResult, ImageGenerationResult, VideoMatchResult"
+    ],
+    "call_style": "client",
+    "extract_style": "attr",
+    "required_env_vars": [],
+    "smoke_test_assertions": [
+      "get_client is not None",
+      "PostDetails is not None",
+      "VideoGenerationResult is not None",
+      "ImageGenerationResult is not None",
+      "VideoMatchResult is not None"
+    ],
+    "note": "Tests are async (pytest-asyncio). generate.py does not support async, so test_workflows.py is hand-written following the same conventions."
+  },
+  "scenarios": [
+    {
+      "name": "browse_and_favorite",
+      "title": "Browse gallery, inspect a post, and favorite it",
+      "workflow": "list_posts → get_post_details → favorite_post → list_posts(favorites) verify → unfavorite_post (cleanup)",
+      "user_problem": "User browses their gallery, finds an interesting image, saves it to favorites for later, then un-favorites when done",
+      "skip_reason": "Requires real Chrome and Grok credentials",
+      "steps": [
+        {
+          "function": "list_posts",
+          "params": {"limit": 5, "source": "all"},
+          "var_name": "posts",
+          "description": "list_posts returns list of PostSummary with post IDs"
+        },
+        {
+          "function": "get_post_details",
+          "params": {"post_id": {"var": "post_id"}},
+          "var_name": "details",
+          "description": "get_post_details uses first post ID to get full details (children, media URLs)"
+        },
+        {
+          "function": "favorite_post",
+          "params": {"post_id": {"var": "post_id"}},
+          "var_name": "fav_ok",
+          "description": "favorite_post saves the post to favorites"
+        },
+        {
+          "function": "list_posts",
+          "params": {"limit": 50, "source": "favorites"},
+          "var_name": "favs",
+          "description": "list_posts(favorites) verifies the post appears in favorites"
+        },
+        {
+          "function": "unfavorite_post",
+          "params": {"post_id": {"var": "post_id"}},
+          "var_name": "unfav_ok",
+          "description": "unfavorite_post removes the post (cleanup)",
+          "cleanup": true
+        }
+      ]
+    },
+    {
+      "name": "generate_video_720p_10s",
+      "title": "Generate 720p 10s video from an existing image",
+      "workflow": "create_video(720p, 10s) → get_post_details → verify resolution → delete_video (cleanup)",
+      "user_problem": "User wants to animate an existing Grok image into a high-quality 720p 10-second video and verify the output resolution",
+      "skip_reason": "Requires real Chrome, creates real video (consumes Grok credits)",
+      "steps": [
+        {
+          "function": "create_video",
+          "params": {"source_post_id": {"var": "TEST_POST_ID"}, "duration": 10, "resolution": "720p"},
+          "var_name": "result",
+          "description": "create_video generates a 720p 10s video from the test image post"
+        },
+        {
+          "function": "get_post_details",
+          "params": {"post_id": {"var": "TEST_POST_ID"}},
+          "var_name": "details",
+          "description": "get_post_details fetches parent to find the new child video"
+        },
+        {
+          "function": "delete_video",
+          "params": {"video_id": {"var": "result.video_id"}},
+          "var_name": "deleted",
+          "description": "delete_video cleans up the generated video",
+          "cleanup": true
+        }
+      ]
+    },
+    {
+      "name": "generate_download_and_match",
+      "title": "Generate video, download it, then match the local file back to Grok",
+      "workflow": "create_video → download_video → match_local_video → verify → delete_video (cleanup)",
+      "user_problem": "User generates a video, downloads it locally, and later wants to find the original Grok post from the local file",
+      "skip_reason": "Requires real Chrome, creates/downloads real video",
+      "steps": [
+        {
+          "function": "create_video",
+          "params": {"source_post_id": {"var": "TEST_POST_ID"}, "duration": 6, "resolution": "480p"},
+          "var_name": "result",
+          "description": "create_video generates a quick 480p 6s video"
+        },
+        {
+          "function": "download_video",
+          "params": {"video_id": {"var": "result.video_id"}, "output_path": {"var": "download_path"}, "parent_post_id": {"var": "TEST_POST_ID"}},
+          "var_name": "saved_path",
+          "description": "download_video downloads the video to a temp file"
+        },
+        {
+          "function": "match_local_video",
+          "params": {"local_path": {"var": "saved_path"}},
+          "var_name": "match",
+          "description": "match_local_video identifies the Grok post from the downloaded file"
+        },
+        {
+          "function": "delete_video",
+          "params": {"video_id": {"var": "result.video_id"}},
+          "var_name": "deleted",
+          "description": "delete_video cleans up the generated video",
+          "cleanup": true
+        }
+      ]
+    },
+    {
+      "name": "text_to_image_to_video",
+      "title": "Create image from text, then animate it into a video",
+      "workflow": "create_image → create_video(img2vid) → get_post_details → verify",
+      "user_problem": "User has a creative idea, generates an image from text, then animates the result into a video — the full creative pipeline",
+      "skip_reason": "Requires real Chrome, creates both image and video (consumes credits)",
+      "steps": [
+        {
+          "function": "create_image",
+          "params": {"prompt": "A serene lake at sunset with mountains in the background"},
+          "var_name": "image_result",
+          "description": "create_image generates an image from text prompt, returns post IDs"
+        },
+        {
+          "function": "create_video",
+          "params": {"source_post_id": {"var": "image_post_id"}, "preset": "normal", "duration": 6},
+          "var_name": "video_result",
+          "description": "create_video animates the generated image into a video"
+        },
+        {
+          "function": "get_post_details",
+          "params": {"post_id": {"var": "image_post_id"}},
+          "var_name": "details",
+          "description": "get_post_details verifies the video appears as a child of the image"
+        }
+      ]
+    },
+    {
+      "name": "social_feedback_workflow",
+      "title": "Review posts and give social feedback",
+      "workflow": "list_posts → get_post_details → like_post → dislike_post (different child)",
+      "user_problem": "User reviews their generated content, gives thumbs up to good results and thumbs down to bad ones",
+      "skip_reason": "Requires real Chrome and Grok credentials",
+      "steps": [
+        {
+          "function": "list_posts",
+          "params": {"limit": 5, "source": "all"},
+          "var_name": "posts",
+          "description": "list_posts returns recent posts to review"
+        },
+        {
+          "function": "get_post_details",
+          "params": {"post_id": {"var": "post_id"}},
+          "var_name": "details",
+          "description": "get_post_details shows all child videos for evaluation"
+        },
+        {
+          "function": "like_post",
+          "params": {"post_id": {"var": "child_id"}},
+          "var_name": "liked",
+          "description": "like_post gives thumbs up to a good video"
+        }
+      ]
+    }
+  ]
+}
