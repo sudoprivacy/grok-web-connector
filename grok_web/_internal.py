@@ -3,7 +3,7 @@ Internal implementation for Grok Web Connector.
 
 Contains:
 - ResponseParser: Pure data transformation (API JSON → Python objects)
-- Utility functions: Payload builders, ID generators, response parsers
+- Utility functions: Response parsers
 - Endpoint constants
 
 Do not import from this module directly. Use the public API from grok_web instead.
@@ -21,7 +21,6 @@ from .models import (
     PostSummary,
     VideoGenerationResult,
     VideoMatchResult,
-    VideoPreset,
 )
 
 # =============================================================================
@@ -36,64 +35,6 @@ MEDIA_POST_GET_ENDPOINT = "/rest/media/post/get"
 # =============================================================================
 # Shared Utilities
 # =============================================================================
-
-PRESET_MAP = {
-    "normal": "normal",
-    "fun": "extremely-crazy",
-    "spicy": "extremely-spicy-or-crazy",
-}
-
-
-def resolve_preset(preset: VideoPreset | str) -> str:
-    """Resolve preset name to API mode value."""
-    if isinstance(preset, VideoPreset):
-        return preset.value
-    elif isinstance(preset, str) and preset.lower() in PRESET_MAP:
-        return PRESET_MAP[preset.lower()]
-    return str(preset)
-
-
-def generate_statsig_id() -> str:
-    """Generate a random statsig_id for video style exploration."""
-    import base64
-    import os
-
-    return base64.b64encode(os.urandom(70)).decode("utf-8").rstrip("=")
-
-
-def build_video_payload(
-    image_url: str,
-    parent_post_id: str,
-    mode_value: str,
-    aspect_ratio: str = "2:3",
-    video_length: int = 10,
-    adjustment_prompt: str | None = None,
-    video_resolution: str = "720",
-) -> dict:
-    """Build the payload for video generation API."""
-    if adjustment_prompt:
-        message = f"{image_url} {adjustment_prompt} --mode=custom"
-    else:
-        message = f"{image_url}  --mode={mode_value}"
-    return {
-        "temporary": True,
-        "modelName": "grok-3",
-        "message": message,
-        "toolOverrides": {"videoGen": True},
-        "responseMetadata": {
-            "experiments": [],
-            "modelConfigOverride": {
-                "modelMap": {
-                    "videoGenModelConfig": {
-                        "parentPostId": parent_post_id,
-                        "aspectRatio": aspect_ratio,
-                        "videoLength": video_length,
-                        "videoResolution": video_resolution,
-                    }
-                }
-            },
-        },
-    }
 
 
 def parse_video_ndjson_response(

@@ -25,10 +25,7 @@ from ._internal import (
     MEDIA_POST_LIST_ENDPOINT,
     MEDIA_POST_UNLIKE_ENDPOINT,
     ResponseParser,
-    build_video_payload,
-    generate_statsig_id,
     parse_video_ndjson_response,
-    resolve_preset,
 )
 from .auth import DEFAULT_CONFIG_PATH, load_config, save_cookies
 from .browser import DEFAULT_DEBUG_HOST
@@ -55,8 +52,8 @@ logger = logging.getLogger(__name__)
 # Constants
 # =============================================================================
 
-# x-statsig-id is required for chat API (create_video_from_image)
-# This appears to be a Statsig SDK client ID, reusable across requests
+# x-statsig-id is required for Grok API requests
+# This is a Statsig SDK client ID, reusable across requests
 DEFAULT_STATSIG_ID = (
     "W6IFgVSv2YSVxFj5Yt971KvAL1ldD75XJoGIR285iLdGPIiPNM7S1C9An8vmKsYbR9N5sF963w2iXoRhwSHYizPczaEUWA"
 )
@@ -400,92 +397,6 @@ class NodriverClient(ResponseParser):
         except ValueError:
             return {}
 
-    async def _api_request_text(
-        self,
-        method: str,
-        endpoint: str,
-        json_data: dict | None = None,
-        extra_headers: dict | None = None,
-    ) -> str:
-        """Make authenticated request and return raw text response.
-
-        Includes all headers that the browser sends when clicking UI buttons:
-        - x-xai-request-id: UUID for request tracking
-        - x-statsig-id: for feature flags (passed in extra_headers)
-        - Referer: current page URL
-        - baggage, sentry-trace, traceparent: telemetry headers
-        """
-        import json as json_module
-        import uuid
-
-        url = f"{self.BASE_URL}{endpoint}"
-        payload_str = json_module.dumps(json_data) if json_data else "null"
-
-        # Generate request ID like the browser does
-        request_id = str(uuid.uuid4())
-
-        # Generate sentry trace IDs (32 char hex)
-        sentry_trace_id = uuid.uuid4().hex
-        sentry_span_id = uuid.uuid4().hex[:16]
-        traceparent_trace_id = uuid.uuid4().hex
-        traceparent_span_id = uuid.uuid4().hex[:16]
-
-        # Build headers matching browser behavior
-        headers_obj = {
-            "Content-Type": "application/json",
-            "x-xai-request-id": request_id,
-            "Referer": f"{self.BASE_URL}/imagine",
-            "baggage": (
-                "sentry-environment=production,"
-                "sentry-release=bc5d5045c5beaefc9dfb4ec6d88d20247e4835ab,"
-                "sentry-public_key=b311e0f2690c81f25e2c4cf6d4f7ce1c,"
-                f"sentry-trace_id={sentry_trace_id},"
-                "sentry-org_id=4508179396558848,"
-                "sentry-sampled=false,"
-                "sentry-sample_rand=0.01,"
-                "sentry-sample_rate=0"
-            ),
-            "sentry-trace": f"{sentry_trace_id}-{sentry_span_id}-0",
-            "traceparent": f"00-{traceparent_trace_id}-{traceparent_span_id}-00",
-            **(extra_headers or {}),
-        }
-        headers_str = json_module.dumps(headers_obj)
-
-        # Escape the payload for embedding in JS string
-        payload_escaped = payload_str.replace("\\", "\\\\").replace("'", "\\'")
-
-        js_code = f"""
-        (async () => {{
-            const resp = await fetch("{url}", {{
-                method: "{method.upper()}",
-                headers: {headers_str},
-                body: '{payload_escaped}',
-                credentials: "include"
-            }});
-            const text = await resp.text();
-            return JSON.stringify({{status: resp.status, body: text}});
-        }})()
-        """
-
-        result_str = await self._evaluate_with_recovery(
-            js_code, await_promise=True, return_by_value=True
-        )
-
-        result = json_module.loads(result_str)
-
-        if result["status"] in (401, 403):
-            if "Just a moment" in result["body"]:
-                raise GrokAuthError("Cloudflare challenge detected in API response")
-            raise GrokAuthError(f"Request blocked ({result['status']})")
-
-        if result["status"] == 404:
-            raise GrokNotFoundError("Resource not found")
-
-        if result["status"] >= 400:
-            raise GrokAPIError(f"API error: {result['status']}")
-
-        return result["body"]
-
     async def _asset_request_head(self, asset_url: str) -> int:
         """Make HEAD request to asset URL via CDP Network.loadNetworkResource.
 
@@ -826,43 +737,6 @@ class NodriverClient(ResponseParser):
     # NodriverClient-specific methods
     # =========================================================================
 
-    async def _get_statsig_id_from_page(self) -> str | None:
-        """Try to extract statsig_id from page context (localStorage, cookie, or JS var)."""
-        # Try multiple locations where statsig_id might be stored
-        js_code = """
-        (function() {
-            // Try localStorage (Statsig SDK typically stores here)
-            var keys = ['STATSIG_LOCAL_STORAGE_STABLE_ID', 'statsig_stable_id', 'statsig_id', 'x-statsig-id'];
-            for (var i = 0; i < keys.length; i++) {
-                var val = localStorage.getItem(keys[i]);
-                if (val) return val;
-            }
-
-            // Try sessionStorage
-            for (var i = 0; i < keys.length; i++) {
-                var val = sessionStorage.getItem(keys[i]);
-                if (val) return val;
-            }
-
-            // Try window object
-            if (window.statsigId) return window.statsigId;
-            if (window.__STATSIG__) {
-                try {
-                    return window.__STATSIG__.stableID || window.__STATSIG__.userID;
-                } catch(e) {}
-            }
-
-            return null;
-        })()
-        """
-        try:
-            result = await self._tab.evaluate(js_code, await_promise=False, return_by_value=True)
-            if result:
-                return str(result)
-        except Exception:
-            pass
-        return None
-
     @staticmethod
     def generate_stable_id() -> str:
         """Generate a valid Statsig stable_id.
@@ -961,63 +835,6 @@ class NodriverClient(ResponseParser):
         url = f"{self.BASE_URL}/imagine/post/{post_id}"
         await self._tab.get(url)
         await asyncio.sleep(2)
-
-    async def create_video_from_image(
-        self,
-        image_url: str,
-        parent_post_id: str,
-        aspect_ratio: str = "2:3",
-        video_length: int = 10,
-        statsig_id: str | None = None,
-        preset: VideoPreset | str = "normal",
-        adjustment_prompt: str | None = None,
-        video_resolution: str = "720",
-    ) -> VideoGenerationResult:
-        """Generate a video from an image using Grok's chat API.
-
-        NodriverClient override: tries to get statsig_id from page context first.
-
-        Args:
-            image_url: Source image URL
-            parent_post_id: Parent post UUID
-            aspect_ratio: Video aspect ratio (default "2:3")
-            video_length: Video duration in seconds (default 10)
-            statsig_id: Optional style seed for reproducible styles
-            preset: Video preset - 'normal', 'fun', or 'spicy'
-            adjustment_prompt: Video generation prompt (same as typing in Grok UI after image).
-                Can include any instructions: camera movement, character actions, or both.
-                Examples: "Static Shot", "she turns her head", "camera zooms in while he walks".
-                If provided, overrides preset and uses 'custom' mode.
-            video_resolution: Video resolution - "480", "720", or "1080" (default "720")
-        """
-        # Try to get statsig_id from page context first, then generate if not found
-        if statsig_id is None:
-            statsig_id = await self._get_statsig_id_from_page()
-        if statsig_id is None:
-            statsig_id = generate_statsig_id()
-
-        # Build payload using shared utilities
-        mode_value = resolve_preset(preset)
-        payload = build_video_payload(
-            image_url,
-            parent_post_id,
-            mode_value,
-            aspect_ratio,
-            video_length,
-            adjustment_prompt=adjustment_prompt,
-            video_resolution=video_resolution,
-        )
-
-        # Get raw text response
-        response_text = await self._api_request_text(
-            "POST",
-            "/rest/app-chat/conversations/new",
-            payload,
-            extra_headers={"x-statsig-id": statsig_id},
-        )
-
-        # Parse using shared utility
-        return parse_video_ndjson_response(response_text, parent_post_id, statsig_id)
 
     # =========================================================================
     # UI Menu Operations (shared helper + specific actions)
