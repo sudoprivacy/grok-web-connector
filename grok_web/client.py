@@ -2313,6 +2313,7 @@ class NodriverClient(ResponseParser):
                 adjustment_prompt=prompt if prompt else None,
                 duration=duration,
                 resolution=resolution,
+                aspect_ratio=aspect_ratio,
             )
 
         # Mode: img2vid (from existing Grok image post)
@@ -2324,6 +2325,7 @@ class NodriverClient(ResponseParser):
                 adjustment_prompt=prompt if prompt else None,
                 duration=duration,
                 resolution=resolution,
+                aspect_ratio=aspect_ratio,
             )
 
         # Mode: txt2vid (from text prompt only)
@@ -2343,12 +2345,13 @@ class NodriverClient(ResponseParser):
         adjustment_prompt: str | None = None,
         duration: int = 10,
         resolution: str = "720p",
+        aspect_ratio: str = "2:3",
     ) -> VideoGenerationResult:
         """
         Generate video by simulating UI button click (more reliable for anti-bot bypass).
 
-        This navigates to the post page, selects the preset, and clicks "Create Video",
-        using the same code path as manual user interaction.
+        This navigates to the post page, opens the settings gear menu to configure
+        video options, then triggers generation via the "制作视频" menu item.
 
         Args:
             parent_post_id: The image post ID to generate video from
@@ -2363,6 +2366,8 @@ class NodriverClient(ResponseParser):
                       When provided, overrides preset and sets result.mode='custom'.
             duration: Video duration in seconds (default 10). Options: 6, 10.
             resolution: Video resolution (default "720p"). Options: "480p", "720p".
+            aspect_ratio: Video aspect ratio (default "2:3").
+                         Options: "2:3", "3:2", "1:1", "9:16", "16:9".
 
         Returns:
             VideoGenerationResult with video_id (may be empty if moderated).
@@ -2430,107 +2435,47 @@ class NodriverClient(ResponseParser):
         # Wait for page to fully load (React hydration) + random jitter
         await asyncio.sleep(3 + random.uniform(0, 2.0))
 
-        # Scroll down to reveal the "Create Video" button (it's below the image)
-        await self._tab.evaluate(
-            "window.scrollTo(0, document.body.scrollHeight / 2)", await_promise=False
-        )
-        await asyncio.sleep(1 + random.uniform(0, 0.5))
-
-        # If adjustment_prompt is provided, fill the textarea using React-compatible method
-        if adjustment_prompt:
-            # Escape the prompt for JavaScript
-            escaped_prompt = (
-                adjustment_prompt.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
-            )
-
-            # React-compatible textarea filling:
-            # 1. Use native setter to bypass React's controlled input
-            # 2. Dispatch 'input' event to trigger React's onChange
-            fill_textarea_js = f"""
-            (function() {{
-                // Find the textarea by aria-label (Chinese UI: "制作视频", English: "Make video")
-                const textarea = document.querySelector('textarea[aria-label="制作视频"]') ||
-                                 document.querySelector('textarea[aria-label="Make video"]') ||
-                                 document.querySelector('textarea[placeholder*="视频"]') ||
-                                 document.querySelector('textarea[placeholder*="video"]');
-
-                if (!textarea) {{
-                    return 'textarea_not_found';
-                }}
-
-                // Focus the textarea first
-                textarea.focus();
-
-                // Use native setter to set value (bypasses React's controlled input)
-                const nativeTextAreaValueSetter = Object.getOwnPropertyDescriptor(
-                    window.HTMLTextAreaElement.prototype, 'value'
-                ).set;
-                nativeTextAreaValueSetter.call(textarea, "{escaped_prompt}");
-
-                // Dispatch input event to trigger React's onChange handler
-                const inputEvent = new Event('input', {{ bubbles: true, cancelable: true }});
-                textarea.dispatchEvent(inputEvent);
-
-                // Also dispatch change event for good measure
-                const changeEvent = new Event('change', {{ bubbles: true, cancelable: true }});
-                textarea.dispatchEvent(changeEvent);
-
-                return 'success';
-            }})()
-            """
-
-            fill_result = await self._tab.evaluate(fill_textarea_js, await_promise=False)
-            if fill_result == "textarea_not_found":
-                # Try alternative: look for any visible textarea
-                fill_alt_js = f"""
-                (function() {{
-                    const textareas = Array.from(document.querySelectorAll('textarea'));
-                    // Find visible textarea
-                    const visible = textareas.find(t => t.offsetParent !== null);
-                    if (!visible) return 'no_visible_textarea';
-
-                    visible.focus();
-                    const setter = Object.getOwnPropertyDescriptor(
-                        window.HTMLTextAreaElement.prototype, 'value'
-                    ).set;
-                    setter.call(visible, "{escaped_prompt}");
-                    visible.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                    visible.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                    return 'success_alt';
-                }})()
-                """
-                fill_result = await self._tab.evaluate(fill_alt_js, await_promise=False)
-
-            # Wait for React to process the state update
-            await asyncio.sleep(0.5)
-
-            # When using adjustment_prompt, skip preset selection and go directly to generate button
-            # (adjustment_prompt uses custom mode which overrides preset)
-
-        # Open "视频选项" (Video Options) dropdown to set duration, resolution, and preset.
-        # The dropdown trigger is button[aria-label="视频选项"].
-        # Inside the Radix dropdown menu:
+        # --- New UI: Settings gear menu ---
+        # The settings gear (button[aria-label="设置"]) opens a Radix dropdown containing:
         #   - Duration: button[aria-label="6s"] / button[aria-label="10s"]
         #   - Resolution: button[aria-label="480p"] / button[aria-label="720p"]
-        #   - Preset: role="menuitem" with text "Spicy" / "Fun" / "Normal"
-        # IMPORTANT: This is a Radix dropdown — clicking ANY item closes the menu.
-        # We must reopen the dropdown between each selection.
-        preset_selected = False
+        #   - Aspect ratio: button[aria-label="2:3"] / "3:2" / "1:1" / "9:16" / "16:9"
+        #   - "编辑图像" menuitem
+        #   - "制作视频" menuitem (triggers video generation)
+        # After entering video mode, extra items appear: presets + "重做"
+        # IMPORTANT: Radix dropdown closes after ANY click — must reopen between selections.
 
-        async def _open_video_options():
-            """Open the Video Options dropdown. Returns True if opened."""
-            btn = await self._tab.find('button[aria-label="视频选项"]')
+        async def _open_settings():
+            """Open the settings gear dropdown. Returns True if opened."""
+            btn = await self._tab.find('button[aria-label="设置"]')
             if not btn:
-                btn = await self._tab.find('button[aria-label="Video Options"]')
+                btn = await self._tab.find('button[aria-label="Settings"]')
             if btn:
                 await btn.mouse_click()
                 await asyncio.sleep(0.5)
                 return True
             return False
 
+        async def _click_menuitem(text: str) -> bool:
+            """Find and click a menuitem by text content. Returns True if clicked."""
+            menu_items = await self._tab.find_all('[role="menuitem"]')
+            for item in menu_items:
+                item_text = item.text.strip() if hasattr(item, "text") else ""
+                if not item_text:
+                    idx = menu_items.index(item)
+                    item_text = await self._tab.evaluate(
+                        f"document.querySelectorAll('[role=\"menuitem\"]')[{idx}].textContent.trim()",
+                        await_promise=False,
+                    )
+                if text in item_text:
+                    await item.mouse_click()
+                    await asyncio.sleep(0.3)
+                    return True
+            return False
+
         try:
             # Select duration (e.g., "10s") — open menu, click, menu closes
-            if await _open_video_options():
+            if await _open_settings():
                 duration_label = f"{duration}s"
                 dur_btn = await self._tab.find(f'button[aria-label="{duration_label}"]')
                 if dur_btn:
@@ -2538,116 +2483,220 @@ class NodriverClient(ResponseParser):
                     await asyncio.sleep(0.3)
 
             # Select resolution (e.g., "720p") — reopen menu, click, menu closes
-            if await _open_video_options():
+            if await _open_settings():
                 res_label = resolution if resolution.endswith("p") else f"{resolution}p"
                 res_btn = await self._tab.find(f'button[aria-label="{res_label}"]')
                 if res_btn:
                     await res_btn.mouse_click()
                     await asyncio.sleep(0.3)
 
-            # Select preset if non-normal (clicking preset auto-generates video)
-            if not adjustment_prompt and preset_str != "normal" and await _open_video_options():
-                menu_items = await self._tab.find_all('[role="menuitem"]')
-                for item in menu_items:
-                    item_text = item.text.strip() if hasattr(item, "text") else ""
-                    if not item_text:
-                        idx = menu_items.index(item)
-                        item_text = await self._tab.evaluate(
-                            f"document.querySelectorAll('[role=\"menuitem\"]')[{idx}].textContent.trim()",
-                            await_promise=False,
-                        )
-                    if item_text == preset_menu_text:
-                        await item.mouse_click()
-
-                        # Wait for preset click to trigger API request
-                        preset_start = asyncio.get_event_loop().time()
-                        while captured_response["request_id"] is None:
-                            elapsed = asyncio.get_event_loop().time() - preset_start
-                            if elapsed > 3:
-                                break
-                            await asyncio.sleep(0.3)
-
-                        if captured_response["request_id"] is not None:
-                            preset_selected = True
-                        break
+            # Select aspect ratio if non-default — reopen menu, click, menu closes
+            if aspect_ratio and aspect_ratio != "2:3" and await _open_settings():
+                ar_btn = await self._tab.find(f'button[aria-label="{aspect_ratio}"]')
+                if ar_btn:
+                    await ar_btn.mouse_click()
+                    await asyncio.sleep(0.3)
         except Exception:
-            pass  # If dropdown interaction fails, fall back to clicking Create Video
+            pass  # If settings interaction fails, continue with defaults
 
-        # For Normal preset (or if preset selection failed), click "Create Video" button
-        # with retry logic for UI non-determinism
-        if not preset_selected:
-            max_click_retries = 3
-            click_wait_timeout = 8  # Wait 8s for request capture before retry
+        # Scroll to ensure buttons are visible (image overlay button may be below fold)
+        await self._tab.evaluate(
+            "window.scrollTo(0, document.body.scrollHeight / 3)", await_promise=False
+        )
+        await asyncio.sleep(0.5 + random.uniform(0, 0.3))
 
-            async def find_and_click_create_button() -> bool:
-                """Find and click the Create Video button. Returns True if clicked."""
-                try:
-                    buttons = await self._tab.find_all("button, [role='button']")
+        # --- Generation trigger ---
+        # New UI flow:
+        # - button[aria-label="制作视频"] (image overlay) → triggers first generation
+        # - After entering video mode: button[aria-label="生成视频"] (arrow up = regenerate)
+        # - Settings dropdown gains presets (Spicy/Fun/Normal) + "重做" in video mode
+        # - "输入你的想象" input appears in video mode for adjustment prompts
 
-                    # Find the "生成视频" / "Create Video" button
-                    create_btn = None
-                    for btn in buttons:
-                        text = ""
-                        label = btn.attrs.get("aria-label", "")
-                        if hasattr(btn, "text"):
-                            text = btn.text.strip() if btn.text else ""
+        async def _click_make_video_button() -> bool:
+            """Click the '制作视频' or '生成视频' button to trigger generation."""
+            # Try "制作视频" first (initial image post state)
+            btn = await self._tab.find('button[aria-label="制作视频"]')
+            if not btn:
+                btn = await self._tab.find('button[aria-label="Make video"]')
+            # Fallback: "生成视频" (video mode state, arrow up = regenerate)
+            if not btn:
+                btn = await self._tab.find('button[aria-label="生成视频"]')
+            if not btn:
+                btn = await self._tab.find('button[aria-label="Generate video"]')
+            if btn:
+                await btn.mouse_click()
+                return True
+            return False
 
-                        if (
-                            "生成视频" in text
-                            or "重新生成" in text
-                            or "Create Video" in text
-                            or "Regenerate" in text
-                            or "Make video" in label
-                            or label == "生成视频"
-                            or label == "重新生成"
-                        ):
-                            create_btn = btn
-                            break
-
-                    if not create_btn:
-                        return False
-
-                    await create_btn.mouse_click()
-                    return True
-
-                except Exception:
+        async def _wait_for_request(wait_timeout: int = 8) -> bool:
+            """Wait for a CDP request to be captured. Returns True if captured."""
+            wait_start = asyncio.get_event_loop().time()
+            while captured_response["request_id"] is None:
+                elapsed = asyncio.get_event_loop().time() - wait_start
+                if elapsed > wait_timeout:
                     return False
+                await asyncio.sleep(0.5)
+            return True
 
-            # Retry clicking the button if no request is captured
+        async def _wait_for_body(body_timeout: int = 0) -> None:
+            """Wait for response body with timeout."""
+            effective_timeout = body_timeout or timeout
+            start = asyncio.get_event_loop().time()
+            while captured_response["body"] is None:
+                elapsed = asyncio.get_event_loop().time() - start
+                if elapsed > effective_timeout:
+                    raise GrokAPIError("Timeout waiting for video generation response")
+                await asyncio.sleep(0.5)
+
+        max_click_retries = 3
+        click_wait_timeout = 8
+
+        if preset_str != "normal" or adjustment_prompt:
+            # Both non-normal preset and adjustment_prompt require entering video mode first.
+            # Step 1: Click "制作视频" to enter video mode (triggers initial Normal generation)
             for click_attempt in range(1, max_click_retries + 1):
-                # Reset request_id for each attempt to detect new requests
                 captured_response["request_id"] = None
-
-                # Random pre-click delay (human-like)
                 await asyncio.sleep(random.uniform(0.3, 0.8))
 
-                clicked = await find_and_click_create_button()
-                if not clicked:
-                    if click_attempt == max_click_retries:
-                        raise GrokAPIError("Could not find 'Create Video' button after retries")
+                clicked = await _click_make_video_button()
+                if not clicked and click_attempt == max_click_retries:
+                    raise GrokAPIError("Could not find '制作视频' button after retries")
+                elif not clicked:
                     await asyncio.sleep(2 + random.uniform(0, 1.0))
                     continue
 
-                # Wait for request to be captured (indicates button click triggered API call)
-                click_start = asyncio.get_event_loop().time()
-                while captured_response["request_id"] is None:
-                    elapsed = asyncio.get_event_loop().time() - click_start
-                    if elapsed > click_wait_timeout:
-                        break
-                    await asyncio.sleep(0.5)
-
-                # If request was captured, break out of retry loop
-                if captured_response["request_id"] is not None:
+                if await _wait_for_request(click_wait_timeout):
                     break
 
-                # No request captured - wait before retry to let page stabilize
                 if click_attempt < max_click_retries:
                     await asyncio.sleep(2 + random.uniform(0, 1.5))
 
-            # If still no request captured after all retries, raise error
+            if captured_response["request_id"] is None:
+                raise GrokAPIError("'制作视频' button did not trigger video generation request")
+
+            # Wait for first generation to complete
+            await _wait_for_body()
+
+            # Now in video mode — reset capture for the second generation
+            await asyncio.sleep(2 + random.uniform(0, 1.0))
+            captured_response["body"] = None
+            captured_response["request_id"] = None
+
+            if adjustment_prompt:
+                # Step 2a: Fill the "输入你的想象" input and click "生成视频" (arrow up)
+                escaped_prompt = (
+                    adjustment_prompt.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+                )
+
+                # Try textarea first, then contenteditable (ProseMirror/tiptap editor)
+                await self._tab.evaluate(
+                    f"""
+                    (function() {{
+                        // Try textarea
+                        const ta = document.querySelector('textarea');
+                        if (ta && ta.offsetParent !== null) {{
+                            ta.focus();
+                            const setter = Object.getOwnPropertyDescriptor(
+                                window.HTMLTextAreaElement.prototype, 'value'
+                            ).set;
+                            setter.call(ta, "{escaped_prompt}");
+                            ta.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                            ta.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                            return 'textarea';
+                        }}
+                        // Try contenteditable (ProseMirror/tiptap)
+                        const editor = document.querySelector('.tiptap.ProseMirror') ||
+                                       document.querySelector('[contenteditable="true"]') ||
+                                       document.querySelector('.ProseMirror');
+                        if (editor) {{
+                            editor.focus();
+                            editor.innerHTML = '<p>{escaped_prompt}</p>';
+                            editor.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                            return 'editor';
+                        }}
+                        return 'not_found';
+                    }})()
+                """,
+                    await_promise=False,
+                )
+
+                await asyncio.sleep(0.5)
+
+                # Click "生成视频" button (the arrow up / regenerate button)
+                for click_attempt in range(1, max_click_retries + 1):
+                    captured_response["request_id"] = None
+                    await asyncio.sleep(random.uniform(0.3, 0.8))
+
+                    submit_btn = await self._tab.find('button[aria-label="生成视频"]')
+                    if not submit_btn:
+                        submit_btn = await self._tab.find('button[aria-label="Generate video"]')
+                    if not submit_btn:
+                        submit_btn = await self._tab.find('button[aria-label="提交"]')
+
+                    if submit_btn:
+                        await submit_btn.mouse_click()
+                    elif click_attempt == max_click_retries:
+                        raise GrokAPIError("Could not find '生成视频' button after retries")
+                    else:
+                        await asyncio.sleep(2 + random.uniform(0, 1.0))
+                        continue
+
+                    if await _wait_for_request(click_wait_timeout):
+                        break
+
+                    if click_attempt < max_click_retries:
+                        await asyncio.sleep(2 + random.uniform(0, 1.5))
+
+                if captured_response["request_id"] is None:
+                    raise GrokAPIError("'生成视频' button did not trigger request after retries")
+
+            else:
+                # Step 2b: Non-normal preset — open settings and click preset menuitem
+                for click_attempt in range(1, max_click_retries + 1):
+                    captured_response["request_id"] = None
+                    await asyncio.sleep(random.uniform(0.3, 0.8))
+
+                    clicked = False
+                    if await _open_settings():
+                        clicked = await _click_menuitem(preset_menu_text)
+
+                    if not clicked and click_attempt == max_click_retries:
+                        raise GrokAPIError(f"Could not find preset '{preset_menu_text}' menu item")
+
+                    if await _wait_for_request(click_wait_timeout):
+                        break
+
+                    if click_attempt < max_click_retries:
+                        await asyncio.sleep(2 + random.uniform(0, 1.5))
+
+                if captured_response["request_id"] is None:
+                    raise GrokAPIError(
+                        f"Preset '{preset_menu_text}' did not trigger video generation"
+                    )
+
+        else:
+            # Normal preset, no adjustment_prompt:
+            # Simply click the "制作视频" button on the image overlay
+            for click_attempt in range(1, max_click_retries + 1):
+                captured_response["request_id"] = None
+                await asyncio.sleep(random.uniform(0.3, 0.8))
+
+                clicked = await _click_make_video_button()
+                if not clicked and click_attempt == max_click_retries:
+                    raise GrokAPIError("Could not find '制作视频' button after retries")
+                elif not clicked:
+                    await asyncio.sleep(2 + random.uniform(0, 1.0))
+                    continue
+
+                if await _wait_for_request(click_wait_timeout):
+                    break
+
+                if click_attempt < max_click_retries:
+                    await asyncio.sleep(2 + random.uniform(0, 1.5))
+
             if captured_response["request_id"] is None:
                 raise GrokAPIError(
-                    f"Button click did not trigger video generation request after {max_click_retries} attempts"
+                    f"'制作视频' button did not trigger request after {max_click_retries} attempts"
                 )
 
         # Wait for response body with timeout
