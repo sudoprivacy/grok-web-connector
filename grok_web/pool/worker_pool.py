@@ -12,7 +12,7 @@ from typing import Any, Literal
 from ai_dev_browser.core import stop_browser
 
 from ..browser import GROK_CHROME_PROFILE
-from ..client import NodriverClient
+from ..client import GrokClient
 from ..models import GrokCookies
 from .job import Job, JobResult, JobStatus
 from .persistence import PoolState, load_state, save_state
@@ -213,7 +213,7 @@ class BrowserWorkerPool:
         profile = f"{GROK_CHROME_PROFILE}-w{worker_id}"
 
         # Initialize browser client with per-worker profile
-        client = NodriverClient(
+        client = GrokClient(
             cookies=self._cookies,
             config_path=self._config_path,
             headless=self._headless,
@@ -808,7 +808,7 @@ class BrowserWorkerPool:
     async def _execute_job(self, worker: Worker, job: Job) -> tuple[Any, bool]:
         """Execute a job by dynamically calling the client method.
 
-        The task_type directly maps to NodriverClient method names.
+        The task_type directly maps to GrokClient method names.
         This approach maintains zero maintenance overhead - adding new client methods
         automatically makes them available through the worker pool.
 

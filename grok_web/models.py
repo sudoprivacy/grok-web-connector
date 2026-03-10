@@ -140,6 +140,35 @@ class PostDetails(BaseModel):
         """Check if this post has any child videos."""
         return len(self.children) > 0
 
+    def videos_by_source(self) -> dict[str, list["ChildVideo"]]:
+        """Group child videos by their source image post ID.
+
+        Each image variant (original or edited) has its own post ID.
+        Videos generated from the same image variant share the same parent_id.
+
+        Returns:
+            Dict mapping source image post_id → list of ChildVideo.
+            e.g., {"abc-123": [video1, video2], "def-456": [video3]}
+        """
+        groups: dict[str, list[ChildVideo]] = {}
+        for child in self.children:
+            groups.setdefault(child.parent_id, []).append(child)
+        return groups
+
+    def find_video_source(self, video_id: str) -> str | None:
+        """Find which source image post ID a video came from.
+
+        Args:
+            video_id: The child video UUID
+
+        Returns:
+            The source image post_id, or None if video not found
+        """
+        for child in self.children:
+            if child.id == video_id:
+                return child.parent_id
+        return None
+
 
 class GrokCookies(BaseModel):
     """Authentication cookies for Grok API."""
@@ -226,6 +255,34 @@ class VideoGenerationResult(BaseModel):
     @property
     def success(self) -> bool:
         """Check if video was generated successfully (not moderated)."""
+        return self.progress == 100 and not self.moderated
+
+
+class VideoExtendResult(BaseModel):
+    """Result of extend_video() — extends a video with continuation frames."""
+
+    video_id: str = Field(..., description="New extended video UUID")
+    source_video_id: str = Field(..., description="Original video UUID that was extended")
+    parent_post_id: str = Field(..., description="Parent image post UUID")
+    moderated: bool = Field(False, description="True if content was flagged by moderation")
+    progress: int = Field(100, description="Generation progress (100 = complete)")
+    mode: str = Field("extend", description="Generation mode")
+    model_name: str | None = Field(None, description="Model used")
+    conversation_id: str | None = Field(None, description="Chat conversation UUID")
+    statsig_id: str | None = Field(
+        None,
+        description="Style seed (x-statsig-id) used for this generation",
+    )
+
+    @computed_field
+    @property
+    def web_url(self) -> str:
+        """Web URL for the extended video's parent post."""
+        return f"https://grok.com/imagine/post/{self.source_video_id}"
+
+    @property
+    def success(self) -> bool:
+        """Check if video was extended successfully."""
         return self.progress == 100 and not self.moderated
 
 

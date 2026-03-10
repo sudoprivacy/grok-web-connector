@@ -27,25 +27,23 @@ Grok's video generation uses Statsig for A/B testing, which determines the video
 
 ## Using Custom Stable IDs
 
-The `NodriverClient` supports generating and injecting custom stable_ids to control video styles:
+The `GrokClient` supports generating and injecting custom stable_ids to control video styles:
 
 ```python
-from grok_web import NodriverClient
+from grok_web import GrokClient
 
-async with NodriverClient(host="127.0.0.1", port=9222) as client:
+async with GrokClient(host="127.0.0.1", port=9222) as client:
     # Generate a new stable_id
-    new_stable_id = NodriverClient.generate_stable_id()
+    new_stable_id = GrokClient.generate_stable_id()
 
-    # Option 1: Inject and generate video in one call
-    result = await client.create_video_via_ui(
-        parent_post_id="abc-123",
-        stable_id=new_stable_id,
-    )
+    # Option 1: Inject stable_id and generate via unified API
+    await client.set_stable_id(new_stable_id)
+    result = await client.create_video(source_post_id="abc-123")
 
     # Option 2: Inject stable_id first, then generate multiple videos
     await client.set_stable_id(new_stable_id)
-    result1 = await client.create_video_via_ui(parent_post_id="abc-123")
-    result2 = await client.create_video_via_ui(parent_post_id="abc-123")
+    result1 = await client.create_video(source_post_id="abc-123")
+    result2 = await client.create_video(source_post_id="abc-123")
     # Both videos will have the same style
 
     # Check current stable_id
@@ -54,12 +52,12 @@ async with NodriverClient(host="127.0.0.1", port=9222) as client:
 
 ## API Reference
 
-### `NodriverClient.generate_stable_id() -> str`
+### `GrokClient.generate_stable_id() -> str`
 
 Static method. Generates a valid Statsig stable_id.
 
 ```python
-stable_id = NodriverClient.generate_stable_id()
+stable_id = GrokClient.generate_stable_id()
 # Returns: 94-character base64 string like "PLV6AzP3uq1/fbC0U5Sj6PeT..."
 ```
 
@@ -75,11 +73,9 @@ Injects a custom stable_id into localStorage.
 - `reload_page`: Whether to reload page after injection (default: True)
 - Returns: True if stable_id was successfully injected and kept
 
-### `await client.create_video_via_ui(..., stable_id=None)`
+### `await client.create_video(...)`
 
-Generate video with optional custom stable_id.
-
-- `stable_id`: Optional. If provided, injects this stable_id before generation.
+Generate video via the unified API. Stable_id is picked up automatically from localStorage.
 
 ## Observed Style Patterns (Historical)
 
@@ -117,7 +113,7 @@ stable_id = base64.b64encode(os.urandom(70)).decode().rstrip("=")
 ### Limitations
 
 - Cannot inject stable_id via API (server validates crypto signature)
-- Must use browser automation (NodriverClient) for stable_id control
+- Must use browser automation (GrokClient) for stable_id control
 - Style bucket assignment is server-side; we can only discover patterns empirically
 
 ## Investigation Notes (2025-12-12)

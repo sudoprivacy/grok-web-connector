@@ -1,16 +1,11 @@
 """
-Grok Web Connector - API Clients
+Grok Web Connector - GrokClient
 
-NodriverClient
-    - Browser automation client using nodriver/CDP
-    - Handles all Grok API operations (reads, writes, video generation)
-
-SmartGrokClient
-    - Thin wrapper around NodriverClient with cookie loading and interactive login
+Browser automation client using Chrome DevTools Protocol (via nodriver/ai-dev-browser).
+Handles all Grok API operations: reads, writes, video/image generation, and UI automation.
 
 Public API:
-    Use get_client() from grok_web package - returns SmartGrokClient
-    which automatically routes to NodriverClient.
+    Use get_client() from grok_web package — returns GrokClient.
 """
 
 import logging
@@ -37,6 +32,7 @@ from .models import (
     ImageGenerationResult,
     PostDetails,
     PostSummary,
+    VideoExtendResult,
     VideoGenerationResult,
     VideoMatchResult,
     VideoPreset,
@@ -60,35 +56,26 @@ DEFAULT_STATSIG_ID = (
 
 
 # =============================================================================
-# NodriverClient - Stealth browser using nodriver
+# GrokClient - Browser automation via nodriver/CDP
 # =============================================================================
 
 
-class NodriverClient(ResponseParser):
+class GrokClient(ResponseParser):
     """
-    Stealth browser client using nodriver/CDP.
+    Grok Imagine browser automation client.
 
-    Uses Chrome DevTools Protocol without WebDriver traces.
-    Automatically handles Cloudflare Turnstile.
-
-    Features:
-        - Auto-launches isolated Chrome instance if not running
-        - Reuses existing Chrome session for fast subsequent calls
-        - Handles Cloudflare challenges automatically
+    Uses Chrome DevTools Protocol (via nodriver/ai-dev-browser) for all
+    Grok API operations. Automatically handles cookie loading, interactive
+    login setup, Chrome lifecycle, and Cloudflare Turnstile.
 
     Usage:
-        >>> # Simplest usage - auto-launches Chrome if needed
-        >>> async with NodriverClient() as client:
+        >>> async with GrokClient() as client:
         ...     posts = await client.list_posts(limit=10)
-        ...     result = await client.create_video_via_ui(post_id)
+        ...     result = await client.create_video(source_post_id=post_id)
 
         >>> # Or use get_client() factory
         >>> from grok_web import get_client
         >>> async with get_client() as client:
-        ...     posts = await client.list_posts()
-
-        >>> # Connect to specific Chrome instance
-        >>> async with NodriverClient(port=9223) as client:
         ...     posts = await client.list_posts()
 
     Performance:
@@ -112,10 +99,11 @@ class NodriverClient(ResponseParser):
         profile: str | None = None,
     ):
         """
-        Initialize NodriverClient.
+        Initialize GrokClient.
 
         Args:
-            cookies: GrokCookies instance. If None, loads from config file.
+            cookies: GrokCookies instance. If None, loads from config (with
+                    interactive setup if config is missing).
             config_path: Path to config file. Defaults to ~/.grok-config.json
             headless: Run browser in headless mode (default: False for debugging)
             host: Remote debugging host. Defaults to "127.0.0.1".
@@ -129,14 +117,11 @@ class NodriverClient(ResponseParser):
             profile: Chrome profile name for start_browser (default: "grok-chrome").
                      Worker pool uses per-worker profiles like "grok-chrome-w0".
         """
-        # Store config path for cookie auto-save
+        # Store for deferred loading in __aenter__
+        self._provided_cookies = cookies
         self._config_path = Path(config_path) if config_path else DEFAULT_CONFIG_PATH
 
-        if cookies is None:
-            config = load_config(config_path)
-            cookies = config["cookies"]
-
-        self.cookies = cookies
+        self.cookies: GrokCookies | None = None
         self._headless = headless
         self._browser = None
         self._tab = None
@@ -151,6 +136,29 @@ class NodriverClient(ResponseParser):
         self._force_new_chrome = force_new_chrome
         self._profile = profile
 
+    async def _load_or_setup_cookies(self) -> GrokCookies:
+        """Load cookies from config, or trigger interactive setup if missing."""
+        from .exceptions import GrokConfigError
+
+        try:
+            config = load_config(self._config_path)
+            return config["cookies"]
+        except GrokConfigError:
+            print("No valid Grok cookies found. Starting interactive login...")
+            from .auth_manager import AuthManager
+
+            auth = AuthManager(config_path=self._config_path)
+            success = await auth.setup_auth(timeout_minutes=5, headless=False)
+
+            if not success:
+                raise GrokConfigError(
+                    "Authentication setup failed.\n"
+                    "Please run: python -m grok_web.auth_manager setup"
+                ) from None
+
+            config = load_config(self._config_path)
+            return config["cookies"]
+
     async def __aenter__(self):
         import asyncio
 
@@ -158,6 +166,12 @@ class NodriverClient(ResponseParser):
         from nodriver import cdp
 
         from .browser import ensure_chrome_running
+
+        # Load cookies (deferred from __init__)
+        if self._provided_cookies is not None:
+            self.cookies = self._provided_cookies
+        else:
+            self.cookies = await self._load_or_setup_cookies()
 
         # Ensure Chrome is running (auto-launch if needed)
         actual_port = self._remote_port  # Default to requested port
@@ -464,13 +478,26 @@ class NodriverClient(ResponseParser):
     async def list_posts(
         self,
         limit: int = 40,
-        source: str = "MEDIA_POST_SOURCE_LIKED",
+        source: str | None = "favorites",
         include_raw_data: bool = False,
     ) -> list[PostSummary]:
-        """List posts with basic metadata."""
+        """List posts with basic metadata.
+
+        Args:
+            limit: Maximum number of posts to return
+            source: Filter by source type:
+                - "favorites": Your saved/favorited posts (default)
+                - None: All public posts
+            include_raw_data: Include raw API response in each PostSummary
+        """
+        # Map user-friendly source names to API values
+        api_source = source
+        if source == "favorites":
+            api_source = "MEDIA_POST_SOURCE_LIKED"
+
         json_data: dict[str, Any] = {"limit": limit}
-        if source:
-            json_data["filter"] = {"source": source}
+        if api_source:
+            json_data["filter"] = {"source": api_source}
         else:
             json_data["filter"] = {}
 
@@ -734,7 +761,7 @@ class NodriverClient(ResponseParser):
         )
 
     # =========================================================================
-    # NodriverClient-specific methods
+    # GrokClient-specific methods
     # =========================================================================
 
     @staticmethod
@@ -748,7 +775,7 @@ class NodriverClient(ResponseParser):
             A 94-character base64-encoded string.
 
         Example:
-            >>> stable_id = NodriverClient.generate_stable_id()
+            >>> stable_id = GrokClient.generate_stable_id()
             >>> len(stable_id)
             94
         """
@@ -786,7 +813,7 @@ class NodriverClient(ResponseParser):
 
         Example:
             >>> # Generate and inject a new stable_id
-            >>> new_id = NodriverClient.generate_stable_id()
+            >>> new_id = GrokClient.generate_stable_id()
             >>> await client.set_stable_id(new_id)
             True
 
@@ -1019,6 +1046,50 @@ class NodriverClient(ResponseParser):
 
         return True
 
+    async def delete_image(self, post_id: str, thumbnail_index: int) -> bool:
+        """
+        Delete an image variant by its thumbnail index.
+
+        Navigates to the post, switches to image view, selects the
+        thumbnail, opens "..." menu, and clicks "删除图像".
+
+        Args:
+            post_id: The post UUID
+            thumbnail_index: 1-based thumbnail index to delete
+
+        Returns:
+            True if deletion was successful
+
+        Raises:
+            GrokAPIError: If thumbnail or delete option not found
+        """
+        import asyncio
+
+        from .actions.navigation import navigate_to_post
+        from .actions.post_image import select_thumbnail
+        from .actions.post_media import switch_to_image_view
+        from .actions.post_menu import click_menu_item, open_post_menu
+
+        d = self._ui_delay
+
+        await navigate_to_post(self._tab, post_id, delay=d)
+        await switch_to_image_view(self._tab, delay=d)
+        await select_thumbnail(self._tab, thumbnail_index, delay=d)
+        await open_post_menu(self._tab, delay=d)
+        await click_menu_item(
+            self._tab,
+            "删除图像",
+            "Delete image",
+            delay=d,
+        )
+        await asyncio.sleep(1 * d)
+
+        # Confirm deletion
+        await self._click_confirm_button("删除图像", "Delete image", "删除", "Delete")
+        await asyncio.sleep(1 * d)
+
+        return True
+
     async def _is_post_favorited(self) -> bool:
         """
         Check if the current post is favorited by examining the menu item text.
@@ -1182,6 +1253,82 @@ class NodriverClient(ResponseParser):
 
         return True
 
+    async def extend_video(
+        self,
+        video_id: str,
+        timeout: int = 300,
+    ) -> VideoExtendResult:
+        """
+        Extend a video by generating continuation frames via UI menu.
+
+        Navigates to the video post, opens the "..." menu, clicks
+        "Extend video" / "延长视频", and monitors CDP for the response.
+
+        Uses the new atomic actions layer (actions.navigation, actions.post_menu,
+        actions.network_monitor) instead of inline CSS selectors.
+
+        Args:
+            video_id: The video UUID to extend
+            timeout: Max seconds to wait for generation (default: 300)
+
+        Returns:
+            VideoExtendResult with new video_id and metadata
+
+        Raises:
+            GrokAPIError: If video not found, menu item missing, or generation fails
+        """
+        import asyncio
+        import random
+
+        from .actions.navigation import navigate_to_post
+        from .actions.network_monitor import CDPMonitor
+        from .actions.post_menu import click_menu_item, open_post_menu
+
+        # Navigate to the video post page
+        await navigate_to_post(self._tab, video_id, delay=self._ui_delay)
+
+        # Start CDP monitoring before triggering the extend action
+        async with CDPMonitor(self._tab, "/app-chat/conversations/new") as monitor:
+            await asyncio.sleep(1 + random.uniform(0, 0.5))
+
+            # Open "..." menu and click "Extend video"
+            await open_post_menu(self._tab, delay=self._ui_delay)
+            await click_menu_item(
+                self._tab,
+                "扩展视频",
+                "延长视频",
+                "Extend video",
+                "Extend Video",
+                delay=self._ui_delay,
+            )
+
+            # Wait for the request to fire
+            if not await monitor.wait_for_request(timeout=10):
+                raise GrokAPIError(
+                    "Extend video did not trigger a generation request. "
+                    "Menu item may have different text — use get_menu_items() to debug."
+                )
+
+            # Wait for response body
+            await monitor.wait_for_body(timeout=timeout)
+
+        # Parse response (same NDJSON format as create_video)
+        gen_result = parse_video_ndjson_response(
+            monitor.body, video_id, statsig_id=monitor.statsig_id
+        )
+
+        return VideoExtendResult(
+            video_id=gen_result.video_id,
+            source_video_id=video_id,
+            parent_post_id=gen_result.parent_post_id,
+            moderated=gen_result.moderated,
+            progress=gen_result.progress,
+            mode=gen_result.mode,
+            model_name=gen_result.model_name,
+            conversation_id=gen_result.conversation_id,
+            statsig_id=gen_result.statsig_id,
+        )
+
     async def get_menu_items(self, post_id: str) -> list[str]:
         """
         Get all available menu items for a post.
@@ -1217,23 +1364,53 @@ class NodriverClient(ResponseParser):
 
         return items
 
-    async def download_video(self, video_url: str, output_path: Path) -> Path:
-        """
-        Download a video file using the browser's fetch API.
+    async def get_thumbnails(self, post_id: str) -> list[dict]:
+        """Get image thumbnails on a post page.
 
-        This method uses the browser context which has proper Cloudflare clearance,
-        making it more reliable than direct HTTP requests.
+        Navigates to the post, switches to image view, and returns
+        all thumbnail buttons.
 
         Args:
-            video_url: The full URL to the video file (media_url or hd_media_url)
-            output_path: Destination file path
+            post_id: The post UUID
 
         Returns:
-            Path to the downloaded file
+            List of dicts: [{"index": 1, "name": "Thumbnail 1", "ref": "..."}]
+            Empty list if post has only one image.
+        """
+        from .actions.navigation import navigate_to_post
+        from .actions.post_image import get_thumbnails
+        from .actions.post_media import switch_to_image_view
+
+        await navigate_to_post(self._tab, post_id, delay=self._ui_delay)
+        await switch_to_image_view(self._tab, delay=self._ui_delay)
+        return await get_thumbnails(self._tab)
+
+    async def select_thumbnail(self, post_id: str, index: int) -> bool:
+        """Select an image thumbnail on a post page.
+
+        Navigates to the post, switches to image view, and clicks
+        the thumbnail at the given 1-based index.
+
+        Args:
+            post_id: The post UUID
+            index: 1-based thumbnail index
+
+        Returns:
+            True if thumbnail was clicked
 
         Raises:
-            GrokAPIError: If download fails
+            GrokAPIError: If thumbnail not found
         """
+        from .actions.navigation import navigate_to_post
+        from .actions.post_image import select_thumbnail
+        from .actions.post_media import switch_to_image_view
+
+        await navigate_to_post(self._tab, post_id, delay=self._ui_delay)
+        await switch_to_image_view(self._tab, delay=self._ui_delay)
+        return await select_thumbnail(self._tab, index, delay=self._ui_delay)
+
+    async def _download_video_by_url(self, video_url: str, output_path: Path) -> Path:
+        """Download a video file by URL using the browser's fetch API."""
         import asyncio
         import base64
         import json as json_module
@@ -1395,58 +1572,116 @@ class NodriverClient(ResponseParser):
         # Wait for page to load
         await asyncio.sleep(3 * d)
 
-        # Click "编辑图像" button (has aria-label="播放" and text "编辑图像")
-        clicked = await self._tab.evaluate("""
-            (function() {
-                const buttons = Array.from(document.querySelectorAll('button'));
-                for (const btn of buttons) {
-                    if (btn.innerText.includes('编辑图像')) {
-                        btn.click();
-                        return true;
-                    }
-                }
-                return false;
-            })()
-        """)
+        # New UI: "编辑图像" is inside the settings gear menu.
+        # Must switch to image view first if video is showing, then open gear → click menuitem.
+        from ai_dev_browser.core.ax import click_by_ref
+        from ai_dev_browser.core.snapshot import find
+
+        # Switch to image view (if video is active, "图片" button is visible)
+        ax_result = await find(self._tab, text="图片", interactable_only=True)
+        for el in ax_result.get("elements", []):
+            if el.get("role") == "button" and el.get("name") == "图片":
+                await click_by_ref(self._tab, el["ref"])
+                await asyncio.sleep(2 * d)
+                break
+
+        # Open settings gear dropdown
+        clicked = False
+        ax_result = await find(self._tab, text="设置", interactable_only=True)
+        for el in ax_result.get("elements", []):
+            if el.get("role") == "button" and el.get("name") == "设置":
+                await click_by_ref(self._tab, el["ref"])
+                await asyncio.sleep(1 * d)
+                clicked = True
+                break
         if not clicked:
-            raise GrokAPIError("Could not find '编辑图像' button")
+            # CSS fallback
+            btn = await self._tab.find('button[aria-label="设置"]')
+            if not btn:
+                btn = await self._tab.find('button[aria-label="Settings"]')
+            if btn:
+                await btn.mouse_click()
+                await asyncio.sleep(1 * d)
+                clicked = True
+        if not clicked:
+            raise GrokAPIError("Could not find settings gear button")
 
-        await asyncio.sleep(2 * d)
+        # Click "编辑图像" menuitem
+        edit_clicked = False
+        ax_result = await find(self._tab, text="编辑图像", interactable_only=True)
+        for el in ax_result.get("elements", []):
+            if el.get("role") == "menuitem":
+                await click_by_ref(self._tab, el["ref"])
+                await asyncio.sleep(2 * d)
+                edit_clicked = True
+                break
+        if not edit_clicked:
+            # CSS fallback
+            items = await self._tab.find_all('[role="menuitem"]')
+            for item in items:
+                item_text = item.text.strip() if item.text else ""
+                if "编辑图像" in item_text or "Edit image" in item_text:
+                    await item.mouse_click()
+                    await asyncio.sleep(2 * d)
+                    edit_clicked = True
+                    break
+        if not edit_clicked:
+            raise GrokAPIError("Could not find '编辑图像' menuitem in settings menu")
 
-        # Fill the edit textarea
+        # Fill the edit prompt into ProseMirror/tiptap contenteditable editor
         escaped_prompt = edit_prompt.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
         fill_result = await self._tab.evaluate(f"""
-            (function() {{
-                const textarea = document.querySelector('textarea[placeholder*="编辑"]') ||
-                               document.querySelector('textarea[aria-label*="编辑"]');
-                if (!textarea) return 'not found';
-
-                textarea.focus();
-                const setter = Object.getOwnPropertyDescriptor(
-                    window.HTMLTextAreaElement.prototype, 'value'
-                ).set;
-                setter.call(textarea, "{escaped_prompt}");
-                textarea.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                textarea.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                return 'ok';
+            (() => {{
+                // Try ProseMirror/tiptap contenteditable first (new UI)
+                const editor = document.querySelector('.tiptap.ProseMirror') ||
+                               document.querySelector('[contenteditable="true"]') ||
+                               document.querySelector('.ProseMirror');
+                if (editor) {{
+                    editor.focus();
+                    editor.innerHTML = '<p>{escaped_prompt}</p>';
+                    editor.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                    return 'editor';
+                }}
+                // Fallback: textarea
+                const textarea = document.querySelector('textarea');
+                if (textarea && textarea.offsetParent !== null) {{
+                    textarea.focus();
+                    const setter = Object.getOwnPropertyDescriptor(
+                        window.HTMLTextAreaElement.prototype, 'value'
+                    ).set;
+                    setter.call(textarea, "{escaped_prompt}");
+                    textarea.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                    textarea.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                    return 'textarea';
+                }}
+                return 'not_found';
             }})()
         """)
-        if fill_result == "not found":
-            raise GrokAPIError("Could not find edit textarea")
+        if fill_result == "not_found":
+            raise GrokAPIError("Could not find edit input (ProseMirror or textarea)")
 
         await asyncio.sleep(1 * d)
 
-        # Click the submit button (aria-label="生成视频", text becomes "编辑" after filling)
-        submit_clicked = await self._tab.evaluate("""
-            (function() {
-                const btn = document.querySelector('button[aria-label="生成视频"]');
-                if (btn) {
-                    btn.click();
-                    return true;
-                }
-                return false;
-            })()
-        """)
+        # Click the submit button: ax_tree name="编辑" or fallback to CSS
+        submit_clicked = False
+        ax_result = await find(self._tab, text="编辑", interactable_only=True)
+        for el in ax_result.get("elements", []):
+            if el.get("role") == "button" and el.get("name") == "编辑":
+                await click_by_ref(self._tab, el["ref"])
+                submit_clicked = True
+                break
+        if not submit_clicked:
+            # CSS fallback
+            submit_clicked = await self._tab.evaluate("""
+                (() => {
+                    // Try aria-label
+                    let btn = document.querySelector('button[aria-label="编辑"]');
+                    if (!btn) btn = document.querySelector('button[aria-label="Edit"]');
+                    if (!btn) btn = document.querySelector('button[aria-label="生成视频"]');
+                    if (btn) { btn.click(); return true; }
+                    return false;
+                })()
+            """)
         if not submit_clicked:
             raise GrokAPIError("Could not find submit button")
 
@@ -1622,9 +1857,9 @@ class NodriverClient(ResponseParser):
             >>> result = await client.create_image("a cat wearing sunglasses")
             >>> result.success_count  # Number of completed images
 
-            >>> # With manual selection (user favorites in browser)
-            >>> from grok_web.selectors import manual_favorite_selector
-            >>> result = await client.create_image("a cat", thumbnail_selector=manual_favorite_selector)
+            >>> # With signal file selection (user favorites in browser, then signals done)
+            >>> from grok_web.selectors import signal_file_selector
+            >>> result = await client.create_image("a cat", thumbnail_selector=signal_file_selector())
             >>> result.selected_post_ids  # Post IDs of favorited images
         """
         import asyncio
@@ -2002,7 +2237,7 @@ class NodriverClient(ResponseParser):
             selected_post_ids=selected_post_ids,
         )
 
-    async def create_video_from_text(
+    async def _create_video_from_text(
         self,
         prompt: str,
         aspect_ratio: str = "portrait",
@@ -2034,7 +2269,7 @@ class NodriverClient(ResponseParser):
             GrokAPIError: If generation fails or times out
 
         Example:
-            >>> result = await client.create_video_from_text("a cat playing with yarn")
+            >>> result = await client._create_video_from_text("a cat playing with yarn")
             >>> result.video_id  # Generated video post UUID
             >>> result.web_url   # URL to view the video
         """
@@ -2226,6 +2461,7 @@ class NodriverClient(ResponseParser):
         timeout: int = ...,
         duration: int = ...,
         resolution: str = ...,
+        thumbnail_index: int | None = ...,
     ) -> VideoGenerationResult:
         """img2vid: Generate video with custom prompt."""
         ...
@@ -2240,6 +2476,7 @@ class NodriverClient(ResponseParser):
         timeout: int = ...,
         duration: int = ...,
         resolution: str = ...,
+        thumbnail_index: int | None = ...,
     ) -> VideoGenerationResult:
         """img2vid: Generate video with preset only (no prompt)."""
         ...
@@ -2270,6 +2507,7 @@ class NodriverClient(ResponseParser):
         wait_for_video: bool = True,
         duration: int = 10,
         resolution: str = "720p",
+        thumbnail_index: int | None = None,
     ) -> VideoGenerationResult:
         """
         Unified video generation API supporting multiple modes.
@@ -2293,6 +2531,8 @@ class NodriverClient(ResponseParser):
             wait_for_video: (txt2vid only) Wait for video element to load (default True).
             duration: Video duration in seconds (default 10). Options: 6, 10.
             resolution: Video resolution (default "720p"). Options: "480p", "720p".
+            thumbnail_index: (img2vid only) 1-based image thumbnail to generate video from.
+                            If None, uses the currently displayed image.
 
         Returns:
             VideoGenerationResult with video_id and metadata.
@@ -2306,7 +2546,7 @@ class NodriverClient(ResponseParser):
             # Upload the image first to create a post
             uploaded_post_id = await self.upload_image(source_image_path)
             # Then generate video from the uploaded post
-            return await self.create_video_via_ui(
+            return await self._create_video_via_ui(
                 parent_post_id=uploaded_post_id,
                 preset=preset,
                 timeout=timeout,
@@ -2318,7 +2558,7 @@ class NodriverClient(ResponseParser):
 
         # Mode: img2vid (from existing Grok image post)
         if source_post_id is not None:
-            return await self.create_video_via_ui(
+            return await self._create_video_via_ui(
                 parent_post_id=source_post_id,
                 preset=preset,
                 timeout=timeout,
@@ -2326,17 +2566,18 @@ class NodriverClient(ResponseParser):
                 duration=duration,
                 resolution=resolution,
                 aspect_ratio=aspect_ratio,
+                thumbnail_index=thumbnail_index,
             )
 
         # Mode: txt2vid (from text prompt only)
-        return await self.create_video_from_text(
+        return await self._create_video_from_text(
             prompt=prompt,
             aspect_ratio=aspect_ratio,
             timeout=timeout,
             wait_for_video=wait_for_video,
         )
 
-    async def create_video_via_ui(
+    async def _create_video_via_ui(
         self,
         parent_post_id: str,
         preset: VideoPreset | str = VideoPreset.NORMAL,
@@ -2346,6 +2587,7 @@ class NodriverClient(ResponseParser):
         duration: int = 10,
         resolution: str = "720p",
         aspect_ratio: str = "2:3",
+        thumbnail_index: int | None = None,
     ) -> VideoGenerationResult:
         """
         Generate video by simulating UI button click (more reliable for anti-bot bypass).
@@ -2434,6 +2676,14 @@ class NodriverClient(ResponseParser):
 
         # Wait for page to fully load (React hydration) + random jitter
         await asyncio.sleep(3 + random.uniform(0, 2.0))
+
+        # Select specific image thumbnail if requested
+        if thumbnail_index is not None:
+            from .actions.post_image import select_thumbnail
+            from .actions.post_media import switch_to_image_view
+
+            await switch_to_image_view(self._tab, delay=self._ui_delay)
+            await select_thumbnail(self._tab, thumbnail_index, delay=self._ui_delay)
 
         # --- New UI: Settings gear menu ---
         # The settings gear (button[aria-label="设置"]) opens a Radix dropdown containing:
@@ -2712,219 +2962,9 @@ class NodriverClient(ResponseParser):
             captured_response["body"], parent_post_id, statsig_id=captured_response["statsig_id"]
         )
 
-
-# =============================================================================
-# SmartGrokClient - Recommended client (delegates to NodriverClient)
-# =============================================================================
-
-
-class SmartGrokClient:
-    """
-    Recommended client - wraps NodriverClient with cookie loading.
-
-    Provides interactive login setup if cookies are missing, then
-    delegates all operations to NodriverClient.
-
-    Example:
-        async with SmartGrokClient() as client:
-            posts = await client.list_posts()
-            video = await client.create_video("zoom in", source_post_id=post_id)
-    """
-
-    BASE_URL = "https://grok.com"
-
-    def __init__(
-        self,
-        cookies: GrokCookies | None = None,
-        config_path: Path | str | None = None,
-        browser_host: str | None = None,
-        browser_port: int | None = None,
-        browser_headless: bool = False,
-    ):
-        """
-        Initialize SmartGrokClient.
-
-        Args:
-            cookies: GrokCookies instance. If None, loads from config file.
-            config_path: Path to config file. Defaults to ~/.grok-config.json
-            browser_host: Remote debugging host. Defaults to "127.0.0.1".
-            browser_port: Remote debugging port. None = auto-assigned by ai-dev-browser.
-            browser_headless: Run browser in headless mode (default: False)
-        """
-        self._provided_cookies = cookies  # Store for deferred loading
-        self._config_path = Path(config_path) if config_path else DEFAULT_CONFIG_PATH
-        self.cookies: GrokCookies | None = None  # Will be set in __aenter__
-        self._browser_client: NodriverClient | None = None
-        self._browser_host = browser_host
-        self._browser_port = browser_port
-        self._browser_headless = browser_headless
-
-    async def __aenter__(self):
-        """Load cookies and initialize NodriverClient."""
-        # Load cookies (with auto-setup if missing)
-        if self._provided_cookies is not None:
-            self.cookies = self._provided_cookies
-        else:
-            self.cookies = await self._load_or_setup_cookies()
-
-        self._browser_client = NodriverClient(
-            cookies=self.cookies,
-            config_path=self._config_path,
-            host=self._browser_host,
-            port=self._browser_port,
-            headless=self._browser_headless,
-        )
-        await self._browser_client.__aenter__()
-        return self
-
-    async def _load_or_setup_cookies(self) -> GrokCookies:
-        """Load cookies from config, or trigger interactive setup if missing."""
-        from .exceptions import GrokConfigError
-
-        try:
-            config = load_config(self._config_path)
-            return config["cookies"]
-        except GrokConfigError:
-            # No valid config - trigger interactive setup
-            print("⚠️  No valid Grok cookies found. Starting interactive login...")
-            from .auth_manager import AuthManager
-
-            auth = AuthManager(config_path=self._config_path)
-            success = await auth.setup_auth(timeout_minutes=5, headless=False)
-
-            if not success:
-                raise GrokConfigError(
-                    "Authentication setup failed.\n"
-                    "Please run: python -m grok_web.auth_manager setup"
-                ) from None
-
-            # Reload config after successful setup
-            config = load_config(self._config_path)
-            return config["cookies"]
-
-    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any):
-        """Clean up browser client."""
-        if self._browser_client:
-            await self._browser_client.__aexit__(exc_type, exc_val, exc_tb)
-
     # =========================================================================
-    # Read APIs - delegate to NodriverClient
+    # Video download
     # =========================================================================
-
-    async def list_posts(
-        self, limit: int = 10, source: str | None = "favorites", include_raw_data: bool = False
-    ):
-        """List posts.
-
-        Args:
-            limit: Maximum number of posts to return
-            source: Filter by source type:
-                - "favorites": Your saved/favorited posts (default)
-                - None: All public posts
-            include_raw_data: Include raw API response in each PostSummary
-        """
-        # Map user-friendly source names to API values
-        api_source = source
-        if source == "favorites":
-            api_source = "MEDIA_POST_SOURCE_LIKED"
-
-        return await self._browser_client.list_posts(limit, api_source, include_raw_data)
-
-    async def get_post_details(self, post_id: str):
-        """Get post details."""
-        return await self._browser_client.get_post_details(post_id)
-
-    async def get_asset_file_size(self, asset_url: str) -> int:
-        """Get asset file size."""
-        return await self._browser_client.get_asset_file_size(asset_url)
-
-    async def validate_auth(self) -> bool:
-        """Validate authentication."""
-        return await self._browser_client.validate_auth()
-
-    async def match_local_video(self, local_path: str | Path):
-        """Match local video to web video."""
-        return await self._browser_client.match_local_video(local_path)
-
-    # =========================================================================
-    # Favorite APIs - delegate to NodriverClient
-    # =========================================================================
-
-    async def favorite_post(self, post_id: str) -> bool:
-        """Add a post to favorites.
-
-        Args:
-            post_id: Post UUID to favorite
-
-        Returns:
-            True if successful
-        """
-        return await self._browser_client.favorite_post(post_id)
-
-    async def unfavorite_post(self, post_id: str) -> bool:
-        """Remove a post from favorites.
-
-        Args:
-            post_id: Post UUID to unfavorite
-
-        Returns:
-            True if successful
-        """
-        return await self._browser_client.unfavorite_post(post_id)
-
-    # =========================================================================
-    # Social APIs
-    # =========================================================================
-
-    async def like_post(self, post_id: str) -> bool:
-        """Give a thumbs-up to a post.
-
-        Note: This is different from favorite_post() which saves to favorites.
-
-        Args:
-            post_id: Post UUID to like
-
-        Returns:
-            True if successful
-        """
-        return await self._browser_client.like_post(post_id)
-
-    async def dislike_post(self, post_id: str) -> bool:
-        """Give a thumbs-down to a post.
-
-        Args:
-            post_id: Post UUID to dislike
-
-        Returns:
-            True if successful
-        """
-        return await self._browser_client.dislike_post(post_id)
-
-    # =========================================================================
-    # Video APIs
-    # =========================================================================
-
-    async def delete_video(self, video_id: str) -> bool:
-        """Delete a child video.
-
-        Args:
-            video_id: The child video UUID to delete
-
-        Returns:
-            True if deletion was successful
-        """
-        return await self._browser_client.delete_video(video_id)
-
-    async def upgrade_video(self, video_id: str) -> bool:
-        """Upgrade a video to HD quality.
-
-        Args:
-            video_id: The child video UUID to upgrade
-
-        Returns:
-            True if upgrade was initiated successfully
-        """
-        return await self._browser_client.upgrade_video(video_id)
 
     async def download_video(
         self,
@@ -2934,16 +2974,10 @@ class SmartGrokClient:
         prefer_hd: bool = True,
         parent_post_id: str | None = None,
     ) -> Path:
-        """
-        Download a video to local file.
+        """Download a video to local file.
 
         Args:
-            video_id: The video UUID to download. Can be obtained from:
-                - PostDetails.children[i].id (from get_post_details)
-                - VideoGenerationResult.video_id (from create_video)
-                - Web download filename: "{video_id}_hd.mp4" -> video_id is the UUID part
-                - Grok URL: https://grok.com/imagine/post/{post_id} (post_id is the parent,
-                  use get_post_details to find child video_ids)
+            video_id: The child video UUID to download
             output_path: Destination file path (will be created/overwritten)
             prefer_hd: If True (default), download HD version if available
             parent_post_id: Parent post ID (optional, for faster lookup).
@@ -2953,28 +2987,8 @@ class SmartGrokClient:
             Path to the downloaded file
 
         Raises:
-            GrokNotFoundError: If video not found in favorites
+            GrokNotFoundError: If video not found
             GrokAPIError: If download fails
-
-        Note:
-            If you already have the video_id, you can construct URLs directly:
-            - Web page: https://grok.com/imagine/post/{video_id}
-            - HD video: https://imagine-public.x.ai/imagine-public/share-videos/{video_id}_hd.mp4
-            - SD video: https://imagine-public.x.ai/imagine-public/share-videos/{video_id}.mp4
-            Use NodriverClient.download_video(url, path) for direct download.
-
-        Example:
-            >>> # Download a video (auto-detects HD)
-            >>> path = await client.download_video(video_id, "output.mp4")
-            >>> print(f"Downloaded to {path}")
-
-            >>> # Force standard quality
-            >>> path = await client.download_video(video_id, "output.mp4", prefer_hd=False)
-
-            >>> # With parent_post_id for faster lookup
-            >>> path = await client.download_video(
-            ...     video_id, "output.mp4", parent_post_id=parent_id
-            ... )
         """
         output_path = Path(output_path)
 
@@ -3003,193 +3017,89 @@ class SmartGrokClient:
         if not video_url:
             raise GrokNotFoundError(f"Video {video_id} not found")
 
-        return await self._browser_client.download_video(video_url, output_path)
+        return await self._download_video_by_url(video_url, output_path)
 
     # =========================================================================
-    # Image APIs
+    # Video thumbnail selection
     # =========================================================================
 
-    async def edit_image(
-        self, post_id: str, edit_prompt: str, timeout: int = 60
-    ) -> "ImageEditResult":
-        """Edit an image to generate new variations.
+    async def get_video_thumbnails(self, post_id: str) -> list[dict]:
+        """Get video thumbnails on a post page.
 
         Args:
-            post_id: The post UUID (parent image)
-            edit_prompt: The edit instruction (e.g., "add sunglasses")
-            timeout: Max seconds to wait for generation (default 60)
+            post_id: The post UUID
 
         Returns:
-            ImageEditResult with image URLs and moderation info
+            List of dicts: [{"index": 1, "name": "Thumbnail 1", "ref": "..."}]
         """
-        return await self._browser_client.edit_image(post_id, edit_prompt, timeout)
+        from .actions.navigation import navigate_to_post
+        from .actions.post_media import switch_to_video_view
+        from .actions.post_video import get_video_thumbnails
 
-    async def create_image(
-        self,
-        prompt: str,
-        aspect_ratio: str = "portrait",
-        min_success: int = 1,
-        max_scroll: int = 5,
-        timeout: int = 120,
-        thumbnail_selector: "Callable[[int, Callable[[], Awaitable[list[int]]]], Awaitable[list[int]]] | None" = None,
-    ) -> "ImageGenerationResult":
-        """
-        Generate images from a text prompt (browser only, txt2img).
+        await navigate_to_post(self._tab, post_id, delay=self._ui_delay)
+        await switch_to_video_view(self._tab, delay=self._ui_delay)
+        return await get_video_thumbnails(self._tab)
 
-        This navigates to grok.com/imagine, selects Image mode,
-        enters the prompt, and captures generated images. Will scroll
-        to generate more images if needed to find non-moderated ones.
+    async def select_video_thumbnail(self, post_id: str, index: int) -> bool:
+        """Select a video thumbnail by 1-based index.
 
         Args:
-            prompt: Text description of the image to generate
-            aspect_ratio: "portrait" (2:3), "square" (1:1), or "landscape" (3:2)
-            min_success: Minimum non-moderated images needed (default 1)
-            max_scroll: Maximum scroll attempts to find more images (default 5)
-            timeout: Max seconds to wait for initial generation (default 120)
-            thumbnail_selector: Optional async callback for selecting which thumbnails
-                to collect post_ids for. The callback receives:
-                - count: Number of gallery items available
-                - scan_favorites: Async function to scan DOM for favorited indices
-                The callback should return a list of indices (0-based) to collect.
-                Note: Clicking adds ~2 seconds per image for click+back navigation.
+            post_id: The post UUID
+            index: 1-based thumbnail index
 
         Returns:
-            ImageGenerationResult with image URLs and moderation info.
-            If thumbnail_selector is provided, selected_post_ids will be populated.
+            True if clicked
 
-        Example:
-            >>> result = await client.create_image("a cat wearing sunglasses")
-            >>> print(result.image_urls)  # List of generated image URLs
-            >>> print(result.success_count)  # Non-moderated images count
-            >>> result.has_enough_success(2)  # Check if got at least 2
-
-            >>> # With automatic selection (select all)
-            >>> async def select_all(count, scan_favorites):
-            ...     return list(range(count))
-            >>> result = await client.create_image("a cat", thumbnail_selector=select_all)
-            >>> print(result.selected_post_ids)  # Post IDs for video generation
-
-            >>> # With manual selection (wait for user to favorite)
-            >>> async def manual_selector(count, scan_favorites):
-            ...     print(f"Please favorite images in browser, then press Enter...")
-            ...     await asyncio.get_event_loop().run_in_executor(None, input)
-            ...     return await scan_favorites()
-            >>> result = await client.create_image("a cat", thumbnail_selector=manual_selector)
+        Raises:
+            GrokAPIError: If thumbnail not found
         """
-        return await self._browser_client.create_image(
-            prompt, aspect_ratio, min_success, max_scroll, timeout, thumbnail_selector
-        )
+        from .actions.navigation import navigate_to_post
+        from .actions.post_media import switch_to_video_view
+        from .actions.post_video import select_video_thumbnail
 
-    async def upload_image(self, image_path: str | Path, timeout: int = 30) -> str:
-        """Upload a local image to Grok Imagine and create a new post.
-
-        Args:
-            image_path: Path to the local image file (PNG, JPG, etc.)
-            timeout: Max seconds to wait for upload and redirect (default 30)
-
-        Returns:
-            The post ID of the newly created post.
-        """
-        return await self._browser_client.upload_image(image_path, timeout)
+        await navigate_to_post(self._tab, post_id, delay=self._ui_delay)
+        await switch_to_video_view(self._tab, delay=self._ui_delay)
+        return await select_video_thumbnail(self._tab, index, delay=self._ui_delay)
 
     # =========================================================================
-    # Unified Video Generation API
+    # Image-video relationship
     # =========================================================================
 
-    @overload
-    async def create_video(
-        self,
-        prompt: str,
-        *,
-        aspect_ratio: str = ...,
-        timeout: int = ...,
-        wait_for_video: bool = ...,
-    ) -> VideoGenerationResult:
-        """txt2vid: Generate video from text prompt only."""
-        ...
+    async def get_image_video_map(self, post_id: str) -> list[dict]:
+        """Get image variants with their child videos for a post.
 
-    @overload
-    async def create_video(
-        self,
-        prompt: str,
-        *,
-        source_post_id: str,
-        preset: VideoPreset | str = ...,
-        aspect_ratio: str = ...,
-        timeout: int = ...,
-        duration: int = ...,
-        resolution: str = ...,
-    ) -> VideoGenerationResult:
-        """img2vid: Generate video with custom prompt."""
-        ...
-
-    @overload
-    async def create_video(
-        self,
-        *,
-        source_post_id: str,
-        preset: VideoPreset | str,
-        aspect_ratio: str = ...,
-        timeout: int = ...,
-        duration: int = ...,
-        resolution: str = ...,
-    ) -> VideoGenerationResult:
-        """img2vid: Generate video with preset only (no prompt)."""
-        ...
-
-    @overload
-    async def create_video(
-        self,
-        prompt: str,
-        *,
-        source_image_path: str | Path,
-        aspect_ratio: str = ...,
-        timeout: int = ...,
-        duration: int = ...,
-        resolution: str = ...,
-    ) -> VideoGenerationResult:
-        """upload2vid: Upload local image and generate video from it."""
-        ...
-
-    async def create_video(
-        self,
-        prompt: str = "",
-        *,
-        source_post_id: str | None = None,
-        source_image_path: str | Path | None = None,
-        preset: VideoPreset | str = "normal",
-        aspect_ratio: str = "portrait",
-        timeout: int = 300,
-        wait_for_video: bool = True,
-        duration: int = 10,
-        resolution: str = "720p",
-    ) -> VideoGenerationResult:
-        """
-        Unified video generation API supporting multiple modes.
+        Each entry represents a source image (original or edited variant)
+        and all videos generated from it.
 
         Args:
-            prompt: For txt2vid: full video description.
-                   For img2vid/upload2vid: adjustment instructions (camera, motion, style).
-            source_post_id: (img2vid) Existing Grok image post ID to animate.
-            source_image_path: (upload2vid) Local image path to upload and animate.
-            preset: Video style preset - 'normal', 'fun', or 'spicy'.
-            aspect_ratio: Video aspect ratio.
-            timeout: Max seconds to wait for video generation (default 300).
-            wait_for_video: (txt2vid only) Wait for video element to load (default True).
-            duration: Video duration in seconds (default 10). Options: 6, 10.
-            resolution: Video resolution (default "720p"). Options: "480p", "720p".
+            post_id: The parent post UUID
 
         Returns:
-            VideoGenerationResult with video_id and metadata.
+            List of dicts, each with:
+                - post_id: source image post ID
+                - media_url: source image URL (or None if fetch fails)
+                - videos: list of ChildVideo objects from that image
         """
-        return await self._browser_client.create_video(
-            prompt=prompt,
-            source_post_id=source_post_id,
-            source_image_path=source_image_path,
-            preset=preset,
-            aspect_ratio=aspect_ratio,
-            timeout=timeout,
-            wait_for_video=wait_for_video,
-            duration=duration,
-            resolution=resolution,
-        )
+        details = await self.get_post_details(post_id)
+        groups = details.videos_by_source()
+
+        result = []
+        for source_id, videos in groups.items():
+            entry: dict = {
+                "post_id": source_id,
+                "media_url": None,
+                "videos": videos,
+            }
+            # If source is this post itself, use its media_url directly
+            if source_id == details.id:
+                entry["media_url"] = details.media_url
+            else:
+                # Fetch the source image's details
+                try:
+                    source_details = await self.get_post_details(source_id)
+                    entry["media_url"] = source_details.media_url
+                except Exception:
+                    pass  # media_url stays None
+            result.append(entry)
+
+        return result

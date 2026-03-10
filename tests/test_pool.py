@@ -497,10 +497,10 @@ class TestBrowserWorkerPoolExecuteJob:
     @pytest.mark.asyncio
     async def test_execute_unknown_task_raises(self, pool, mock_worker):
         """_execute_job raises ValueError for unknown task type."""
-        from grok_web.client import NodriverClient
+        from grok_web.client import GrokClient
 
         # Use spec to make mock behave like real client (rejects unknown attributes)
-        mock_worker.client = MagicMock(spec=NodriverClient)
+        mock_worker.client = MagicMock(spec=GrokClient)
         job = Job(task_type="unknown_task")
 
         with pytest.raises(ValueError, match="Unknown task_type"):
@@ -852,7 +852,7 @@ class TestPoolCDPDetection:
 
         pool = BrowserWorkerPool(num_workers=0)
 
-        with patch("grok_web.pool.worker_pool.NodriverClient") as mock_client_cls:
+        with patch("grok_web.pool.worker_pool.GrokClient") as mock_client_cls:
             mock_client = MagicMock()
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
             mock_client.__aexit__ = AsyncMock(return_value=None)

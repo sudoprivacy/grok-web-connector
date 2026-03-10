@@ -6,7 +6,7 @@ from enum import Enum
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from ..client import NodriverClient
+    from ..client import GrokClient
     from .job import Job
 
 
@@ -45,7 +45,7 @@ class Worker:
 
     worker_id: int
     port: int
-    client: "NodriverClient | None" = None
+    client: "GrokClient | None" = None
     status: WorkerStatus = WorkerStatus.IDLE
     current_job: "Job | None" = None
     stats: WorkerStats = field(default_factory=WorkerStats)

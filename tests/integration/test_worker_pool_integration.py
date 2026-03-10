@@ -28,9 +28,9 @@ async def test_dynamic_worker_scaling():
         job_ids = []
         for cmd in ["Zoom In", "Zoom Out"]:
             job_id = await pool.submit(
-                "create_video_via_ui",
-                parent_post_id=ORBIT_POST,
-                adjustment_prompt=cmd,
+                "create_video",
+                source_post_id=ORBIT_POST,
+                prompt=cmd,
             )
             job_ids.append(job_id)
 
@@ -41,9 +41,9 @@ async def test_dynamic_worker_scaling():
         # Phase 3: Queue more jobs
         for cmd in ["Dolly In", "Dolly Out"]:
             job_id = await pool.submit(
-                "create_video_via_ui",
-                parent_post_id=ORBIT_POST,
-                adjustment_prompt=cmd,
+                "create_video",
+                source_post_id=ORBIT_POST,
+                prompt=cmd,
             )
             job_ids.append(job_id)
 
@@ -101,7 +101,7 @@ async def test_job_retry_on_failure():
     ) as pool:
         # Submit a job that should succeed
         job_id = await pool.submit(
-            "create_video_via_ui",
+            "create_video",
             parent_post_id=ORBIT_POST,
             adjustment_prompt="Zoom In",
         )
@@ -125,9 +125,9 @@ async def test_multiple_workers_distribute_jobs():
         job_ids = []
         for cmd in ["Zoom In", "Zoom Out", "Dolly In"]:
             job_id = await pool.submit(
-                "create_video_via_ui",
-                parent_post_id=ORBIT_POST,
-                adjustment_prompt=cmd,
+                "create_video",
+                source_post_id=ORBIT_POST,
+                prompt=cmd,
             )
             job_ids.append(job_id)
 

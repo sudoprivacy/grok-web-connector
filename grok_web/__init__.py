@@ -56,7 +56,7 @@ Use get_client() for all Grok API operations:
 
 Unified API
 ===========
-All operations available through get_client() (backed by NodriverClient/CDP):
+All operations available through get_client() (backed by GrokClient/CDP):
 
 Read Operations:
 - list_posts()           - List saved posts or public feed
@@ -109,7 +109,7 @@ list_posts, get_post_details
 from pathlib import Path
 
 from .auth import load_cookies, save_cookies
-from .client import SmartGrokClient
+from .client import GrokClient
 from .exceptions import (
     GrokAPIError,
     GrokAuthError,
@@ -126,6 +126,7 @@ from .models import (
     ImageGenerationResult,
     PostDetails,
     PostSummary,
+    VideoExtendResult,
     VideoGenerationResult,
     VideoMatchResult,
     VideoPreset,
@@ -142,12 +143,11 @@ def get_client(
     browser_host: str | None = None,
     browser_port: int | None = None,
     headless: bool = False,
-) -> SmartGrokClient:
+) -> GrokClient:
     """
     Get the Grok API client.
 
     This is the recommended entry point for all Grok operations.
-    Uses NodriverClient (Chrome DevTools Protocol) for all operations.
 
     Args:
         cookies: Pre-loaded GrokCookies (optional, loads from config if None)
@@ -157,7 +157,7 @@ def get_client(
         headless: Run browser in headless mode (default: False)
 
     Returns:
-        Client instance with all API methods.
+        GrokClient instance with all API methods.
 
     Example:
         async with get_client() as client:
@@ -165,18 +165,20 @@ def get_client(
             await client.favorite_post(posts[0].id)
             video = await client.create_video("zoom in", source_post_id=posts[0].id, preset="fun")
     """
-    return SmartGrokClient(
+    return GrokClient(
         cookies=cookies,
         config_path=config_path,
-        browser_host=browser_host,
-        browser_port=browser_port,
-        browser_headless=headless,
+        host=browser_host,
+        port=browser_port,
+        headless=headless,
     )
 
 
 __all__ = [
     # Factory function (main entry point)
     "get_client",
+    # Client class
+    "GrokClient",
     # Worker Pool (for parallel processing)
     "BrowserWorkerPool",
     # Models
@@ -188,6 +190,7 @@ __all__ = [
     "ImageEditResult",
     "ImageGenerationResult",
     "VideoMatchResult",
+    "VideoExtendResult",
     "VideoGenerationResult",
     "VideoPreset",
     # Exceptions

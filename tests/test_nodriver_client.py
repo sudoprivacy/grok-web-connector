@@ -1,40 +1,38 @@
-"""Tests for NodriverClient class."""
+"""Tests for GrokClient class."""
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from grok_web.client import NodriverClient
+from grok_web.client import GrokClient
 from grok_web.models import GrokCookies
 
 
-class TestNodriverClientInit:
-    """Tests for NodriverClient initialization."""
+class TestGrokClientInit:
+    """Tests for GrokClient initialization."""
 
     def test_init_with_cookies(self, mock_cookies: GrokCookies):
         """Initialize with explicit cookies."""
-        client = NodriverClient(cookies=mock_cookies)
-        assert client.cookies == mock_cookies
+        client = GrokClient(cookies=mock_cookies)
+        assert client._provided_cookies == mock_cookies
         assert client._headless is False
         assert client._browser is None
         assert client._tab is None
 
-    def test_init_loads_from_config(self, mock_cookies: GrokCookies):
-        """Initialize loads cookies from config file."""
-        mock_config = {"cookies": mock_cookies}
-
-        with patch("grok_web.client.load_config", return_value=mock_config):
-            client = NodriverClient()
-            assert client.cookies == mock_cookies
+    def test_init_without_cookies_defers_loading(self):
+        """Initialize without cookies defers loading to __aenter__."""
+        client = GrokClient()
+        assert client._provided_cookies is None
+        assert client.cookies is None
 
     def test_init_with_headless(self, mock_cookies: GrokCookies):
         """Initialize with headless mode."""
-        client = NodriverClient(cookies=mock_cookies, headless=True)
+        client = GrokClient(cookies=mock_cookies, headless=True)
         assert client._headless is True
 
     def test_init_with_host_port(self, mock_cookies: GrokCookies):
         """Initialize with custom host and port."""
-        client = NodriverClient(
+        client = GrokClient(
             cookies=mock_cookies,
             host="192.168.1.100",
             port=9223,
@@ -45,38 +43,37 @@ class TestNodriverClientInit:
 
     def test_init_default_host_port(self, mock_cookies: GrokCookies):
         """Initialize with default host/port values."""
-        client = NodriverClient(cookies=mock_cookies)
+        client = GrokClient(cookies=mock_cookies)
         assert client._remote_host == "127.0.0.1"
         assert client._remote_port is None  # Auto-assigned by ai-dev-browser
         assert client._auto_launch is True
 
     def test_init_with_only_host(self, mock_cookies: GrokCookies):
         """Initialize with only host uses default port."""
-        client = NodriverClient(cookies=mock_cookies, host="192.168.1.100")
+        client = GrokClient(cookies=mock_cookies, host="192.168.1.100")
         assert client._remote_host == "192.168.1.100"
         assert client._remote_port is None  # Auto-assigned by ai-dev-browser
 
     def test_init_with_only_port(self, mock_cookies: GrokCookies):
         """Initialize with only port uses default host."""
-        client = NodriverClient(cookies=mock_cookies, port=9223)
+        client = GrokClient(cookies=mock_cookies, port=9223)
         assert client._remote_host == "127.0.0.1"
         assert client._remote_port == 9223
 
     def test_init_auto_launch_disabled(self, mock_cookies: GrokCookies):
         """Initialize with auto_launch disabled."""
-        client = NodriverClient(cookies=mock_cookies, auto_launch=False)
+        client = GrokClient(cookies=mock_cookies, auto_launch=False)
         assert client._auto_launch is False
 
     def test_init_custom_config_path(self, mock_cookies: GrokCookies):
-        """Initialize with custom config path."""
-        mock_config = {"cookies": mock_cookies}
+        """Initialize with custom config path stores it."""
+        from pathlib import Path
 
-        with patch("grok_web.client.load_config", return_value=mock_config) as mock_load:
-            NodriverClient(config_path="/custom/path.json")
-            mock_load.assert_called_once_with("/custom/path.json")
+        client = GrokClient(cookies=mock_cookies, config_path="/custom/path.json")
+        assert client._config_path == Path("/custom/path.json")
 
 
-class TestNodriverClientBrowserReuse:
+class TestGrokClientBrowserReuse:
     """Tests for browser reuse functionality."""
 
     @pytest.mark.asyncio
@@ -85,7 +82,7 @@ class TestNodriverClientBrowserReuse:
         mock_browser = MagicMock()
         mock_browser.stop = MagicMock()
 
-        client = NodriverClient(cookies=mock_cookies)
+        client = GrokClient(cookies=mock_cookies)
         client._browser = mock_browser
 
         await client.__aexit__(None, None, None)
@@ -94,18 +91,18 @@ class TestNodriverClientBrowserReuse:
         mock_browser.stop.assert_not_called()
 
 
-class TestNodriverClientApiRequest:
-    """Tests for NodriverClient._api_request method."""
+class TestGrokClientApiRequest:
+    """Tests for GrokClient._api_request method."""
 
     @pytest.fixture
-    def client(self, mock_cookies: GrokCookies) -> NodriverClient:
-        """Create NodriverClient with mocked tab."""
-        client = NodriverClient(cookies=mock_cookies)
+    def client(self, mock_cookies: GrokCookies) -> GrokClient:
+        """Create GrokClient with mocked tab."""
+        client = GrokClient(cookies=mock_cookies)
         client._tab = AsyncMock()
         return client
 
     @pytest.mark.asyncio
-    async def test_api_request_success(self, client: NodriverClient):
+    async def test_api_request_success(self, client: GrokClient):
         """Successful API request returns parsed JSON."""
         client._tab.evaluate = AsyncMock(
             return_value='{"status": 200, "body": "{\\"posts\\": []}"}'
@@ -116,7 +113,7 @@ class TestNodriverClientApiRequest:
         assert result == {"posts": []}
 
     @pytest.mark.asyncio
-    async def test_api_request_401_raises_auth_error(self, client: NodriverClient):
+    async def test_api_request_401_raises_auth_error(self, client: GrokClient):
         """401 response raises GrokAuthError."""
         from grok_web.exceptions import GrokAuthError
 
@@ -126,7 +123,7 @@ class TestNodriverClientApiRequest:
             await client._api_request("POST", "/rest/media/post/list", {})
 
     @pytest.mark.asyncio
-    async def test_api_request_403_cloudflare(self, client: NodriverClient):
+    async def test_api_request_403_cloudflare(self, client: GrokClient):
         """403 with Cloudflare message raises specific error."""
         from grok_web.exceptions import GrokAuthError
 
@@ -136,7 +133,7 @@ class TestNodriverClientApiRequest:
             await client._api_request("POST", "/rest/media/post/list", {})
 
     @pytest.mark.asyncio
-    async def test_api_request_404_raises_not_found(self, client: NodriverClient):
+    async def test_api_request_404_raises_not_found(self, client: GrokClient):
         """404 response raises GrokNotFoundError."""
         from grok_web.exceptions import GrokNotFoundError
 
@@ -146,7 +143,7 @@ class TestNodriverClientApiRequest:
             await client._api_request("POST", "/rest/media/post/get", {"id": "invalid"})
 
     @pytest.mark.asyncio
-    async def test_api_request_500_raises_api_error(self, client: NodriverClient):
+    async def test_api_request_500_raises_api_error(self, client: GrokClient):
         """500 response raises GrokAPIError."""
         from grok_web.exceptions import GrokAPIError
 
@@ -156,18 +153,18 @@ class TestNodriverClientApiRequest:
             await client._api_request("POST", "/rest/media/post/list", {})
 
 
-class TestNodriverClientAssetRequest:
-    """Tests for NodriverClient._asset_request_head method."""
+class TestGrokClientAssetRequest:
+    """Tests for GrokClient._asset_request_head method."""
 
     @pytest.fixture
-    def client(self, mock_cookies: GrokCookies) -> NodriverClient:
-        """Create NodriverClient with mocked tab."""
-        client = NodriverClient(cookies=mock_cookies)
+    def client(self, mock_cookies: GrokCookies) -> GrokClient:
+        """Create GrokClient with mocked tab."""
+        client = GrokClient(cookies=mock_cookies)
         client._tab = AsyncMock()
         return client
 
     @pytest.mark.asyncio
-    async def test_asset_head_success(self, client: NodriverClient):
+    async def test_asset_head_success(self, client: GrokClient):
         """Successful HEAD request returns content length."""
         # Mock CDP responses
         mock_frame_tree = MagicMock()
@@ -186,7 +183,7 @@ class TestNodriverClientAssetRequest:
         assert result == 12345
 
     @pytest.mark.asyncio
-    async def test_asset_head_403_raises(self, client: NodriverClient):
+    async def test_asset_head_403_raises(self, client: GrokClient):
         """403 response raises GrokAuthError."""
         from grok_web.exceptions import GrokAuthError
 
@@ -206,7 +203,7 @@ class TestNodriverClientAssetRequest:
             await client._asset_request_head("https://assets.grok.com/video.mp4")
 
     @pytest.mark.asyncio
-    async def test_asset_head_no_content_length_raises(self, client: NodriverClient):
+    async def test_asset_head_no_content_length_raises(self, client: GrokClient):
         """Missing Content-Length raises GrokAPIError."""
         from grok_web.exceptions import GrokAPIError
 
@@ -226,19 +223,19 @@ class TestNodriverClientAssetRequest:
             await client._asset_request_head("https://assets.grok.com/video.mp4")
 
 
-class TestNodriverClientUIMenuOperations:
-    """Tests for NodriverClient UI menu operations."""
+class TestGrokClientUIMenuOperations:
+    """Tests for GrokClient UI menu operations."""
 
     @pytest.fixture
-    def client(self, mock_cookies: GrokCookies) -> NodriverClient:
-        """Create NodriverClient with mocked tab."""
-        client = NodriverClient(cookies=mock_cookies)
+    def client(self, mock_cookies: GrokCookies) -> GrokClient:
+        """Create GrokClient with mocked tab."""
+        client = GrokClient(cookies=mock_cookies)
         client._tab = AsyncMock()
         client._ui_delay = 0.01  # Fast for tests
         return client
 
     @pytest.mark.asyncio
-    async def test_open_post_menu_success(self, client: NodriverClient):
+    async def test_open_post_menu_success(self, client: GrokClient):
         """_open_post_menu navigates and clicks menu button."""
         mock_btn = AsyncMock()
         client._tab.get = AsyncMock()
@@ -253,7 +250,7 @@ class TestNodriverClientUIMenuOperations:
         mock_btn.mouse_click.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_open_post_menu_raises_on_404(self, client: NodriverClient):
+    async def test_open_post_menu_raises_on_404(self, client: GrokClient):
         """_open_post_menu raises GrokAPIError on 404 page."""
         from grok_web.exceptions import GrokAPIError
 
@@ -264,7 +261,7 @@ class TestNodriverClientUIMenuOperations:
             await client._open_post_menu("nonexistent-post")
 
     @pytest.mark.asyncio
-    async def test_open_post_menu_raises_when_button_not_found(self, client: NodriverClient):
+    async def test_open_post_menu_raises_when_button_not_found(self, client: GrokClient):
         """_open_post_menu raises GrokAPIError when menu button not found."""
         from grok_web.exceptions import GrokAPIError
 
@@ -276,7 +273,7 @@ class TestNodriverClientUIMenuOperations:
             await client._open_post_menu("post-123")
 
     @pytest.mark.asyncio
-    async def test_click_menu_item_success(self, client: NodriverClient):
+    async def test_click_menu_item_success(self, client: GrokClient):
         """_click_menu_item clicks menu item by text."""
         # Mock menu item element with .text property
         mock_item = MagicMock()
@@ -292,7 +289,7 @@ class TestNodriverClientUIMenuOperations:
         mock_item.mouse_click.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_click_menu_item_raises_when_not_found(self, client: NodriverClient):
+    async def test_click_menu_item_raises_when_not_found(self, client: GrokClient):
         """_click_menu_item raises GrokAPIError when item not found."""
         from grok_web.exceptions import GrokAPIError
 
@@ -303,7 +300,7 @@ class TestNodriverClientUIMenuOperations:
             await client._click_menu_item("NonExistent")
 
     @pytest.mark.asyncio
-    async def test_click_confirm_button_success(self, client: NodriverClient):
+    async def test_click_confirm_button_success(self, client: GrokClient):
         """_click_confirm_button clicks confirm button."""
         client._tab.evaluate = AsyncMock(return_value="Delete")
 
@@ -312,7 +309,7 @@ class TestNodriverClientUIMenuOperations:
         assert result is True
 
     @pytest.mark.asyncio
-    async def test_click_confirm_button_raises_when_not_found(self, client: NodriverClient):
+    async def test_click_confirm_button_raises_when_not_found(self, client: GrokClient):
         """_click_confirm_button raises GrokAPIError when button not found."""
         from grok_web.exceptions import GrokAPIError
 
@@ -322,7 +319,7 @@ class TestNodriverClientUIMenuOperations:
             await client._click_confirm_button("NonExistent")
 
     @pytest.mark.asyncio
-    async def test_delete_video_success(self, client: NodriverClient):
+    async def test_delete_video_success(self, client: GrokClient):
         """delete_video deletes video through menu."""
         client._open_post_menu = AsyncMock()
         client._click_menu_item = AsyncMock()
@@ -336,7 +333,7 @@ class TestNodriverClientUIMenuOperations:
         client._click_confirm_button.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_delete_video_returns_true_on_404(self, client: NodriverClient):
+    async def test_delete_video_returns_true_on_404(self, client: GrokClient):
         """delete_video returns True when video already deleted (404)."""
         from grok_web.exceptions import GrokAPIError
 
@@ -347,7 +344,7 @@ class TestNodriverClientUIMenuOperations:
         assert result is True
 
     @pytest.mark.asyncio
-    async def test_favorite_post_browser_success(self, client: NodriverClient):
+    async def test_favorite_post_browser_success(self, client: GrokClient):
         """_favorite_post_browser saves post through menu."""
         client._open_post_menu = AsyncMock()
         client._is_post_favorited = AsyncMock(return_value=False)  # Not favorited
@@ -359,7 +356,7 @@ class TestNodriverClientUIMenuOperations:
         client._click_menu_item.assert_called_once_with("保存", "Save")
 
     @pytest.mark.asyncio
-    async def test_favorite_post_browser_already_favorited(self, client: NodriverClient):
+    async def test_favorite_post_browser_already_favorited(self, client: GrokClient):
         """_favorite_post_browser skips click if already favorited."""
         client._open_post_menu = AsyncMock()
         client._is_post_favorited = AsyncMock(return_value=True)  # Already favorited
@@ -371,7 +368,7 @@ class TestNodriverClientUIMenuOperations:
         # Should not call _click_menu_item since already favorited
 
     @pytest.mark.asyncio
-    async def test_unfavorite_post_browser_success(self, client: NodriverClient):
+    async def test_unfavorite_post_browser_success(self, client: GrokClient):
         """_unfavorite_post_browser unsaves post through menu."""
         client._open_post_menu = AsyncMock()
         client._is_post_favorited = AsyncMock(return_value=True)  # Is favorited
@@ -383,7 +380,7 @@ class TestNodriverClientUIMenuOperations:
         client._click_menu_item.assert_called_once_with("取消保存", "Unsave")
 
     @pytest.mark.asyncio
-    async def test_unfavorite_post_browser_already_not_favorited(self, client: NodriverClient):
+    async def test_unfavorite_post_browser_already_not_favorited(self, client: GrokClient):
         """_unfavorite_post_browser skips click if not favorited."""
         client._open_post_menu = AsyncMock()
         client._is_post_favorited = AsyncMock(return_value=False)  # Not favorited
@@ -395,7 +392,7 @@ class TestNodriverClientUIMenuOperations:
         # Should not call _click_menu_item since not favorited
 
     @pytest.mark.asyncio
-    async def test_like_post_success(self, client: NodriverClient):
+    async def test_like_post_success(self, client: GrokClient):
         """like_post gives thumbs-up through menu."""
         client._open_post_menu = AsyncMock()
         client._click_menu_item = AsyncMock()
@@ -406,7 +403,7 @@ class TestNodriverClientUIMenuOperations:
         client._click_menu_item.assert_called_once_with("赞", "Like")
 
     @pytest.mark.asyncio
-    async def test_dislike_post_success(self, client: NodriverClient):
+    async def test_dislike_post_success(self, client: GrokClient):
         """dislike_post gives thumbs-down through menu."""
         client._open_post_menu = AsyncMock()
         client._click_menu_item = AsyncMock()
@@ -417,7 +414,7 @@ class TestNodriverClientUIMenuOperations:
         client._click_menu_item.assert_called_once_with("踩", "Dislike")
 
     @pytest.mark.asyncio
-    async def test_upgrade_video_success(self, client: NodriverClient):
+    async def test_upgrade_video_success(self, client: GrokClient):
         """upgrade_video upgrades video through menu."""
         client._open_post_menu = AsyncMock()
         client._click_menu_item = AsyncMock()
@@ -428,7 +425,7 @@ class TestNodriverClientUIMenuOperations:
         client._click_menu_item.assert_called_once_with("升级视频", "Upgrade video")
 
     @pytest.mark.asyncio
-    async def test_get_menu_items_returns_list(self, client: NodriverClient):
+    async def test_get_menu_items_returns_list(self, client: GrokClient):
         """get_menu_items returns list of menu item texts."""
         client._open_post_menu = AsyncMock()
         client._tab.evaluate = AsyncMock(
@@ -443,19 +440,19 @@ class TestNodriverClientUIMenuOperations:
         assert result == ["Save", "Delete", "Like"]
 
 
-class TestNodriverClientDownloadVideo:
-    """Tests for download_video browser-based download."""
+class TestGrokClientDownloadVideoByUrl:
+    """Tests for _download_video_by_url browser-based download."""
 
     @pytest.fixture
-    def client(self, mock_cookies: GrokCookies) -> NodriverClient:
-        """Create NodriverClient with mocked tab."""
-        client = NodriverClient(cookies=mock_cookies)
+    def client(self, mock_cookies: GrokCookies) -> GrokClient:
+        """Create GrokClient with mocked tab."""
+        client = GrokClient(cookies=mock_cookies)
         client._tab = AsyncMock()
         return client
 
     @pytest.mark.asyncio
-    async def test_download_video_success(self, client: NodriverClient):
-        """download_video successfully downloads via browser fetch."""
+    async def test_download_video_success(self, client: GrokClient):
+        """_download_video_by_url successfully downloads via browser fetch."""
         import base64
         import json
         from pathlib import Path
@@ -471,7 +468,7 @@ class TestNodriverClientDownloadVideo:
 
         with patch("pathlib.Path.write_bytes") as mock_write:
             with patch("pathlib.Path.mkdir"):
-                result = await client.download_video(
+                result = await client._download_video_by_url(
                     "https://example.com/video.mp4", Path("/tmp/output.mp4")
                 )
 
@@ -479,8 +476,8 @@ class TestNodriverClientDownloadVideo:
         assert result == Path("/tmp/output.mp4")
 
     @pytest.mark.asyncio
-    async def test_download_video_navigates_if_not_on_grok(self, client: NodriverClient):
-        """download_video navigates to grok.com if not already there."""
+    async def test_download_video_navigates_if_not_on_grok(self, client: GrokClient):
+        """_download_video_by_url navigates to grok.com if not already there."""
         import base64
         import json
         from pathlib import Path
@@ -498,15 +495,15 @@ class TestNodriverClientDownloadVideo:
         with patch("pathlib.Path.write_bytes"):
             with patch("pathlib.Path.mkdir"):
                 with patch("asyncio.sleep", return_value=None):
-                    await client.download_video(
+                    await client._download_video_by_url(
                         "https://example.com/video.mp4", Path("/tmp/output.mp4")
                     )
 
         client._tab.get.assert_called_once_with("https://grok.com/imagine")
 
     @pytest.mark.asyncio
-    async def test_download_video_raises_on_http_error(self, client: NodriverClient):
-        """download_video raises GrokAPIError on HTTP error."""
+    async def test_download_video_raises_on_http_error(self, client: GrokClient):
+        """_download_video_by_url raises GrokAPIError on HTTP error."""
         import json
         from pathlib import Path
 
@@ -520,23 +517,25 @@ class TestNodriverClientDownloadVideo:
         )
 
         with pytest.raises(GrokAPIError) as exc_info:
-            await client.download_video("https://example.com/video.mp4", Path("/tmp/output.mp4"))
+            await client._download_video_by_url(
+                "https://example.com/video.mp4", Path("/tmp/output.mp4")
+            )
 
         assert "403" in str(exc_info.value)
 
 
-class TestNodriverClientStableId:
+class TestGrokClientStableId:
     """Tests for stable_id (A/B testing) management."""
 
     @pytest.fixture
-    def client(self, mock_cookies: GrokCookies) -> NodriverClient:
-        """Create NodriverClient with mocked tab."""
-        client = NodriverClient(cookies=mock_cookies)
+    def client(self, mock_cookies: GrokCookies) -> GrokClient:
+        """Create GrokClient with mocked tab."""
+        client = GrokClient(cookies=mock_cookies)
         client._tab = AsyncMock()
         return client
 
     @pytest.mark.asyncio
-    async def test_set_stable_id_success_with_reload(self, client: NodriverClient):
+    async def test_set_stable_id_success_with_reload(self, client: GrokClient):
         """set_stable_id injects and verifies stable_id after reload."""
         client._tab.evaluate = AsyncMock(
             side_effect=[
@@ -554,7 +553,7 @@ class TestNodriverClientStableId:
         client._tab.get.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_set_stable_id_without_reload(self, client: NodriverClient):
+    async def test_set_stable_id_without_reload(self, client: GrokClient):
         """set_stable_id without reload returns True immediately."""
         client._tab.evaluate = AsyncMock(return_value="test-stable-id")
 
@@ -565,7 +564,7 @@ class TestNodriverClientStableId:
         assert client._tab.evaluate.call_count == 1
 
     @pytest.mark.asyncio
-    async def test_set_stable_id_returns_false_on_mismatch(self, client: NodriverClient):
+    async def test_set_stable_id_returns_false_on_mismatch(self, client: GrokClient):
         """set_stable_id returns False if verification fails."""
         client._tab.evaluate = AsyncMock(
             side_effect=[
@@ -582,7 +581,7 @@ class TestNodriverClientStableId:
         assert result is False
 
     @pytest.mark.asyncio
-    async def test_set_stable_id_returns_false_on_exception(self, client: NodriverClient):
+    async def test_set_stable_id_returns_false_on_exception(self, client: GrokClient):
         """set_stable_id returns False on exception."""
         client._tab.evaluate = AsyncMock(side_effect=Exception("Failed"))
 

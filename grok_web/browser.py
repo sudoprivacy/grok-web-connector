@@ -1,4 +1,4 @@
-"""Browser management utilities for NodriverClient.
+"""Browser management utilities for GrokClient.
 
 Delegates to ai-dev-browser's start_browser() for Chrome lifecycle.
 Uses named profiles for persistent Chrome sessions.

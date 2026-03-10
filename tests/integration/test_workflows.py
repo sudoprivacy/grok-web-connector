@@ -45,7 +45,7 @@ TEST_POST_ID = os.environ.get("TEST_POST_ID", "9ac51419-65c8-467c-958e-97e9f1aba
 
 @pytest.fixture
 async def client():
-    """Create a real SmartGrokClient for integration tests.
+    """Create a real GrokClient for integration tests.
 
     Also serves as the integration guard — skips if SKIP_INTEGRATION is set.
     Tests that don't need a client (e.g. smoke test) won't be skipped.
