@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from ai_dev_browser.core import stop_browser
+from ai_dev_browser.core import is_port_in_use, stop_browser
 
 from ..browser import GROK_CHROME_PROFILE
 from ..client import GrokClient
@@ -594,8 +594,41 @@ class BrowserWorkerPool:
     # Internal Methods
     # =========================================================================
 
+    def _check_browser_alive(self, worker: Worker) -> bool:
+        """Check if the worker's Chrome is still reachable."""
+        if not worker.port:
+            return False
+        return is_port_in_use(port=worker.port)
+
+    async def _fail_all_pending_jobs(self, worker: Worker, reason: str) -> None:
+        """Fail all remaining pending jobs for a dead worker."""
+        # Drain queues and fail everything
+        drained: list[Job] = []
+        while not self._priority_queue.empty():
+            with contextlib.suppress(asyncio.QueueEmpty):
+                drained.append(self._priority_queue.get_nowait())
+        while not self._job_queue.empty():
+            with contextlib.suppress(asyncio.QueueEmpty):
+                drained.append(self._job_queue.get_nowait())
+
+        for job in drained:
+            result = JobResult(
+                job_id=job.job_id,
+                success=False,
+                error=reason,
+                worker_id=worker.worker_id,
+            )
+            self._results[job.job_id] = result
+            self._pending_jobs.pop(job.job_id, None)
+            job.status = JobStatus.FAILED
+            if job.job_id in self._result_events:
+                self._result_events[job.job_id].set()
+
     async def _worker_loop(self, worker: Worker) -> None:
         """Main loop for a worker - pulls jobs from queue and executes them."""
+        consecutive_failures = 0
+        max_consecutive_failures = 3
+
         while self._running and worker.status != WorkerStatus.STOPPING:
             try:
                 # Try priority queue first (non-blocking), then regular queue
@@ -626,6 +659,7 @@ class BrowserWorkerPool:
                         await self._handle_job_failure(
                             worker, job, f"fail_condition returned True: {result_data}"
                         )
+                        consecutive_failures += 1
                     else:
                         # Success: AND business_success with other conditions
                         # business_success comes from result.success (e.g., VideoGenerationResult)
@@ -651,14 +685,29 @@ class BrowserWorkerPool:
                             f"Worker {worker.worker_id} completed {job.task_type} "
                             f"({job.job_id[:8]}...) in {elapsed:.1f}s"
                         )
+                        consecutive_failures = 0
 
                 except Exception as e:
                     # Hard failure - exception raised
                     await self._handle_job_failure(worker, job, str(e))
+                    consecutive_failures += 1
 
                 finally:
                     worker.mark_idle()
                     self.save_state()
+
+                # Fail-fast: if too many consecutive failures, check browser health
+                if (
+                    consecutive_failures >= max_consecutive_failures
+                    and not self._check_browser_alive(worker)
+                ):
+                    reason = (
+                        f"Worker {worker.worker_id} browser on port {worker.port} "
+                        f"is dead after {consecutive_failures} consecutive failures"
+                    )
+                    logger.error(reason)
+                    await self._fail_all_pending_jobs(worker, reason)
+                    break
 
             except asyncio.CancelledError:
                 break

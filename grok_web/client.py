@@ -477,14 +477,15 @@ class GrokClient(ResponseParser):
 
     async def list_posts(
         self,
-        limit: int = 40,
+        limit: int | None = 40,
         source: str | None = "favorites",
         include_raw_data: bool = False,
     ) -> list[PostSummary]:
-        """List posts with basic metadata.
+        """List posts with basic metadata, with automatic pagination.
 
         Args:
-            limit: Maximum number of posts to return
+            limit: Maximum number of posts to return, or None for all.
+                Pagination is handled automatically via cursor.
             source: Filter by source type:
                 - "favorites": Your saved/favorited posts (default)
                 - None: All public posts
@@ -495,21 +496,36 @@ class GrokClient(ResponseParser):
         if source == "favorites":
             api_source = "MEDIA_POST_SOURCE_LIKED"
 
-        json_data: dict[str, Any] = {"limit": limit}
-        if api_source:
-            json_data["filter"] = {"source": api_source}
-        else:
-            json_data["filter"] = {}
+        filter_data: dict[str, Any] = {"source": api_source} if api_source else {}
 
-        data = await self._api_request("POST", MEDIA_POST_LIST_ENDPOINT, json_data)
+        posts: list[PostSummary] = []
+        cursor: str | None = None
 
-        posts = []
-        for item in data.get("posts", []):
-            try:
-                summary = self._parse_post_summary(item, include_raw_data=include_raw_data)
-                posts.append(summary)
-            except Exception:
-                continue
+        while True:
+            page_limit = 2000 if limit is None else min(limit - len(posts), 2000)
+            json_data: dict[str, Any] = {"limit": page_limit, "filter": filter_data}
+            if cursor:
+                json_data["cursor"] = cursor
+
+            data = await self._api_request("POST", MEDIA_POST_LIST_ENDPOINT, json_data)
+
+            page_posts = data.get("posts", [])
+            if not page_posts:
+                break
+
+            for item in page_posts:
+                try:
+                    summary = self._parse_post_summary(item, include_raw_data=include_raw_data)
+                    posts.append(summary)
+                except Exception:
+                    continue
+
+            if limit is not None and len(posts) >= limit:
+                break
+
+            cursor = data.get("nextCursor", "")
+            if not cursor:
+                break
 
         return posts
 
@@ -660,9 +676,9 @@ class GrokClient(ResponseParser):
         )
 
     async def _match_by_video_id_via_favorites(
-        self, video_id: str, local_size: int, filename: str, max_posts: int = 200
+        self, video_id: str, local_size: int, filename: str, max_posts: int | None = None
     ) -> VideoMatchResult:
-        """Search recent favorites to find parent of orphaned child video."""
+        """Search all favorites to find parent of orphaned child video."""
         posts = await self.list_posts(limit=max_posts, source="MEDIA_POST_SOURCE_LIKED")
 
         for post_summary in posts:
@@ -697,13 +713,17 @@ class GrokClient(ResponseParser):
                 continue
 
         raise GrokAPIError(
-            f"Video not found in recent {max_posts} favorites.\n"
+            f"Video not found in all favorites.\n"
             f"Video ID: {video_id}\n"
             f"Local file: {filename}\n"
         )
 
     async def _match_by_file_size_via_favorites(
-        self, local_size: int, filename: str, hint_uuid: str | None = None, max_posts: int = 200
+        self,
+        local_size: int,
+        filename: str,
+        hint_uuid: str | None = None,
+        max_posts: int | None = None,
     ) -> VideoMatchResult:
         """Search all liked posts to find video by file size."""
         posts = await self.list_posts(limit=max_posts, source="MEDIA_POST_SOURCE_LIKED")
@@ -755,7 +775,7 @@ class GrokClient(ResponseParser):
 
         hint_msg = f" (extracted UUID: {hint_uuid})" if hint_uuid else ""
         raise GrokAPIError(
-            f"No matching video found by file size in recent {max_posts} favorites.\n"
+            f"No matching video found by file size in all favorites.\n"
             f"Local file: {filename}{hint_msg}\n"
             f"Local size: {local_size} bytes\n"
         )
