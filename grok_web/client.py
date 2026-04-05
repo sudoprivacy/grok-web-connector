@@ -3111,7 +3111,9 @@ class GrokClient(ResponseParser):
     # Image-video relationship
     # =========================================================================
 
-    async def get_image_video_map(self, post_id: str) -> list[dict]:
+    async def get_image_video_map(
+        self, post_id: str
+    ) -> list["ImageVideoMapping"]:
         """Get image variants with their child videos for a post.
 
         Each entry represents a source image (original or edited variant)
@@ -3121,31 +3123,26 @@ class GrokClient(ResponseParser):
             post_id: The parent post UUID
 
         Returns:
-            List of dicts, each with:
-                - post_id: source image post ID
-                - media_url: source image URL (or None if fetch fails)
-                - videos: list of ChildPost objects from that image
+            List of ImageVideoMapping (post_id, media_url, videos).
         """
+        from .models import ImageVideoMapping
+
         details = await self.get_post_details(post_id)
-        groups = details.videos_by_source()
+        groups = details.videos_by_parent_image()
 
         result = []
         for source_id, videos in groups.items():
-            entry: dict = {
-                "post_id": source_id,
-                "media_url": None,
-                "videos": videos,
-            }
-            # If source is this post itself, use its media_url directly
+            media_url = None
             if source_id == details.id:
-                entry["media_url"] = details.media_url
+                media_url = details.media_url
             else:
-                # Fetch the source image's details
                 try:
                     source_details = await self.get_post_details(source_id)
-                    entry["media_url"] = source_details.media_url
+                    media_url = source_details.media_url
                 except Exception:
-                    pass  # media_url stays None
-            result.append(entry)
+                    pass
+            result.append(ImageVideoMapping(
+                post_id=source_id, media_url=media_url, videos=videos
+            ))
 
         return result

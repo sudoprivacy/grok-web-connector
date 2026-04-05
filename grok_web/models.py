@@ -185,7 +185,7 @@ class PostDetails(BaseModel):
 
     @property
     def image_children(self) -> list["ChildPost"]:
-        """Child image posts (edited variants)."""
+        """Child image posts (edited variants only, not the root image)."""
         return [c for c in self.children if c.is_image]
 
     @property
@@ -193,11 +193,30 @@ class PostDetails(BaseModel):
         """Child video posts."""
         return [c for c in self.children if c.is_video]
 
-    def videos_by_source(self) -> dict[str, list["ChildPost"]]:
-        """Group child videos by their source image post ID (original_post_id).
+    @property
+    def all_images(self) -> list["ChildPost"]:
+        """All images including root as a synthetic ChildPost + edited variants."""
+        root_as_child = ChildPost(
+            id=self.id,
+            media_type=self.media_type or "MEDIA_POST_TYPE_IMAGE",
+            original_post_id=self.original_post_id or self.id,
+            original_prompt=self.original_prompt,
+            prompt=self.prompt,
+            media_url=self.media_url,
+            hd_media_url=self.hd_media_url,
+            thumbnail_url=self.thumbnail_url,
+            created_at=self.created_at,
+            resolution=self.resolution,
+            model_name=self.model_name,
+        )
+        return [root_as_child] + self.image_children
+
+    def videos_by_parent_image(self) -> dict[str, list["ChildPost"]]:
+        """Group child videos by which image they were generated from.
 
         Returns:
-            Dict mapping source post_id → list of video ChildPosts.
+            Dict mapping parent image post_id → list of video ChildPosts.
+            e.g., {"root-id": [vid1, vid2], "edited-img-id": [vid3]}
         """
         groups: dict[str, list[ChildPost]] = {}
         for child in self.children:
@@ -205,19 +224,27 @@ class PostDetails(BaseModel):
                 groups.setdefault(child.original_post_id, []).append(child)
         return groups
 
-    def find_video_source(self, video_id: str) -> str | None:
-        """Find which image post a video was generated from.
+    def find_parent_image(self, video_id: str) -> str | None:
+        """Find which image a video was generated from.
 
         Args:
             video_id: The child video post UUID
 
         Returns:
-            The source image post_id (original_post_id), or None if not found
+            The parent image post_id, or None if video not found
         """
         for child in self.children:
             if child.id == video_id:
                 return child.original_post_id
         return None
+
+
+class ImageVideoMapping(BaseModel):
+    """Mapping of a source image to its generated videos."""
+
+    post_id: str = Field(..., description="Source image post ID")
+    media_url: str | None = Field(None, description="Source image URL")
+    videos: list[ChildPost] = Field(default_factory=list, description="Videos generated from this image")
 
 
 class GrokCookies(BaseModel):
