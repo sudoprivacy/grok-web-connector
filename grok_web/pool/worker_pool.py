@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from ai_dev_browser.core import is_port_in_use, stop_browser
+from ai_dev_browser.core import browser_stop, is_port_in_use
 
 from ..browser import GROK_CHROME_PROFILE
 from ..client import GrokClient
@@ -181,7 +181,7 @@ class BrowserWorkerPool:
                     # Then, terminate Chrome if close_chrome is True
                     if self._close_chrome and worker.port:
                         try:
-                            stop_browser(port=worker.port)
+                            browser_stop(port=worker.port)
                             logger.info(
                                 f"Stopped Chrome on port {worker.port} for worker {worker.worker_id}"
                             )
@@ -277,7 +277,7 @@ class BrowserWorkerPool:
                 # Then, terminate Chrome if close_chrome is True
                 if self._close_chrome and worker.port:
                     try:
-                        stop_browser(port=worker.port)
+                        browser_stop(port=worker.port)
                         logger.info(f"Stopped Chrome on port {worker.port} for worker {worker_id}")
                     except Exception:
                         pass  # Chrome may already be gone

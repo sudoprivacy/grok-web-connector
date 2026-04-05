@@ -241,9 +241,9 @@ class GrokClient(ResponseParser):
         await asyncio.sleep(2)
 
         # Handle Cloudflare challenge if present
-        from ai_dev_browser.core.cloudflare import verify_cloudflare
+        from ai_dev_browser.core.cloudflare import cf_verify
 
-        result = await verify_cloudflare(self._tab, max_retries=15)
+        result = await cf_verify(self._tab, max_retries=15)
         if not result.get("verified"):
             raise GrokAuthError("Failed to bypass Cloudflare challenge")
 
@@ -1593,10 +1593,10 @@ class GrokClient(ResponseParser):
         # New UI: "编辑图像" is inside the settings gear menu.
         # Must switch to image view first if video is showing, then open gear → click menuitem.
         from ai_dev_browser.core.ax import click_by_ref
-        from ai_dev_browser.core.snapshot import find
+        from ai_dev_browser.core.snapshot import page_find
 
         # Switch to image view (if video is active, "图片" button is visible)
-        ax_result = await find(self._tab, text="图片", interactable_only=True)
+        ax_result = await page_find(self._tab, text="图片", interactable_only=True)
         for el in ax_result.get("elements", []):
             if el.get("role") == "button" and el.get("name") == "图片":
                 await click_by_ref(self._tab, el["ref"])
@@ -1605,7 +1605,7 @@ class GrokClient(ResponseParser):
 
         # Open settings gear dropdown
         clicked = False
-        ax_result = await find(self._tab, text="设置", interactable_only=True)
+        ax_result = await page_find(self._tab, text="设置", interactable_only=True)
         for el in ax_result.get("elements", []):
             if el.get("role") == "button" and el.get("name") == "设置":
                 await click_by_ref(self._tab, el["ref"])
@@ -1626,7 +1626,7 @@ class GrokClient(ResponseParser):
 
         # Click "编辑图像" menuitem
         edit_clicked = False
-        ax_result = await find(self._tab, text="编辑图像", interactable_only=True)
+        ax_result = await page_find(self._tab, text="编辑图像", interactable_only=True)
         for el in ax_result.get("elements", []):
             if el.get("role") == "menuitem":
                 await click_by_ref(self._tab, el["ref"])
@@ -1682,7 +1682,7 @@ class GrokClient(ResponseParser):
 
         # Click the submit button: ax_tree name="编辑" or fallback to CSS
         submit_clicked = False
-        ax_result = await find(self._tab, text="编辑", interactable_only=True)
+        ax_result = await page_find(self._tab, text="编辑", interactable_only=True)
         for el in ax_result.get("elements", []):
             if el.get("role") == "button" and el.get("name") == "编辑":
                 await click_by_ref(self._tab, el["ref"])

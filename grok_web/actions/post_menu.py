@@ -32,10 +32,10 @@ async def open_post_menu(tab, *, delay: float = 1.0) -> bool:
         GrokAPIError: If menu button not found after retries
     """
     from ai_dev_browser.core.ax import click_by_ref
-    from ai_dev_browser.core.snapshot import find
+    from ai_dev_browser.core.snapshot import page_find
 
     for attempt in range(3):
-        result = await find(tab, interactable_only=True)
+        result = await page_find(tab, interactable_only=True)
         for el in result.get("elements", []):
             if el.get("role") == "button" and el.get("name") in _MENU_BUTTON_NAMES:
                 await click_by_ref(tab, el["ref"])
@@ -82,13 +82,13 @@ async def click_menu_item(tab, *text_options: str, delay: float = 1.0) -> bool:
         GrokAPIError: If no matching menu item found
     """
     from ai_dev_browser.core.ax import click_by_ref
-    from ai_dev_browser.core.snapshot import find
+    from ai_dev_browser.core.snapshot import page_find
 
     text_set = set(text_options)
 
     for attempt in range(3):
         # ax_tree approach: find all elements, filter menuitems by name
-        result = await find(tab, interactable_only=True)
+        result = await page_find(tab, interactable_only=True)
         for el in result.get("elements", []):
             if el.get("role") == "menuitem" and el.get("name") in text_set:
                 await click_by_ref(tab, el["ref"])
@@ -123,9 +123,9 @@ async def get_menu_items(tab) -> list[dict]:
     Returns:
         List of dicts with 'name', 'role', 'ref' for each menuitem
     """
-    from ai_dev_browser.core.snapshot import find
+    from ai_dev_browser.core.snapshot import page_find
 
-    result = await find(tab, interactable_only=True)
+    result = await page_find(tab, interactable_only=True)
     return [
         {"name": el.get("name", ""), "role": el.get("role"), "ref": el.get("ref")}
         for el in result.get("elements", [])

@@ -6,7 +6,7 @@ Uses named profiles for persistent Chrome sessions.
 
 import logging
 
-from ai_dev_browser.core import start_browser
+from ai_dev_browser.core import browser_start
 from ai_dev_browser.core.config import DEFAULT_DEBUG_HOST, DEFAULT_PORT_RANGE
 
 logger = logging.getLogger(__name__)
@@ -54,7 +54,7 @@ async def ensure_chrome_running(
     if force_new:
         kwargs["reuse"] = "none"
 
-    result = start_browser(**kwargs)
+    result = browser_start(**kwargs)
 
     if "error" in result:
         raise RuntimeError(result["error"])

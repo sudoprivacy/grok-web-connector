@@ -20,9 +20,9 @@ async def get_video_thumbnails(tab) -> list[dict]:
         [{"index": 1, "name": "Thumbnail 1", "ref": "35#4221"}, ...]
         Empty list if only one video (no sidebar).
     """
-    from ai_dev_browser.core.snapshot import find
+    from ai_dev_browser.core.snapshot import page_find
 
-    result = await find(tab, text="Thumbnail", interactable_only=True)
+    result = await page_find(tab, text="Thumbnail", interactable_only=True)
     thumbnails = []
     for el in result.get("elements", []):
         if el.get("role") == "button" and el.get("name", "").startswith("Thumbnail"):
@@ -52,11 +52,11 @@ async def select_video_thumbnail(tab, index: int, *, delay: float = 1.0) -> bool
         GrokAPIError: If thumbnail not found
     """
     from ai_dev_browser.core.ax import click_by_ref
-    from ai_dev_browser.core.snapshot import find
+    from ai_dev_browser.core.snapshot import page_find
 
     target_name = f"Thumbnail {index}"
 
-    result = await find(tab, text=target_name, interactable_only=True)
+    result = await page_find(tab, text=target_name, interactable_only=True)
     for el in result.get("elements", []):
         if el.get("role") == "button" and el.get("name") == target_name:
             await click_by_ref(tab, el["ref"])
