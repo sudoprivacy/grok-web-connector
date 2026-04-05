@@ -15,7 +15,7 @@ from typing import Any
 
 from .exceptions import GrokAPIError, GrokRateLimitError
 from .models import (
-    ChildVideo,
+    ChildPost,
     GenerationMode,
     PostDetails,
     PostSummary,
@@ -179,11 +179,14 @@ class ResponseParser:
 
         children = []
         for child in data.get("childPosts", []):
-            if child.get("mediaType") == "MEDIA_POST_TYPE_VIDEO":
-                child_video = ChildVideo(
+            media_type = child.get("mediaType")
+            if media_type in ("MEDIA_POST_TYPE_VIDEO", "MEDIA_POST_TYPE_IMAGE"):
+                child_post = ChildPost(
                     id=child.get("id", ""),
-                    parent_id=child.get("originalPostId", post_id),
+                    media_type=media_type,
+                    original_post_id=child.get("originalPostId", post_id),
                     original_prompt=child.get("originalPrompt"),
+                    prompt=child.get("prompt"),
                     media_url=child.get("mediaUrl"),
                     hd_media_url=child.get("hdMediaUrl"),
                     thumbnail_url=child.get("thumbnailImageUrl"),
@@ -193,7 +196,7 @@ class ResponseParser:
                     model_name=child.get("modelName"),
                     mode=child.get("mode"),
                 )
-                children.append(child_video)
+                children.append(child_post)
 
         return PostDetails(
             id=data.get("id", post_id),
@@ -209,6 +212,7 @@ class ResponseParser:
             resolution=data.get("resolution"),
             model_name=data.get("modelName"),
             children=children,
+            original_post_id=data.get("originalPostId"),
             raw_data=raw_data,
         )
 

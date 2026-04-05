@@ -14,7 +14,7 @@ async def navigate_to_post(tab, post_id: str, *, delay: float = 1.0) -> None:
     """Navigate to a Grok Imagine post page and wait for load.
 
     Args:
-        tab: nodriver Tab instance
+        tab: browser Tab instance
         post_id: Post/video UUID
         delay: UI delay multiplier
 

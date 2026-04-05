@@ -174,13 +174,20 @@ class TestResponseParser:
         assert details.resolution == {"width": 1920, "height": 1080}
         assert details.model_name == "aurora"
 
-        # Check children
-        assert len(details.children) == 2
+        # Check children (2 videos + 1 image)
+        assert len(details.children) == 3
         child1 = details.children[0]
         assert child1.id == "child-video-id-1"
-        assert child1.parent_id == "test-post-id-1234"
+        assert child1.media_type == "MEDIA_POST_TYPE_VIDEO"
+        assert child1.original_post_id == "test-post-id-1234"
         assert child1.original_prompt == "Make it move"
         assert child1.duration == 6
+
+        # Image child is also included
+        child3 = details.children[2]
+        assert child3.id == "child-image-id-1"
+        assert child3.media_type == "MEDIA_POST_TYPE_IMAGE"
+        assert child3.original_post_id == "test-post-id-1234"
 
     def test_parse_post_details_with_raw_data(self, parser: ResponseParser, sample_post_data: dict):
         """Raw data is preserved when passed."""
@@ -195,19 +202,21 @@ class TestResponseParser:
         details = parser._parse_post_details(sample_text_to_video_post, "txt2vid-post-id")
         assert details.children == []
 
-    def test_parse_post_details_filters_non_video_children(self, parser: ResponseParser):
-        """Only video children are included."""
+    def test_parse_post_details_includes_image_and_video_children(self, parser: ResponseParser):
+        """Both image and video children are included."""
         data = {
             "id": "test-id",
             "mediaType": "MEDIA_POST_TYPE_IMAGE",
             "childPosts": [
                 {"id": "video1", "mediaType": "MEDIA_POST_TYPE_VIDEO"},
-                {"id": "image1", "mediaType": "MEDIA_POST_TYPE_IMAGE"},  # Filtered
+                {"id": "image1", "mediaType": "MEDIA_POST_TYPE_IMAGE"},
+                {"id": "audio1", "mediaType": "MEDIA_POST_TYPE_AUDIO"},  # Filtered
             ],
         }
         details = parser._parse_post_details(data, "test-id")
-        assert len(details.children) == 1
+        assert len(details.children) == 2
         assert details.children[0].id == "video1"
+        assert details.children[1].id == "image1"
 
     def test_parse_post_details_uses_fallback_id(self, parser: ResponseParser):
         """Uses provided post_id as fallback."""
@@ -215,7 +224,7 @@ class TestResponseParser:
         details = parser._parse_post_details(data, "fallback-id")
         assert details.id == "fallback-id"
 
-    def test_parse_post_details_child_uses_parent_id_fallback(self, parser: ResponseParser):
+    def test_parse_post_details_child_uses_original_post_id_fallback(self, parser: ResponseParser):
         """Child uses post_id if originalPostId missing."""
         data = {
             "id": "parent-id",
@@ -225,4 +234,4 @@ class TestResponseParser:
             ],
         }
         details = parser._parse_post_details(data, "parent-id")
-        assert details.children[0].parent_id == "parent-id"
+        assert details.children[0].original_post_id == "parent-id"

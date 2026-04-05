@@ -37,7 +37,7 @@ class CDPMonitor:
         self._active = False
 
     async def __aenter__(self):
-        from nodriver import cdp
+        from ai_dev_browser import cdp
 
         await self.tab.send(cdp.network.enable())
 

@@ -22,7 +22,7 @@ async def open_post_menu(tab, *, delay: float = 1.0) -> bool:
     and clicks it. Assumes already navigated to a post page.
 
     Args:
-        tab: nodriver Tab instance
+        tab: browser Tab instance
         delay: UI delay multiplier
 
     Returns:
@@ -71,7 +71,7 @@ async def click_menu_item(tab, *text_options: str, delay: float = 1.0) -> bool:
     Uses ax_tree to find menuitems, with CSS fallback.
 
     Args:
-        tab: nodriver Tab instance
+        tab: browser Tab instance
         *text_options: Text strings to match (e.g., "延长视频", "Extend video")
         delay: UI delay multiplier
 

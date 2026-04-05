@@ -85,7 +85,7 @@ class BrowserWorkerPool:
                 or "back" (normal priority). Default "back".
 
         Port Allocation:
-            Ports are allocated automatically. The pool first reuses existing nodriver
+            Ports are allocated automatically. The pool first reuses existing
             Chrome instances (identified by grok_chrome_ temp profile), then launches
             new Chrome on available ports as needed.
         """

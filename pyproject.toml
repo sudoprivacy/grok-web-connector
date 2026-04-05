@@ -14,7 +14,7 @@ authors = [
 ]
 dependencies = [
     "pydantic>=2.0.0",
-    "ai-dev-browser @ git+https://github.com/sudoprivacy/ai-dev-browser.git",  # Browser management
+    "ai-dev-browser @ git+https://github.com/sudoprivacy/ai-dev-browser.git",
 ]
 
 [project.scripts]
@@ -90,9 +90,7 @@ line-ending = "auto"
 # =============================================================================
 [tool.coverage.run]
 source = ["grok_web"]
-omit = [
-    "grok_web/nodriver_cf_verify.py",  # Vendored third-party library (AGPL)
-]
+omit = []
 
 [tool.coverage.report]
 exclude_lines = [

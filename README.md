@@ -21,13 +21,12 @@ grok-web-connector/
 │   ├── __init__.py              # Public API exports
 │   ├── client.py                # GrokClient
 │   ├── _internal.py             # Response parsing (DRY sync/async)
-│   ├── browser.py               # Chrome/nodriver management
+│   ├── browser.py               # Chrome/CDP management
 │   ├── auth.py                  # HTTP authentication
 │   ├── auth_manager.py          # Cookie management CLI
 │   ├── models.py                # Pydantic data models
 │   ├── exceptions.py            # Custom exceptions
 │   ├── selectors.py             # UI element selectors
-│   ├── nodriver_cf_verify.py    # Cloudflare bypass
 │   ├── actions/                 # Atomic UI actions (ax_tree-first)
 │   │   ├── navigation.py        # navigate_to_post, is_on_post_page
 │   │   ├── post_menu.py         # open_post_menu, click_menu_item
@@ -72,7 +71,7 @@ async with get_client() as client:
 ┌─────────────────────────────────────────────────────────────┐
 │                        GrokClient                            │
 ├─────────────────────────────────────────────────────────────┤
-│  Browser automation via nodriver/CDP + ai-dev-browser        │
+│  Browser automation via ai-dev-browser/CDP                   │
 │                                                              │
 │  Read APIs: fetch() inside browser context                   │
 │  Write APIs: UI automation (ax_tree-first, CSS fallback)     │

@@ -17,7 +17,7 @@ import json
 import time
 from pathlib import Path
 
-import nodriver as uc
+from ai_dev_browser.core.connection import connect_browser
 
 from .auth import DEFAULT_CONFIG_PATH
 from .browser import DEFAULT_DEBUG_PORT, ensure_chrome_running
@@ -101,8 +101,8 @@ class AuthManager:
                 headless=headless,
             )
 
-            # Connect with nodriver to the running Chrome
-            browser = await uc.start(
+            # Connect to Chrome
+            browser = await connect_browser(
                 host="127.0.0.1",
                 port=actual_port,
             )
@@ -173,7 +173,7 @@ class AuthManager:
         cookies = {}
         try:
             # Get all cookies for grok.com
-            # nodriver returns Cookie objects with direct attribute access
+            # Browser returns Cookie objects with direct attribute access
             all_cookies = await browser.cookies.get_all()
             for cookie in all_cookies:
                 domain = getattr(cookie, "domain", "")

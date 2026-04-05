@@ -41,7 +41,7 @@ async def select_video_thumbnail(tab, index: int, *, delay: float = 1.0) -> bool
     """Select a video thumbnail by 1-based index.
 
     Args:
-        tab: nodriver Tab instance
+        tab: browser Tab instance
         index: 1-based thumbnail index
         delay: UI delay multiplier
 

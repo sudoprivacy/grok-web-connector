@@ -1,7 +1,7 @@
 """
 Grok Web Connector - GrokClient
 
-Browser automation client using Chrome DevTools Protocol (via nodriver/ai-dev-browser).
+Browser automation client using Chrome DevTools Protocol (via ai-dev-browser/CDP).
 Handles all Grok API operations: reads, writes, video/image generation, and UI automation.
 
 Public API:
@@ -56,7 +56,7 @@ DEFAULT_STATSIG_ID = (
 
 
 # =============================================================================
-# GrokClient - Browser automation via nodriver/CDP
+# GrokClient - Browser automation via ai-dev-browser/CDP
 # =============================================================================
 
 
@@ -64,7 +64,7 @@ class GrokClient(ResponseParser):
     """
     Grok Imagine browser automation client.
 
-    Uses Chrome DevTools Protocol (via nodriver/ai-dev-browser) for all
+    Uses Chrome DevTools Protocol (via ai-dev-browser) for all
     Grok API operations. Automatically handles cookie loading, interactive
     login setup, Chrome lifecycle, and Cloudflare Turnstile.
 
@@ -163,7 +163,7 @@ class GrokClient(ResponseParser):
         import asyncio
 
         from ai_dev_browser.core.connection import connect_browser
-        from nodriver import cdp
+        from ai_dev_browser import cdp
 
         from .browser import ensure_chrome_running
 
@@ -241,12 +241,10 @@ class GrokClient(ResponseParser):
         await asyncio.sleep(2)
 
         # Handle Cloudflare challenge if present
-        from .nodriver_cf_verify import CFVerify
+        from ai_dev_browser.core.cloudflare import verify_cloudflare
 
-        cf_verify = CFVerify(_browser_tab=self._tab, _debug=True)
-        success = await cf_verify.verify(_max_retries=15, _interval_between_retries=1)
-
-        if not success:
+        result = await verify_cloudflare(self._tab, max_retries=15)
+        if not result.get("verified"):
             raise GrokAuthError("Failed to bypass Cloudflare challenge")
 
         self._initialized = True
@@ -417,7 +415,7 @@ class GrokClient(ResponseParser):
         This bypasses JavaScript fetch CORS restrictions by using Chrome DevTools Protocol directly.
         Works reliably on both Windows and macOS.
         """
-        from nodriver import cdp
+        from ai_dev_browser import cdp
 
         try:
             # Get the main frame ID for the current page
@@ -952,7 +950,7 @@ class GrokClient(ResponseParser):
         """
         Click a menu item by its text (supports multiple language options).
 
-        Uses nodriver's mouse_click() which works better than JS click()
+        Uses mouse_click() which works better than JS click()
         for React/Radix menu items.
 
         Args:
@@ -974,7 +972,7 @@ class GrokClient(ResponseParser):
             items = await self._tab.find_all('[role="menuitem"]')
 
             for item in items:
-                # Get text property (nodriver elements have a .text property)
+                # Get text property (elements have a .text property)
                 item_text = item.text.strip() if item.text else ""
 
                 if item_text in text_options:
@@ -1367,7 +1365,7 @@ class GrokClient(ResponseParser):
 
         await self._open_post_menu(post_id)
 
-        # Get all menu items (use JSON.stringify to avoid nodriver object wrapping)
+        # Get all menu items (use JSON.stringify for clean return)
         import json
 
         items_json = await self._tab.evaluate("""
@@ -1528,7 +1526,7 @@ class GrokClient(ResponseParser):
         import asyncio
         import json as json_mod
 
-        from nodriver import cdp
+        from ai_dev_browser import cdp
 
         d = self._ui_delay
 
@@ -1885,7 +1883,7 @@ class GrokClient(ResponseParser):
         import asyncio
         import json as json_mod
 
-        from nodriver import cdp
+        from ai_dev_browser import cdp
 
         d = self._ui_delay
 
@@ -2429,7 +2427,7 @@ class GrokClient(ResponseParser):
                     })()
                 """)
 
-                # Handle nodriver list format
+                # Handle list format
                 found = False
                 if isinstance(video_info, dict):
                     found = video_info.get("found", False)
@@ -2637,7 +2635,7 @@ class GrokClient(ResponseParser):
         """
         import asyncio
 
-        from nodriver import cdp
+        from ai_dev_browser import cdp
 
         # Inject custom stable_id if provided
         if stable_id:
@@ -3082,6 +3080,34 @@ class GrokClient(ResponseParser):
         return await select_video_thumbnail(self._tab, index, delay=self._ui_delay)
 
     # =========================================================================
+    # Post hierarchy
+    # =========================================================================
+
+    async def find_root_post(self, post_id: str) -> PostDetails:
+        """Walk up the post tree to find the root post.
+
+        Every post has an original_post_id pointing to its parent.
+        This walks up until it reaches a post with no parent (the root).
+
+        Args:
+            post_id: Any post UUID (image or video)
+
+        Returns:
+            PostDetails of the root post (which contains all descendants
+            in its children list).
+
+        Raises:
+            GrokNotFoundError: If any post in the chain is not found
+        """
+        current = await self.get_post_details(post_id)
+        # Walk up: max 10 hops as safety against cycles
+        for _ in range(10):
+            if current.original_post_id is None:
+                return current
+            current = await self.get_post_details(current.original_post_id)
+        raise GrokAPIError(f"Could not find root post after 10 hops from {post_id}")
+
+    # =========================================================================
     # Image-video relationship
     # =========================================================================
 
@@ -3098,7 +3124,7 @@ class GrokClient(ResponseParser):
             List of dicts, each with:
                 - post_id: source image post ID
                 - media_url: source image URL (or None if fetch fails)
-                - videos: list of ChildVideo objects from that image
+                - videos: list of ChildPost objects from that image
         """
         details = await self.get_post_details(post_id)
         groups = details.videos_by_source()

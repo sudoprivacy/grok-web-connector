@@ -3,7 +3,7 @@
 from datetime import datetime, timezone
 
 from grok_web.models import (
-    ChildVideo,
+    ChildPost,
     GenerationMode,
     GrokCookies,
     PostDetails,
@@ -120,7 +120,9 @@ class TestPostDetails:
 
     def test_create_with_children(self):
         """Create with child videos."""
-        child = ChildVideo(id="child-1", parent_id="test-id")
+        child = ChildPost(
+            id="child-1", original_post_id="test-id", media_type="MEDIA_POST_TYPE_VIDEO"
+        )
         details = PostDetails(
             id="test-id",
             mode=GenerationMode.GROK_IMAGE_TO_VIDEO,
@@ -152,8 +154,12 @@ class TestPostDetails:
 
     def test_video_count_computed(self):
         """video_count is computed from children."""
-        child1 = ChildVideo(id="child-1", parent_id="test-id")
-        child2 = ChildVideo(id="child-2", parent_id="test-id")
+        child1 = ChildPost(
+            id="child-1", original_post_id="test-id", media_type="MEDIA_POST_TYPE_VIDEO"
+        )
+        child2 = ChildPost(
+            id="child-2", original_post_id="test-id", media_type="MEDIA_POST_TYPE_VIDEO"
+        )
         details = PostDetails(
             id="test-id",
             mode=GenerationMode.GROK_IMAGE_TO_VIDEO,
@@ -166,7 +172,9 @@ class TestPostDetails:
         details_no_children = PostDetails(id="test-1", mode=GenerationMode.TEXT_TO_VIDEO)
         assert details_no_children.has_children is False
 
-        child = ChildVideo(id="child-1", parent_id="test-2")
+        child = ChildPost(
+            id="child-1", original_post_id="test-2", media_type="MEDIA_POST_TYPE_VIDEO"
+        )
         details_with_children = PostDetails(
             id="test-2",
             mode=GenerationMode.GROK_IMAGE_TO_VIDEO,
@@ -175,20 +183,23 @@ class TestPostDetails:
         assert details_with_children.has_children is True
 
 
-class TestChildVideo:
-    """Tests for ChildVideo dataclass."""
+class TestChildPost:
+    """Tests for ChildPost dataclass."""
 
     def test_create_minimal(self):
         """Create with minimal required fields."""
-        child = ChildVideo(id="child-1", parent_id="parent-1")
+        child = ChildPost(
+            id="child-1", original_post_id="parent-1", media_type="MEDIA_POST_TYPE_VIDEO"
+        )
         assert child.id == "child-1"
-        assert child.parent_id == "parent-1"
+        assert child.original_post_id == "parent-1"
 
     def test_create_full(self):
         """Create with all fields."""
-        child = ChildVideo(
+        child = ChildPost(
             id="child-1",
-            parent_id="parent-1",
+            original_post_id="parent-1",
+            media_type="MEDIA_POST_TYPE_VIDEO",
             original_prompt="Make it move",
             media_url="https://example.com/video.mp4",
             hd_media_url="https://example.com/video_hd.mp4",
@@ -205,32 +216,38 @@ class TestChildVideo:
 
     def test_web_url_computed(self):
         """web_url returns direct URL to this video."""
-        child = ChildVideo(id="child-1", parent_id="parent-123")
+        child = ChildPost(
+            id="child-1", original_post_id="parent-123", media_type="MEDIA_POST_TYPE_VIDEO"
+        )
         assert child.web_url == "https://grok.com/imagine/post/child-1"
 
     def test_parent_web_url_computed(self):
         """parent_web_url returns URL to parent post."""
-        child = ChildVideo(id="child-1", parent_id="parent-123")
+        child = ChildPost(
+            id="child-1", original_post_id="parent-123", media_type="MEDIA_POST_TYPE_VIDEO"
+        )
         assert child.parent_web_url == "https://grok.com/imagine/post/parent-123"
 
-    def test_best_video_url_prefers_hd(self):
-        """best_video_url prefers HD URL."""
-        child = ChildVideo(
+    def test_best_media_url_prefers_hd(self):
+        """best_media_url prefers HD URL."""
+        child = ChildPost(
             id="child-1",
-            parent_id="parent-1",
+            original_post_id="parent-1",
+            media_type="MEDIA_POST_TYPE_VIDEO",
             media_url="https://example.com/video.mp4",
             hd_media_url="https://example.com/video_hd.mp4",
         )
-        assert child.best_video_url == "https://example.com/video_hd.mp4"
+        assert child.best_media_url == "https://example.com/video_hd.mp4"
 
-    def test_best_video_url_falls_back(self):
-        """best_video_url falls back to media_url."""
-        child = ChildVideo(
+    def test_best_media_url_falls_back(self):
+        """best_media_url falls back to media_url."""
+        child = ChildPost(
             id="child-1",
-            parent_id="parent-1",
+            original_post_id="parent-1",
+            media_type="MEDIA_POST_TYPE_VIDEO",
             media_url="https://example.com/video.mp4",
         )
-        assert child.best_video_url == "https://example.com/video.mp4"
+        assert child.best_media_url == "https://example.com/video.mp4"
 
 
 class TestVideoMatchResult:

@@ -25,44 +25,70 @@ class VideoPreset(str, Enum):
     SPICY = "extremely-spicy-or-crazy"  # Most permissive content filter
 
 
-class ChildVideo(BaseModel):
-    """A video generated from a parent post (appears in childPosts array)."""
+class ChildPost(BaseModel):
+    """A child post (image or video) in a post's childPosts array.
 
-    id: str = Field(..., description="Child video UUID")
-    parent_id: str = Field(..., description="Parent post UUID")
+    In Grok, everything is a post. A root image post can have child posts
+    that are either edited image variants or generated videos.
+    ``original_post_id`` points to the immediate parent (the post this was
+    generated from), which may be the root or an edited image.
+    """
+
+    id: str = Field(..., description="Child post UUID")
+    media_type: str = Field(..., description="MEDIA_POST_TYPE_IMAGE or MEDIA_POST_TYPE_VIDEO")
+    original_post_id: str = Field(
+        ..., description="Post this was generated from (immediate parent)"
+    )
 
     # Prompts
-    original_prompt: str | None = Field(None, description="Video generation/edit prompt")
+    original_prompt: str | None = Field(None, description="Generation/edit prompt")
+    prompt: str | None = Field(None, description="Image generation prompt")
 
     # URLs
-    media_url: str | None = Field(None, description="Standard quality video URL")
-    hd_media_url: str | None = Field(None, description="HD video URL")
+    media_url: str | None = Field(None, description="Media URL (image or video)")
+    hd_media_url: str | None = Field(None, description="HD media URL")
     thumbnail_url: str | None = Field(None, description="Thumbnail image URL")
 
     # Metadata
     created_at: datetime | None = Field(None, description="Creation timestamp (UTC)")
-    resolution: dict[str, int] | None = Field(None, description="Video resolution {width, height}")
-    duration: int | None = Field(None, description="Video duration in milliseconds")
+    resolution: dict[str, int] | None = Field(None, description="Media resolution {width, height}")
+    duration: int | None = Field(None, description="Duration in ms (videos only)")
     model_name: str | None = Field(None, description="Model used (e.g., imagine_h_1)")
-    mode: str | None = Field(None, description="Generation mode: 'custom' or 'text'")
+    mode: str | None = Field(None, description="Generation mode: 'custom', 'normal', etc.")
+
+    @computed_field
+    @property
+    def is_image(self) -> bool:
+        """True if this is an image post."""
+        return self.media_type == "MEDIA_POST_TYPE_IMAGE"
+
+    @computed_field
+    @property
+    def is_video(self) -> bool:
+        """True if this is a video post."""
+        return self.media_type == "MEDIA_POST_TYPE_VIDEO"
 
     @computed_field
     @property
     def web_url(self) -> str:
-        """Direct web URL to this video."""
+        """Direct web URL to this post."""
         return f"https://grok.com/imagine/post/{self.id}"
 
     @computed_field
     @property
     def parent_web_url(self) -> str:
         """Web URL to the parent post."""
-        return f"https://grok.com/imagine/post/{self.parent_id}"
+        return f"https://grok.com/imagine/post/{self.original_post_id}"
 
     @computed_field
     @property
-    def best_video_url(self) -> str | None:
-        """Best available video URL (HD preferred)."""
+    def best_media_url(self) -> str | None:
+        """Best available media URL (HD preferred)."""
         return self.hd_media_url or self.media_url
+
+
+# Backward compat
+ChildVideo = ChildPost
 
 
 class PostSummary(BaseModel):
@@ -117,8 +143,13 @@ class PostDetails(BaseModel):
     resolution: dict[str, int] | None = Field(None, description="Media resolution")
     model_name: str | None = Field(None, description="Model used (e.g., imagine_x_1)")
 
-    # Child videos
-    children: list[ChildVideo] = Field(default_factory=list, description="Child video posts")
+    # Child posts (images and videos, flat list from API)
+    children: list[ChildPost] = Field(
+        default_factory=list, description="All child posts (images and videos)"
+    )
+
+    # Original post ID (None for root posts)
+    original_post_id: str | None = Field(None, description="Parent post ID (None if root)")
 
     # Raw data for debugging
     raw_data: dict[str, Any] | None = Field(None, description="Raw API response")
@@ -131,42 +162,61 @@ class PostDetails(BaseModel):
 
     @computed_field
     @property
+    def is_root(self) -> bool:
+        """True if this is a root post (no parent)."""
+        return self.original_post_id is None
+
+    @computed_field
+    @property
     def video_count(self) -> int:
-        """Number of child videos."""
-        return len(self.children)
+        """Number of child video posts."""
+        return sum(1 for c in self.children if c.is_video)
+
+    @computed_field
+    @property
+    def image_count(self) -> int:
+        """Number of child image posts (edited variants)."""
+        return sum(1 for c in self.children if c.is_image)
 
     @property
     def has_children(self) -> bool:
-        """Check if this post has any child videos."""
+        """Check if this post has any child posts."""
         return len(self.children) > 0
 
-    def videos_by_source(self) -> dict[str, list["ChildVideo"]]:
-        """Group child videos by their source image post ID.
+    @property
+    def image_children(self) -> list["ChildPost"]:
+        """Child image posts (edited variants)."""
+        return [c for c in self.children if c.is_image]
 
-        Each image variant (original or edited) has its own post ID.
-        Videos generated from the same image variant share the same parent_id.
+    @property
+    def video_children(self) -> list["ChildPost"]:
+        """Child video posts."""
+        return [c for c in self.children if c.is_video]
+
+    def videos_by_source(self) -> dict[str, list["ChildPost"]]:
+        """Group child videos by their source image post ID (original_post_id).
 
         Returns:
-            Dict mapping source image post_id → list of ChildVideo.
-            e.g., {"abc-123": [video1, video2], "def-456": [video3]}
+            Dict mapping source post_id → list of video ChildPosts.
         """
-        groups: dict[str, list[ChildVideo]] = {}
+        groups: dict[str, list[ChildPost]] = {}
         for child in self.children:
-            groups.setdefault(child.parent_id, []).append(child)
+            if child.is_video:
+                groups.setdefault(child.original_post_id, []).append(child)
         return groups
 
     def find_video_source(self, video_id: str) -> str | None:
-        """Find which source image post ID a video came from.
+        """Find which image post a video was generated from.
 
         Args:
-            video_id: The child video UUID
+            video_id: The child video post UUID
 
         Returns:
-            The source image post_id, or None if video not found
+            The source image post_id (original_post_id), or None if not found
         """
         for child in self.children:
             if child.id == video_id:
-                return child.parent_id
+                return child.original_post_id
         return None
 
 

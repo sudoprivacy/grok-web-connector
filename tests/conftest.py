@@ -60,6 +60,18 @@ def sample_post_data() -> dict:
                 "modelName": "mochi",
                 "mode": "normal",
             },
+            {
+                "id": "child-image-id-1",
+                "originalPostId": "test-post-id-1234",
+                "mediaType": "MEDIA_POST_TYPE_IMAGE",
+                "originalPrompt": "Edit: make it warmer",
+                "mediaUrl": "https://assets.grok.com/edited_image.jpg",
+                "hdMediaUrl": "https://assets.grok.com/edited_image_hd.jpg",
+                "thumbnailImageUrl": "https://assets.grok.com/edited_image_thumb.jpg",
+                "createTime": "2025-12-10T10:45:00Z",
+                "resolution": {"width": 1920, "height": 1080},
+                "modelName": "aurora",
+            },
         ],
     }
 
