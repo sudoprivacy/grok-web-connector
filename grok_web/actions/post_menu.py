@@ -32,7 +32,7 @@ async def open_post_menu(tab, *, delay: float = 1.0) -> bool:
         GrokAPIError: If menu button not found after retries
     """
     from ai_dev_browser.core.ax import click_by_ref
-    from ai_dev_browser.core.snapshot import page_find
+    from ai_dev_browser.core.snapshot import page_discover as page_find
 
     for attempt in range(3):
         result = await page_find(tab, interactable_only=True)
@@ -49,10 +49,11 @@ async def open_post_menu(tab, *, delay: float = 1.0) -> bool:
             'button[aria-label="Options"]',
         ]:
             try:
-                btn = await tab.find(selector)
+                btn = await tab.query_selector(selector)
                 if btn:
                     await btn.scroll_into_view()
                     await asyncio.sleep(0.5 * delay)
+                    # Dropdown menus require real mouse events
                     await btn.mouse_click()
                     await asyncio.sleep(1 * delay)
                     return True
@@ -82,7 +83,7 @@ async def click_menu_item(tab, *text_options: str, delay: float = 1.0) -> bool:
         GrokAPIError: If no matching menu item found
     """
     from ai_dev_browser.core.ax import click_by_ref
-    from ai_dev_browser.core.snapshot import page_find
+    from ai_dev_browser.core.snapshot import page_discover as page_find
 
     text_set = set(text_options)
 
@@ -97,12 +98,13 @@ async def click_menu_item(tab, *text_options: str, delay: float = 1.0) -> bool:
 
         # CSS fallback: iterate [role="menuitem"] and match text
         try:
-            items = await tab.find_all('[role="menuitem"]')
+            items = await tab.query_selector_all('[role="menuitem"]')
             for item in items:
                 item_text = item.text.strip() if item.text else ""
                 if item_text in text_set:
                     await item.scroll_into_view()
                     await asyncio.sleep(0.2 * delay)
+                    # Menu items in Radix UI need real mouse events
                     await item.mouse_click()
                     await asyncio.sleep(0.5 * delay)
                     return True
@@ -123,7 +125,7 @@ async def get_menu_items(tab) -> list[dict]:
     Returns:
         List of dicts with 'name', 'role', 'ref' for each menuitem
     """
-    from ai_dev_browser.core.snapshot import page_find
+    from ai_dev_browser.core.snapshot import page_discover as page_find
 
     result = await page_find(tab, interactable_only=True)
     return [

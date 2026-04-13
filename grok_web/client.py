@@ -30,6 +30,7 @@ from .models import (
     GrokCookies,
     ImageEditResult,
     ImageGenerationResult,
+    ImageVideoMapping,
     PostDetails,
     PostSummary,
     VideoExtendResult,
@@ -162,8 +163,8 @@ class GrokClient(ResponseParser):
     async def __aenter__(self):
         import asyncio
 
-        from ai_dev_browser.core.connection import connect_browser
         from ai_dev_browser import cdp
+        from ai_dev_browser.core.connection import connect_browser
 
         from .browser import ensure_chrome_running
 
@@ -241,9 +242,9 @@ class GrokClient(ResponseParser):
         await asyncio.sleep(2)
 
         # Handle Cloudflare challenge if present
-        from ai_dev_browser.core.cloudflare import cf_verify
+        from ai_dev_browser.core.cloudflare import cloudflare_verify
 
-        result = await cf_verify(self._tab, max_retries=15)
+        result = await cloudflare_verify(self._tab, max_retries=15)
         if not result.get("verified"):
             raise GrokAuthError("Failed to bypass Cloudflare challenge")
 
@@ -927,7 +928,7 @@ class GrokClient(ResponseParser):
         for _ in range(3):
             for selector in selectors:
                 try:
-                    menu_btn = await self._tab.find(selector)
+                    menu_btn = await self._tab.query_selector(selector)
                     if menu_btn:
                         break
                 except Exception:
@@ -939,9 +940,31 @@ class GrokClient(ResponseParser):
         if menu_btn is None:
             raise GrokAPIError("Could not find '...' menu button (Options/更多选项)")
 
+        # Pause any playing video first (video overlay can intercept clicks)
+        await self._tab.evaluate('document.querySelectorAll("video").forEach(v => v.pause())')
+        await asyncio.sleep(0.3)
+
         await menu_btn.scroll_into_view()
         await asyncio.sleep(0.5 * d)
-        await menu_btn.mouse_click()
+        # Radix dropdown requires pointer events (not just click or mouse_click)
+        await self._tab.evaluate("""
+            (function() {
+                var selectors = [
+                    'button[aria-label="更多选项"]',
+                    'button[aria-label="More options"]',
+                    'button[aria-label="Options"]'
+                ];
+                for (var sel of selectors) {
+                    var btn = document.querySelector(sel);
+                    if (btn) {
+                        btn.dispatchEvent(new PointerEvent("pointerdown", {bubbles: true}));
+                        btn.dispatchEvent(new PointerEvent("pointerup", {bubbles: true}));
+                        btn.dispatchEvent(new MouseEvent("click", {bubbles: true}));
+                        return;
+                    }
+                }
+            })()
+        """)
         await asyncio.sleep(1 * d)
 
         return True
@@ -969,16 +992,26 @@ class GrokClient(ResponseParser):
         # Try to find and click the matching menu item
         for _ in range(3):
             # Get all menu items
-            items = await self._tab.find_all('[role="menuitem"]')
+            items = await self._tab.query_selector_all('[role="menuitem"]')
 
             for item in items:
                 # Get text property (elements have a .text property)
                 item_text = item.text.strip() if item.text else ""
 
                 if item_text in text_options:
-                    await item.scroll_into_view()
-                    await asyncio.sleep(0.2 * d)
-                    await item.mouse_click()
+                    # Radix menu items need pointer events
+                    idx = items.index(item)
+                    await self._tab.evaluate(f"""
+                        (function() {{
+                            var items = document.querySelectorAll('[role="menuitem"]');
+                            var item = items[{idx}];
+                            if (item) {{
+                                item.dispatchEvent(new PointerEvent("pointerdown", {{bubbles: true}}));
+                                item.dispatchEvent(new PointerEvent("pointerup", {{bubbles: true}}));
+                                item.dispatchEvent(new MouseEvent("click", {{bubbles: true}}));
+                            }}
+                        }})()
+                    """)
                     return True
 
             await asyncio.sleep(1 * d)
@@ -1024,14 +1057,24 @@ class GrokClient(ResponseParser):
 
         raise GrokAPIError(f"Could not find confirm button: {text_options}")
 
+    async def _get_menu_items_text(self) -> list[str]:
+        """Get text of all currently visible menu items."""
+        result = await self._tab.evaluate(
+            "JSON.stringify(Array.from(document.querySelectorAll('[role=\"menuitem\"]')).map(i => i.textContent.trim()))"
+        )
+        import json
+
+        return json.loads(result) if result else []
+
     async def delete_video(self, video_id: str) -> bool:
         """
-        Delete a child video by clicking the UI "Delete post" button.
+        Delete a child video (not the parent post).
 
-        Navigates to the video page, clicks "..." menu, then "Delete post",
-        and confirms in the dialog. Only deletes the specific child video.
+        If the menu only shows "删除帖子" (delete entire post) instead of
+        "删除视频" (delete this video), raises GrokAPIError to prevent
+        accidentally deleting the parent post and all its children.
 
-        Timing is controlled by self._ui_delay parameter (default: 1.0).
+        Use delete_post() if you intentionally want to delete the entire post.
 
         Args:
             video_id: The child video UUID to delete
@@ -1040,13 +1083,12 @@ class GrokClient(ResponseParser):
             True if deletion was successful (or video already doesn't exist)
 
         Raises:
-            GrokAPIError: If delete button not found or deletion fails
+            GrokAPIError: If only "delete post" is available (use delete_post instead)
         """
         import asyncio
 
         d = self._ui_delay
 
-        # Try to open menu (will raise if 404)
         try:
             await self._open_post_menu(video_id)
         except GrokAPIError as e:
@@ -1054,12 +1096,57 @@ class GrokClient(ResponseParser):
                 return True  # Already deleted
             raise
 
-        # Click "Delete video" menu item (button text varies)
-        await self._click_menu_item("删除视频", "删除帖子", "Delete video", "Delete post")
-        await asyncio.sleep(1 * d)
+        # Check what delete options are available
+        menu_items = await self._get_menu_items_text()
 
-        # Confirm deletion (button text in dialog)
-        await self._click_confirm_button("删除视频", "删除帖子", "Delete video", "Delete post")
+        has_delete_video = any(t in menu_items for t in ("删除视频", "Delete video"))
+        has_delete_post = any(t in menu_items for t in ("删除帖子", "Delete post"))
+
+        if has_delete_video:
+            await self._click_menu_item("删除视频", "Delete video")
+            await asyncio.sleep(1 * d)
+            await self._click_confirm_button("删除视频", "Delete video", "删除", "Delete")
+            await asyncio.sleep(1 * d)
+            return True
+
+        if has_delete_post and not has_delete_video:
+            raise GrokAPIError(
+                f"Video {video_id} can only be deleted by deleting the entire post "
+                f"(menu shows '删除帖子' not '删除视频'). "
+                f"Use delete_post() instead if this is intentional."
+            )
+
+        raise GrokAPIError(f"No delete option found in menu. Available: {menu_items}")
+
+    async def delete_post(self, post_id: str) -> bool:
+        """
+        Delete an entire post (parent + all children).
+
+        This is destructive — it removes the parent image/video and ALL child
+        videos under it. Use delete_video() to remove a single child instead.
+
+        Args:
+            post_id: The post UUID to delete
+
+        Returns:
+            True if deletion was successful (or post already doesn't exist)
+        """
+        import asyncio
+
+        d = self._ui_delay
+
+        try:
+            await self._open_post_menu(post_id)
+        except GrokAPIError as e:
+            if "404" in str(e):
+                return True
+            raise
+
+        await self._click_menu_item("删除帖子", "删除视频", "Delete post", "Delete video")
+        await asyncio.sleep(1 * d)
+        await self._click_confirm_button(
+            "删除帖子", "删除视频", "Delete post", "Delete video", "删除", "Delete"
+        )
         await asyncio.sleep(1 * d)
 
         return True
@@ -1614,11 +1701,11 @@ class GrokClient(ResponseParser):
                 break
         if not clicked:
             # CSS fallback
-            btn = await self._tab.find('button[aria-label="设置"]')
+            btn = await self._tab.query_selector('button[aria-label="设置"]')
             if not btn:
-                btn = await self._tab.find('button[aria-label="Settings"]')
+                btn = await self._tab.query_selector('button[aria-label="Settings"]')
             if btn:
-                await btn.mouse_click()
+                await btn.click()
                 await asyncio.sleep(1 * d)
                 clicked = True
         if not clicked:
@@ -1635,11 +1722,11 @@ class GrokClient(ResponseParser):
                 break
         if not edit_clicked:
             # CSS fallback
-            items = await self._tab.find_all('[role="menuitem"]')
+            items = await self._tab.query_selector_all('[role="menuitem"]')
             for item in items:
                 item_text = item.text.strip() if item.text else ""
                 if "编辑图像" in item_text or "Edit image" in item_text:
-                    await item.mouse_click()
+                    await item.click()
                     await asyncio.sleep(2 * d)
                     edit_clicked = True
                     break
@@ -1724,67 +1811,118 @@ class GrokClient(ResponseParser):
             conversation_id=captured_data.get("conversation_id"),
         )
 
-    async def upload_image(self, image_path: str | Path, timeout: int = 30) -> str:
+    async def upload_image(self, image_path: str | Path, timeout: int = 15) -> int:
         """
-        Upload a local image to Grok Imagine and create a new post.
+        Upload a local image to Grok Imagine.
 
-        This navigates to grok.com/imagine, uploads the image via the hidden
-        file input, and waits for the page to redirect to the new post.
+        The new UI (April 2026) keeps the user on the Imagine homepage.
+        The image appears as a tag above the input bar. Multiple calls
+        upload multiple images (supports "Image 1", "Image 2", etc.).
 
         Args:
             image_path: Path to the local image file (PNG, JPG, etc.)
-            timeout: Max seconds to wait for upload and redirect (default 30)
+            timeout: Max seconds to wait for upload confirmation (default 15)
 
         Returns:
-            The post ID of the newly created post.
+            Number of images currently attached (e.g., 1 after first upload).
 
         Raises:
             FileNotFoundError: If the image file doesn't exist.
             GrokAPIError: If upload fails or times out.
 
         Example:
-            >>> post_id = await client.upload_image("/path/to/photo.jpg")
-            >>> # Now use the post_id for video or image generation
-            >>> video = await client.create_video("zoom in", source_post_id=post_id)
+            >>> await client.upload_image("/path/to/photo1.jpg")  # returns 1
+            >>> await client.upload_image("/path/to/photo2.jpg")  # returns 2
+            >>> result = await client.create_video("zoom in", source_image_path=None)
+        """
+        from .actions.imagine_input import navigate_to_imagine
+        from .actions.imagine_input import upload_image as _upload
+
+        await navigate_to_imagine(self._tab, delay=self._ui_delay)
+        return await _upload(self._tab, image_path, timeout=timeout, delay=self._ui_delay)
+
+    async def _create_video_from_upload(
+        self,
+        image_path: str | Path,
+        prompt: str = "",
+        timeout: int = 300,
+        duration: int = 10,
+        resolution: str = "720p",
+        aspect_ratio: str | None = None,
+    ) -> VideoGenerationResult:
+        """Generate video from a local image using the Imagine homepage flow.
+
+        New UI flow (April 2026):
+        1. Navigate to grok.com/imagine
+        2. Upload image via file input
+        3. Switch to video mode
+        4. Set video options (resolution, duration, aspect ratio)
+        5. Optionally set prompt text
+        6. Click submit and capture NDJSON response
+
+        Args:
+            image_path: Path to the local image file
+            prompt: Optional prompt text (camera motion, style, etc.)
+            timeout: Max seconds to wait for video generation (default 300)
+            duration: Video duration in seconds (6 or 10, default 10)
+            resolution: Video resolution ("480p" or "720p", default "720p")
+            aspect_ratio: Video aspect ratio (e.g., "2:3", "16:9")
+
+        Returns:
+            VideoGenerationResult with video_id and metadata.
         """
         import asyncio
-        import re
+        import random
 
-        image_path = Path(image_path)
-        if not image_path.exists():
-            raise FileNotFoundError(f"Image not found: {image_path}")
+        from .actions.imagine_input import (
+            click_submit,
+            navigate_to_imagine,
+            set_mode,
+            set_prompt,
+            set_video_options,
+        )
+        from .actions.imagine_input import (
+            upload_image as _upload,
+        )
+        from .actions.network_monitor import CDPMonitor
 
-        # Navigate to imagine page
-        await self._tab.get(f"{self.BASE_URL}/imagine")
-        await asyncio.sleep(2)
+        # Step 1: Navigate to imagine homepage
+        await navigate_to_imagine(self._tab, delay=self._ui_delay)
 
-        # Find the hidden file input
-        file_input = await self._tab.select('input[type="file"][name="files"]')
-        if not file_input:
-            raise GrokAPIError("File input element not found on imagine page")
+        # Step 2: Upload image
+        await _upload(self._tab, image_path, delay=self._ui_delay)
 
-        # Upload the file
-        await file_input.send_file(str(image_path.absolute()))
+        # Step 3: Switch to video mode
+        await set_mode(self._tab, "视频", delay=self._ui_delay)
 
-        # Wait for page to redirect to the new post
-        start_time = asyncio.get_event_loop().time()
-        post_id = None
+        # Step 4: Set video options
+        await set_video_options(
+            self._tab,
+            resolution=resolution,
+            duration=duration,
+            aspect_ratio=aspect_ratio,
+            delay=self._ui_delay,
+        )
 
-        while asyncio.get_event_loop().time() - start_time < timeout:
-            current_url = await self._tab.evaluate("window.location.href")
-            # URL format: https://grok.com/imagine/post/{post_id}
-            match = re.search(r"/imagine/post/([a-f0-9-]+)", current_url)
-            if match:
-                post_id = match.group(1)
-                break
-            await asyncio.sleep(0.5)
+        # Step 5: Set prompt if provided
+        if prompt:
+            await set_prompt(self._tab, prompt, delay=self._ui_delay)
 
-        if not post_id:
-            raise GrokAPIError(
-                f"Upload timed out after {timeout}s. Page did not redirect to post URL."
-            )
+        await asyncio.sleep(random.uniform(0.3, 0.8))
 
-        return post_id
+        # Step 6: Set up network monitor, click submit, capture response
+        async with CDPMonitor(self._tab, "/app-chat/conversations/new") as monitor:
+            await click_submit(self._tab, delay=self._ui_delay)
+
+            if not await monitor.wait_for_request(timeout=8):
+                raise GrokAPIError("Submit did not trigger video generation request")
+
+            response_text = await monitor.wait_for_body(timeout=timeout)
+
+        # Parse NDJSON response — parent_post_id from response itself
+        return parse_video_ndjson_response(
+            response_text, parent_post_id="", statsig_id=monitor.statsig_id
+        )
 
     async def _scan_favorited_indices(self) -> list[int]:
         """Scan gallery DOM to find which items have been favorited.
@@ -1966,7 +2104,7 @@ class GrokClient(ResponseParser):
         # Step 1: Click the mode dropdown button (aria-label="模型选择")
         model_btn = await self._tab.select('button[aria-label="模型选择"]')
         if model_btn:
-            await model_btn.mouse_click()
+            await model_btn.click()
             await asyncio.sleep(1 * d)
 
         # Step 2: Select "Image/图片" mode from the Radix dropdown menu
@@ -1995,7 +2133,7 @@ class GrokClient(ResponseParser):
 
         model_btn = await self._tab.select('button[aria-label="模型选择"]')
         if model_btn:
-            await model_btn.mouse_click()
+            await model_btn.click()
             await asyncio.sleep(1 * d)
 
         await self._tab.evaluate(f"""
@@ -2044,7 +2182,7 @@ class GrokClient(ResponseParser):
         submit_btn = await self._tab.select('button[aria-label="提交"]')
         if submit_btn:
             logger.debug("[create_image] Found submit button, clicking...")
-            await submit_btn.mouse_click()
+            await submit_btn.click()
             logger.debug("[create_image] Submit button clicked")
         else:
             raise GrokAPIError("Could not find submit button")
@@ -2308,7 +2446,7 @@ class GrokClient(ResponseParser):
             )
             # If showing "图片", switch to "视频"
             if "图片" in mode_text or "Image" in mode_text:
-                await model_btn.mouse_click()
+                await model_btn.click()
                 await asyncio.sleep(1 * d)
 
                 await self._tab.evaluate("""
@@ -2335,7 +2473,7 @@ class GrokClient(ResponseParser):
 
         model_btn = await self._tab.select('button[aria-label="模型选择"]')
         if model_btn:
-            await model_btn.mouse_click()
+            await model_btn.click()
             await asyncio.sleep(1 * d)
 
         await self._tab.evaluate(f"""
@@ -2380,7 +2518,7 @@ class GrokClient(ResponseParser):
         # Step 4: Click the submit button
         submit_btn = await self._tab.select('button[aria-label="提交"]')
         if submit_btn:
-            await submit_btn.mouse_click()
+            await submit_btn.click()
         else:
             raise GrokAPIError("Could not find submit button")
 
@@ -2559,16 +2697,12 @@ class GrokClient(ResponseParser):
         if source_post_id is not None and source_image_path is not None:
             raise ValueError("Cannot specify both source_post_id and source_image_path.")
 
-        # Mode: upload2vid (upload local image, then generate video)
+        # Mode: upload2vid (upload local image → generate video from Imagine homepage)
         if source_image_path is not None:
-            # Upload the image first to create a post
-            uploaded_post_id = await self.upload_image(source_image_path)
-            # Then generate video from the uploaded post
-            return await self._create_video_via_ui(
-                parent_post_id=uploaded_post_id,
-                preset=preset,
+            return await self._create_video_from_upload(
+                image_path=source_image_path,
+                prompt=prompt,
                 timeout=timeout,
-                adjustment_prompt=prompt if prompt else None,
                 duration=duration,
                 resolution=resolution,
                 aspect_ratio=aspect_ratio,
@@ -2715,10 +2849,11 @@ class GrokClient(ResponseParser):
 
         async def _open_settings():
             """Open the settings gear dropdown. Returns True if opened."""
-            btn = await self._tab.find('button[aria-label="设置"]')
+            btn = await self._tab.query_selector('button[aria-label="设置"]')
             if not btn:
-                btn = await self._tab.find('button[aria-label="Settings"]')
+                btn = await self._tab.query_selector('button[aria-label="Settings"]')
             if btn:
+                # Dropdown menus require real mouse events
                 await btn.mouse_click()
                 await asyncio.sleep(0.5)
                 return True
@@ -2726,7 +2861,7 @@ class GrokClient(ResponseParser):
 
         async def _click_menuitem(text: str) -> bool:
             """Find and click a menuitem by text content. Returns True if clicked."""
-            menu_items = await self._tab.find_all('[role="menuitem"]')
+            menu_items = await self._tab.query_selector_all('[role="menuitem"]')
             for item in menu_items:
                 item_text = item.text.strip() if hasattr(item, "text") else ""
                 if not item_text:
@@ -2736,7 +2871,7 @@ class GrokClient(ResponseParser):
                         await_promise=False,
                     )
                 if text in item_text:
-                    await item.mouse_click()
+                    await item.click()
                     await asyncio.sleep(0.3)
                     return True
             return False
@@ -2745,24 +2880,24 @@ class GrokClient(ResponseParser):
             # Select duration (e.g., "10s") — open menu, click, menu closes
             if await _open_settings():
                 duration_label = f"{duration}s"
-                dur_btn = await self._tab.find(f'button[aria-label="{duration_label}"]')
+                dur_btn = await self._tab.query_selector(f'button[aria-label="{duration_label}"]')
                 if dur_btn:
-                    await dur_btn.mouse_click()
+                    await dur_btn.click()
                     await asyncio.sleep(0.3)
 
             # Select resolution (e.g., "720p") — reopen menu, click, menu closes
             if await _open_settings():
                 res_label = resolution if resolution.endswith("p") else f"{resolution}p"
-                res_btn = await self._tab.find(f'button[aria-label="{res_label}"]')
+                res_btn = await self._tab.query_selector(f'button[aria-label="{res_label}"]')
                 if res_btn:
-                    await res_btn.mouse_click()
+                    await res_btn.click()
                     await asyncio.sleep(0.3)
 
             # Select aspect ratio if non-default — reopen menu, click, menu closes
             if aspect_ratio and aspect_ratio != "2:3" and await _open_settings():
-                ar_btn = await self._tab.find(f'button[aria-label="{aspect_ratio}"]')
+                ar_btn = await self._tab.query_selector(f'button[aria-label="{aspect_ratio}"]')
                 if ar_btn:
-                    await ar_btn.mouse_click()
+                    await ar_btn.click()
                     await asyncio.sleep(0.3)
         except Exception:
             pass  # If settings interaction fails, continue with defaults
@@ -2783,16 +2918,16 @@ class GrokClient(ResponseParser):
         async def _click_make_video_button() -> bool:
             """Click the '制作视频' or '生成视频' button to trigger generation."""
             # Try "制作视频" first (initial image post state)
-            btn = await self._tab.find('button[aria-label="制作视频"]')
+            btn = await self._tab.query_selector('button[aria-label="制作视频"]')
             if not btn:
-                btn = await self._tab.find('button[aria-label="Make video"]')
+                btn = await self._tab.query_selector('button[aria-label="Make video"]')
             # Fallback: "生成视频" (video mode state, arrow up = regenerate)
             if not btn:
-                btn = await self._tab.find('button[aria-label="生成视频"]')
+                btn = await self._tab.query_selector('button[aria-label="生成视频"]')
             if not btn:
-                btn = await self._tab.find('button[aria-label="Generate video"]')
+                btn = await self._tab.query_selector('button[aria-label="Generate video"]')
             if btn:
-                await btn.mouse_click()
+                await btn.click()
                 return True
             return False
 
@@ -2895,14 +3030,16 @@ class GrokClient(ResponseParser):
                     captured_response["request_id"] = None
                     await asyncio.sleep(random.uniform(0.3, 0.8))
 
-                    submit_btn = await self._tab.find('button[aria-label="生成视频"]')
+                    submit_btn = await self._tab.query_selector('button[aria-label="生成视频"]')
                     if not submit_btn:
-                        submit_btn = await self._tab.find('button[aria-label="Generate video"]')
+                        submit_btn = await self._tab.query_selector(
+                            'button[aria-label="Generate video"]'
+                        )
                     if not submit_btn:
-                        submit_btn = await self._tab.find('button[aria-label="提交"]')
+                        submit_btn = await self._tab.query_selector('button[aria-label="提交"]')
 
                     if submit_btn:
-                        await submit_btn.mouse_click()
+                        await submit_btn.click()
                     elif click_attempt == max_click_retries:
                         raise GrokAPIError("Could not find '生成视频' button after retries")
                     else:
@@ -3111,9 +3248,7 @@ class GrokClient(ResponseParser):
     # Image-video relationship
     # =========================================================================
 
-    async def get_image_video_map(
-        self, post_id: str
-    ) -> list["ImageVideoMapping"]:
+    async def get_image_video_map(self, post_id: str) -> list["ImageVideoMapping"]:
         """Get image variants with their child videos for a post.
 
         Each entry represents a source image (original or edited variant)
@@ -3141,8 +3276,6 @@ class GrokClient(ResponseParser):
                     media_url = source_details.media_url
                 except Exception:
                     pass
-            result.append(ImageVideoMapping(
-                post_id=source_id, media_url=media_url, videos=videos
-            ))
+            result.append(ImageVideoMapping(post_id=source_id, media_url=media_url, videos=videos))
 
         return result

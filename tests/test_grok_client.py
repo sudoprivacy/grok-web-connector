@@ -236,18 +236,28 @@ class TestGrokClientUIMenuOperations:
 
     @pytest.mark.asyncio
     async def test_open_post_menu_success(self, client: GrokClient):
-        """_open_post_menu navigates and clicks menu button."""
-        mock_btn = AsyncMock()
+        """_open_post_menu navigates and clicks menu button via ax_tree."""
+        from unittest.mock import patch
+
         client._tab.get = AsyncMock()
         client._tab.evaluate = AsyncMock(return_value="Normal page content")
-        client._tab.find = AsyncMock(return_value=mock_btn)
 
-        result = await client._open_post_menu("post-123")
+        # Mock the ax_tree path (page_find returns a matching button, click_by_ref clicks it)
+        mock_ax_result = {"elements": [{"ref": "1#100", "role": "button", "name": "更多选项"}]}
+        with (
+            patch(
+                "ai_dev_browser.core.snapshot.page_discover",
+                new=AsyncMock(return_value=mock_ax_result),
+            ),
+            patch(
+                "ai_dev_browser.core.ax.click_by_ref",
+                new=AsyncMock(return_value={"clicked": True}),
+            ),
+        ):
+            result = await client._open_post_menu("post-123")
 
         assert result is True
         client._tab.get.assert_called_once()
-        mock_btn.scroll_into_view.assert_called_once()
-        mock_btn.mouse_click.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_open_post_menu_raises_on_404(self, client: GrokClient):
@@ -263,38 +273,40 @@ class TestGrokClientUIMenuOperations:
     @pytest.mark.asyncio
     async def test_open_post_menu_raises_when_button_not_found(self, client: GrokClient):
         """_open_post_menu raises GrokAPIError when menu button not found."""
+        from unittest.mock import patch
+
         from grok_web.exceptions import GrokAPIError
 
         client._tab.get = AsyncMock()
         client._tab.evaluate = AsyncMock(return_value="Normal page")
-        client._tab.find = AsyncMock(side_effect=Exception("Not found"))
+        client._tab.query_selector = AsyncMock(return_value=None)
 
-        with pytest.raises(GrokAPIError, match="menu button"):
-            await client._open_post_menu("post-123")
+        # ax_tree finds nothing, CSS fallback also finds nothing
+        with patch(
+            "ai_dev_browser.core.snapshot.page_discover",
+            new=AsyncMock(return_value={"elements": []}),
+        ):
+            with pytest.raises(GrokAPIError, match="menu button"):
+                await client._open_post_menu("post-123")
 
     @pytest.mark.asyncio
     async def test_click_menu_item_success(self, client: GrokClient):
         """_click_menu_item clicks menu item by text."""
-        # Mock menu item element with .text property
         mock_item = MagicMock()
         mock_item.text = "Save"
-        mock_item.scroll_into_view = AsyncMock()
-        mock_item.mouse_click = AsyncMock()
-
-        client._tab.find_all = AsyncMock(return_value=[mock_item])
+        client._tab.query_selector_all = AsyncMock(return_value=[mock_item])
+        client._tab.evaluate = AsyncMock()
 
         result = await client._click_menu_item("Save", "保存")
 
         assert result is True
-        mock_item.mouse_click.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_click_menu_item_raises_when_not_found(self, client: GrokClient):
         """_click_menu_item raises GrokAPIError when item not found."""
         from grok_web.exceptions import GrokAPIError
 
-        # Return empty list (no menu items found)
-        client._tab.find_all = AsyncMock(return_value=[])
+        client._tab.query_selector_all = AsyncMock(return_value=[])
 
         with pytest.raises(GrokAPIError, match="Could not find menu item"):
             await client._click_menu_item("NonExistent")
@@ -324,6 +336,8 @@ class TestGrokClientUIMenuOperations:
         client._open_post_menu = AsyncMock()
         client._click_menu_item = AsyncMock()
         client._click_confirm_button = AsyncMock()
+        # _get_menu_items_text calls tab.evaluate which must return JSON string
+        client._tab.evaluate = AsyncMock(return_value='["删除视频", "Delete video"]')
 
         result = await client.delete_video("video-123")
 
