@@ -739,7 +739,7 @@ class TestSharedTarget:
 
     def test_shared_target_dataclass(self):
         """_SharedTarget stores target and state correctly."""
-        from grok_web.pool.worker_pool import _SharedTarget
+        from ai_dev_browser.pool.pool import _SharedTarget
 
         shared = _SharedTarget(target=10)
         assert shared.target == 10

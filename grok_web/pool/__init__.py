@@ -21,23 +21,32 @@ Example:
                 print(f"Video: {result.data['video_id']}")
 """
 
-from .job import Job, JobResult, JobStatus
-from .persistence import PoolState, load_state, save_state
-from .worker import Worker, WorkerStats, WorkerStatus
+from ai_dev_browser.pool import (
+    Job,
+    JobResult,
+    JobStatus,
+    PoolState,
+    Worker,
+    WorkerStats,
+    WorkerStatus,
+    load_state,
+    save_state,
+)
+
 from .worker_pool import BrowserWorkerPool
 
 __all__ = [
     # Main class
     "BrowserWorkerPool",
-    # Job models
+    # Job models (re-exported from ai-dev-browser)
     "Job",
     "JobResult",
     "JobStatus",
-    # Worker models
+    # Worker models (re-exported from ai-dev-browser)
     "Worker",
     "WorkerStats",
     "WorkerStatus",
-    # Persistence
+    # Persistence (re-exported from ai-dev-browser)
     "PoolState",
     "load_state",
     "save_state",

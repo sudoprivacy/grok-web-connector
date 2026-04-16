@@ -67,6 +67,7 @@ def get_client(
     browser_host: str | None = None,
     browser_port: int | None = None,
     headless: bool = False,
+    profile: str | None = None,
 ) -> GrokClient:
     """
     Get the Grok API client.
@@ -79,6 +80,7 @@ def get_client(
         browser_host: Chrome debugging host (optional, defaults to 127.0.0.1)
         browser_port: Chrome debugging port (optional, defaults to 9350)
         headless: Run browser in headless mode (default: False)
+        profile: Chrome profile name (optional, defaults to "grok-chrome")
 
     Returns:
         GrokClient instance with all API methods.
@@ -95,6 +97,7 @@ def get_client(
         host=browser_host,
         port=browser_port,
         headless=headless,
+        profile=profile,
     )
 
 

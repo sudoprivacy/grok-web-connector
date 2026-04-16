@@ -1,44 +1,37 @@
-"""BrowserWorkerPool - Manage multiple concurrent browser workers."""
+"""BrowserWorkerPool - Grok-specific BrowserPool subclass.
+
+Thin wrapper around ai-dev-browser's BrowserPool that adds:
+- Per-worker Chrome profiles (grok-chrome-w0, w1, ...)
+- Clean CDP shutdown via browser_stop()
+- Consecutive failure detection with browser health check
+"""
 
 import asyncio
 import contextlib
-import inspect
 import logging
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 
 from ai_dev_browser.core import browser_stop, is_port_in_use
+from ai_dev_browser.pool import BrowserPool
+from ai_dev_browser.pool.job import Job, JobResult, JobStatus
+from ai_dev_browser.pool.worker import Worker, WorkerStatus
 
-from ..browser import GROK_CHROME_PROFILE
-from ..client import GrokClient
+from ..client import GROK_CHROME_PROFILE, GrokClient
 from ..models import GrokCookies
-from .job import Job, JobResult, JobStatus
-from .persistence import PoolState, load_state, save_state
-from .worker import Worker, WorkerStats, WorkerStatus
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class _SharedTarget:
-    """Internal shared target state for coordinating multiple workers."""
-
-    target: int
-    state: dict[str, int] = field(default_factory=dict)  # job_id -> success_count
-
-
-class BrowserWorkerPool:
+class BrowserWorkerPool(BrowserPool[GrokClient]):
     """
     Manage multiple concurrent browser workers with job queuing and persistence.
 
-    Features:
-        - Multiple concurrent workers, each with isolated Chrome instance
-        - Dynamic scaling: add/remove workers at runtime
-        - Job queue for task distribution
-        - Progress persistence for resume after restart
-        - Graceful shutdown: complete current tasks before exit
+    Extends ai-dev-browser's BrowserPool with Grok-specific behavior:
+    - Per-worker named Chrome profiles for session isolation
+    - Clean Chrome shutdown via CDP Browser.close() (browser_stop)
+    - Browser health monitoring with fail-fast on dead Chrome
 
     Example:
         async with BrowserWorkerPool(num_workers=3, state_file="progress.json") as pool:
@@ -89,119 +82,31 @@ class BrowserWorkerPool:
             Chrome instances (identified by grok_chrome_ temp profile), then launches
             new Chrome on available ports as needed.
         """
-        self._num_workers = num_workers
-        self._state_file = Path(state_file) if state_file else None
-        self._max_retries = max_retries
+        # Grok-specific params (not in base class)
         self._config_path = config_path
         self._cookies = cookies
-        self._headless = headless
-        self._close_chrome = close_chrome
-        self._fail_condition = fail_condition
-        self._requeue_position = requeue_position
 
-        # Worker management
-        self._workers: dict[int, Worker] = {}
-        self._worker_tasks: dict[int, asyncio.Task] = {}
-        self._next_worker_id = 0
-        self._used_ports: set[int] = set()  # Ports assigned to workers in this pool
-
-        # Job management - two queues for priority support
-        self._job_queue: asyncio.Queue[Job] = asyncio.Queue()  # Normal priority
-        self._priority_queue: asyncio.Queue[Job] = asyncio.Queue()  # High priority (front)
-        self._results: dict[str, JobResult] = {}
-        self._pending_jobs: dict[str, Job] = {}  # job_id -> Job (for tracking)
-        self._result_events: dict[str, asyncio.Event] = {}  # For wait_for()
-
-        # Pool state
-        self._running = False
-        self._state = PoolState()
-
-        # Shared target tracking (internal, used by wait(min_success=X))
-        self._shared_targets: dict[str, _SharedTarget] = {}
-
-        # Held jobs waiting for release (used with shared target)
-        # Jobs with _hold=True are stored here instead of queue, released by wait()
-        self._held_jobs: dict[str, Job] = {}  # job_id -> Job (not in queue yet)
-        self._held_jobs_lock = asyncio.Lock()  # Protects _held_jobs access
-
-        # Track jobs currently in thumbnail_selector phase (human selection)
-        # Used to pause wait() timeout during selection
-        self._jobs_in_selection: set[str] = set()
-
-    async def __aenter__(self) -> "BrowserWorkerPool":
-        """Start the pool and all workers."""
-        # Load state if state file exists
-        if self._state_file:
-            loaded = load_state(self._state_file)
-            if loaded:
-                self._state = loaded
-                self._results = loaded.completed.copy()
-                # Re-queue pending and in-progress jobs
-                for job in loaded.pending + loaded.in_progress:
-                    job.status = JobStatus.PENDING
-                    self._pending_jobs[job.job_id] = job
-                    await self._job_queue.put(job)
-                logger.info(
-                    f"Loaded state: {len(self._results)} completed, "
-                    f"{len(self._pending_jobs)} pending"
-                )
-
-        self._running = True
-
-        # Start initial workers
-        # Port allocation and CDP contention handled by ensure_chrome_running()
-        for _ in range(self._num_workers):
-            await self.add_worker()
-
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
-        """Gracefully shutdown all workers."""
-        self._running = False
-
-        # Signal all workers to stop (after current task)
-        for worker in self._workers.values():
-            worker.mark_stopping()
-
-        # Cancel all worker tasks to avoid hanging on queue.get() timeout
-        if self._worker_tasks:
-            for task in self._worker_tasks.values():
-                task.cancel()
-            # Wait for cancellation to complete (return_exceptions handles CancelledError)
-            await asyncio.gather(*self._worker_tasks.values(), return_exceptions=True)
-
-        # Close all browser clients and optionally terminate Chrome
-        for worker in self._workers.values():
-            if worker.client:
-                try:
-                    # First, call __aexit__ to save cookies and release CDP connection
-                    # This must happen BEFORE killing Chrome, otherwise cookies can't be saved
-                    await worker.client.__aexit__(None, None, None)
-
-                    # Then, terminate Chrome if close_chrome is True
-                    if self._close_chrome and worker.port:
-                        try:
-                            browser_stop(port=worker.port)
-                            logger.info(
-                                f"Stopped Chrome on port {worker.port} for worker {worker.worker_id}"
-                            )
-                        except Exception:
-                            pass  # Chrome may already be gone
-                except Exception as e:
-                    logger.warning(f"Error closing worker {worker.worker_id}: {e}")
-
-        # Final state save
-        self.save_state()
+        super().__init__(
+            client_class=GrokClient,
+            workers=num_workers,
+            max_retries=max_retries,
+            state_file=state_file,
+            headless=headless,
+            close_browsers=close_chrome,
+            fail_condition=fail_condition,
+            requeue_position=requeue_position,
+            profile="temp",  # grok manages cookies via CDP, not cookies.dat
+        )
 
     # =========================================================================
-    # Worker Management
+    # Overrides
     # =========================================================================
 
     async def add_worker(self) -> int:
         """Add a new worker to the pool.
 
         Each worker gets a named profile (e.g., "grok-chrome-w0") for Chrome
-        reuse across runs. Port allocation is handled by start_browser().
+        reuse across runs. Port allocation is handled by browser_start().
 
         Returns:
             worker_id of the new worker
@@ -223,7 +128,7 @@ class BrowserWorkerPool:
 
         try:
             await client.__aenter__()
-            # Port is determined by start_browser, read it back
+            # Port is determined by browser_start, read it back
             actual_port = client._remote_port
             worker = Worker(worker_id=worker_id, port=actual_port)
             self._workers[worker_id] = worker
@@ -240,392 +145,39 @@ class BrowserWorkerPool:
 
         return worker_id
 
-    async def remove_worker(self, worker_id: int, wait: bool = True) -> None:
-        """Remove a worker from the pool.
+    async def _close_worker_client(self, worker: Worker) -> None:
+        """Close worker client and optionally stop Chrome via CDP.
 
-        Args:
-            worker_id: ID of the worker to remove
-            wait: If True, wait for current task to complete before stopping
+        Uses browser_stop() for clean shutdown (flushes cookies via
+        CDP Browser.close()) instead of force-killing the process.
         """
-        if worker_id not in self._workers:
-            raise ValueError(f"Worker {worker_id} not found")
-
-        worker = self._workers[worker_id]
-
-        # Mark as stopping
-        worker.mark_stopping()
-
-        # Wait for current task if requested
-        if wait and worker.status == WorkerStatus.BUSY:
-            logger.info(f"Waiting for worker {worker_id} to finish current task...")
-            await worker.wait_current_task()
-
-        # Cancel worker task
-        if worker_id in self._worker_tasks:
-            self._worker_tasks[worker_id].cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._worker_tasks[worker_id]
-            del self._worker_tasks[worker_id]
-
-        # Close browser client and optionally terminate Chrome
-        if worker.client:
-            try:
-                # First, call __aexit__ to save cookies and release CDP connection
-                # This must happen BEFORE killing Chrome, otherwise cookies can't be saved
-                await worker.client.__aexit__(None, None, None)
-
-                # Then, terminate Chrome if close_chrome is True
-                if self._close_chrome and worker.port:
-                    try:
-                        browser_stop(port=worker.port)
-                        logger.info(f"Stopped Chrome on port {worker.port} for worker {worker_id}")
-                    except Exception:
-                        pass  # Chrome may already be gone
-            except Exception as e:
-                logger.warning(f"Error closing worker {worker_id}: {e}")
-
-        # Release the port
-        self._used_ports.discard(worker.port)
-
-        worker.mark_stopped()
-        del self._workers[worker_id]
-        logger.info(f"Worker {worker_id} removed (port {worker.port} released)")
-
-    # =========================================================================
-    # Job Management
-    # =========================================================================
-
-    async def submit(
-        self,
-        task_type: str,
-        *args,
-        max_retries: int | None = None,
-        _hold: bool = False,
-        **kwargs,
-    ) -> str:
-        """Submit a job to the pool.
-
-        Args:
-            task_type: Type of task (e.g., "create_video", "get_details")
-            *args: Positional arguments for the task
-            max_retries: Max retries for this job. None = use pool default.
-            _hold: If True, job is held until released by wait(). Use this when
-                you need to set up shared targets before jobs start executing.
-            **kwargs: Keyword arguments for the task
-
-        Returns:
-            job_id of the submitted job
-        """
-        job = Job(
-            task_type=task_type,
-            args=args,
-            kwargs=kwargs,
-            max_retries=max_retries if max_retries is not None else self._max_retries,
-        )
-
-        self._pending_jobs[job.job_id] = job
-        self._result_events[job.job_id] = asyncio.Event()
-
-        if _hold:
-            # Store in held_jobs instead of queue, will be released by wait()
-            async with self._held_jobs_lock:
-                self._held_jobs[job.job_id] = job
-            logger.debug(f"Submitted job {job.job_id}: {task_type} (held)")
-        else:
-            await self._job_queue.put(job)
-            logger.debug(f"Submitted job {job.job_id}: {task_type}")
-
-        return job.job_id
-
-    async def submit_batch(
-        self,
-        jobs: list[tuple[str, tuple, dict]],
-    ) -> list[str]:
-        """Submit multiple jobs at once.
-
-        Args:
-            jobs: List of (task_type, args, kwargs) tuples
-
-        Returns:
-            List of job_ids
-        """
-        job_ids = []
-        for task_type, args, kwargs in jobs:
-            job_id = await self.submit(task_type, *args, **kwargs)
-            job_ids.append(job_id)
-        return job_ids
-
-    def get_result(self, job_id: str) -> JobResult | None:
-        """Get result for a completed job.
-
-        Returns:
-            JobResult if completed, None if still pending.
-        """
-        return self._results.get(job_id)
-
-    async def wait_for(self, job_id: str, timeout: float | None = None) -> JobResult:
-        """Wait for a specific job to complete.
-
-        Args:
-            job_id: ID of the job to wait for
-            timeout: Max seconds to wait. None = wait forever.
-
-        Returns:
-            JobResult when the job completes
-
-        Raises:
-            asyncio.TimeoutError: If timeout exceeded
-            KeyError: If job_id not found
-        """
-        if job_id in self._results:
-            return self._results[job_id]
-
-        if job_id not in self._result_events:
-            raise KeyError(f"Job {job_id} not found")
-
-        await asyncio.wait_for(self._result_events[job_id].wait(), timeout=timeout)
-        return self._results[job_id]
-
-    async def wait(
-        self,
-        job_ids: list[str] | None = None,
-        min_success: int | None = None,
-        timeout: float | None = None,
-    ) -> dict[str, JobResult]:
-        """Wait for jobs to complete.
-
-        Flexible wait method that supports multiple modes:
-        - wait() - wait for ALL jobs in the pool to complete
-        - wait(job_ids=[...]) - wait for specific jobs to complete
-        - wait(job_ids=[...], min_success=10) - shared target across workers
-
-        Args:
-            job_ids: List of job IDs to monitor. None = wait for all jobs.
-            min_success: Shared target across all specified jobs. When provided,
-                workers stop when their COMBINED success_count reaches this target.
-                For create_image jobs, this works with per-job min_success - a job
-                stops when EITHER its per-job target OR the shared target is reached.
-            timeout: Max seconds to wait. None = wait forever.
-
-        Returns:
-            Dict of job_id -> JobResult for completed jobs
-
-        Raises:
-            asyncio.TimeoutError: If timeout exceeded
-            ValueError: If min_success is provided without job_ids
-
-        Examples:
-            # Wait for all jobs
-            results = await pool.wait()
-
-            # Wait for specific jobs
-            results = await pool.wait(job_ids=[job1, job2, job3])
-
-            # Shared target: workers stop when combined success reaches 10
-            results = await pool.wait(job_ids=[job1, job2, job3], min_success=10)
-        """
-        if min_success is not None and job_ids is None:
-            raise ValueError("min_success requires job_ids to be specified")
-
-        # Setup shared target for jobs that support progress_callback
-        if min_success is not None and job_ids:
-            shared = _SharedTarget(target=min_success)
-            for job_id in job_ids:
-                self._shared_targets[job_id] = shared
-            logger.info(f"[wait] Setup shared target: {min_success} across {len(job_ids)} jobs")
-
-        # Release any held jobs now that shared target is configured
-        async with self._held_jobs_lock:
-            released_count = len(self._held_jobs)
-            for job_id in list(self._held_jobs.keys()):
-                job = self._held_jobs.pop(job_id)
-                await self._job_queue.put(job)
-                logger.debug(f"Released held job {job_id}: {job.task_type}")
-            if released_count > 0:
-                logger.info(f"[wait] Released {released_count} held jobs")
-
-        start_time = asyncio.get_event_loop().time()
-
-        # Mode 1: Wait for all jobs in pool
-        if job_ids is None:
-            while True:
-                queues_empty = self._job_queue.empty() and self._priority_queue.empty()
-                if not self._pending_jobs and queues_empty:
-                    all_idle = all(w.status == WorkerStatus.IDLE for w in self._workers.values())
-                    if all_idle:
-                        break
-
-                if timeout is not None:
-                    elapsed = asyncio.get_event_loop().time() - start_time
-                    if elapsed >= timeout:
-                        raise asyncio.TimeoutError("Timeout waiting for all jobs")
-
-                await asyncio.sleep(0.5)
-
-            return self._results.copy()
-
-        # Mode 2 & 3: Wait for specific jobs (with optional min_success)
-        completed_jobs: dict[str, JobResult] = {}
-        total_success = 0
-        pending_ids = set(job_ids)
-
-        while pending_ids:
-            # Check for newly completed jobs FIRST (before timeout check)
-            # This ensures we don't timeout right after selection phase ends
-            for job_id in list(pending_ids):
-                if job_id in self._results:
-                    result = self._results[job_id]
-                    completed_jobs[job_id] = result
-                    pending_ids.remove(job_id)
-
-                    # Track success count if min_success is set
-                    if min_success is not None and result.success and result.data:
-                        success_count = result.data.get("success_count", 0)
-                        total_success += success_count
-                        logger.info(
-                            f"[wait] Job {job_id[:8]}... completed: "
-                            f"+{success_count} success, total={total_success}/{min_success}"
-                        )
-
-                        if total_success >= min_success:
-                            logger.info(
-                                f"[wait] Target reached! "
-                                f"{total_success}/{min_success} success from "
-                                f"{len(completed_jobs)} jobs"
-                            )
-                            # Wait for any jobs still in selection phase to complete
-                            # This ensures we collect their post_ids
-                            if self._jobs_in_selection:
-                                logger.info(
-                                    f"[wait] Waiting for {len(self._jobs_in_selection)} "
-                                    f"jobs in selection phase to complete..."
-                                )
-                                while self._jobs_in_selection:
-                                    # Collect any newly completed jobs
-                                    for jid in list(pending_ids):
-                                        if jid in self._results:
-                                            result = self._results[jid]
-                                            completed_jobs[jid] = result
-                                            pending_ids.remove(jid)
-                                    await asyncio.sleep(0.5)
-                                logger.info("[wait] All selection phases completed")
-                            return completed_jobs
-
-            # All jobs completed? Return now
-            if not pending_ids:
-                break
-
-            # Check timeout (skip if any jobs are in human selection phase)
-            if timeout is not None and not self._jobs_in_selection:
-                elapsed = asyncio.get_event_loop().time() - start_time
-                if elapsed >= timeout:
-                    if min_success is not None:
-                        raise asyncio.TimeoutError(
-                            f"Timeout waiting for min_success. "
-                            f"Got {total_success}/{min_success} success."
-                        )
-                    raise asyncio.TimeoutError("Timeout waiting for jobs")
-
-            await asyncio.sleep(0.5)
-
-        return completed_jobs
-
-    # =========================================================================
-    # State Management
-    # =========================================================================
-
-    def save_state(self) -> None:
-        """Save current state to file."""
-        if self._state_file is None:
+        if not worker.client:
             return
 
-        # Ensure parent directory exists
-        self._state_file.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            # First, call __aexit__ to save cookies and release CDP connection
+            # This must happen BEFORE killing Chrome, otherwise cookies can't be saved
+            await worker.client.__aexit__(None, None, None)
 
-        # Collect current state
-        pending = list(self._pending_jobs.values())
-        in_progress = [w.current_job for w in self._workers.values() if w.current_job]
-
-        self._state.completed = self._results.copy()
-        self._state.pending = pending
-        self._state.in_progress = in_progress
-
-        save_state(self._state, self._state_file)
-        logger.debug(f"State saved: {len(self._results)} completed, {len(pending)} pending")
-
-    # =========================================================================
-    # Properties
-    # =========================================================================
-
-    @property
-    def pending_count(self) -> int:
-        """Number of pending jobs (both queues)."""
-        return len(self._pending_jobs) + self._job_queue.qsize() + self._priority_queue.qsize()
-
-    @property
-    def completed_count(self) -> int:
-        """Number of completed jobs."""
-        return len(self._results)
-
-    @property
-    def worker_count(self) -> int:
-        """Number of active workers."""
-        return len(self._workers)
-
-    @property
-    def worker_stats(self) -> dict[int, WorkerStats]:
-        """Get statistics for all workers."""
-        return {w_id: w.stats for w_id, w in self._workers.items()}
-
-    def get_status(self) -> dict[str, Any]:
-        """Get full status of the pool."""
-        return {
-            "running": self._running,
-            "workers": {w_id: w.to_dict() for w_id, w in self._workers.items()},
-            "pending_jobs": len(self._pending_jobs),
-            "queue_size": self._job_queue.qsize(),
-            "priority_queue_size": self._priority_queue.qsize(),
-            "completed_jobs": len(self._results),
-            "success_count": sum(1 for r in self._results.values() if r.success),
-            "fail_count": sum(1 for r in self._results.values() if not r.success),
-        }
-
-    # =========================================================================
-    # Internal Methods
-    # =========================================================================
-
-    def _check_browser_alive(self, worker: Worker) -> bool:
-        """Check if the worker's Chrome is still reachable."""
-        if not worker.port:
-            return False
-        return is_port_in_use(port=worker.port)
-
-    async def _fail_all_pending_jobs(self, worker: Worker, reason: str) -> None:
-        """Fail all remaining pending jobs for a dead worker."""
-        # Drain queues and fail everything
-        drained: list[Job] = []
-        while not self._priority_queue.empty():
-            with contextlib.suppress(asyncio.QueueEmpty):
-                drained.append(self._priority_queue.get_nowait())
-        while not self._job_queue.empty():
-            with contextlib.suppress(asyncio.QueueEmpty):
-                drained.append(self._job_queue.get_nowait())
-
-        for job in drained:
-            result = JobResult(
-                job_id=job.job_id,
-                success=False,
-                error=reason,
-                worker_id=worker.worker_id,
-            )
-            self._results[job.job_id] = result
-            self._pending_jobs.pop(job.job_id, None)
-            job.status = JobStatus.FAILED
-            if job.job_id in self._result_events:
-                self._result_events[job.job_id].set()
+            # Then, terminate Chrome if close_browsers is True
+            if self._close_browsers and worker.port:
+                try:
+                    browser_stop(port=worker.port)
+                    logger.info(
+                        f"Stopped Chrome on port {worker.port} for worker {worker.worker_id}"
+                    )
+                except Exception:
+                    pass  # Chrome may already be gone
+        except Exception as e:
+            logger.warning(f"Error closing worker {worker.worker_id}: {e}")
 
     async def _worker_loop(self, worker: Worker) -> None:
-        """Main loop for a worker - pulls jobs from queue and executes them."""
+        """Main loop for a worker - pulls jobs from queue and executes them.
+
+        Extends base _worker_loop with consecutive failure detection:
+        after 3+ consecutive failures, checks if Chrome is still alive
+        and fails all pending jobs if not.
+        """
         consecutive_failures = 0
         max_consecutive_failures = 3
 
@@ -655,14 +207,12 @@ class BrowserWorkerPool:
 
                     # Check fail_condition (soft failure)
                     if self._fail_condition and self._fail_condition(result_data):
-                        # Soft failure - requeue
                         await self._handle_job_failure(
                             worker, job, f"fail_condition returned True: {result_data}"
                         )
                         consecutive_failures += 1
                     else:
-                        # Success: AND business_success with other conditions
-                        # business_success comes from result.success (e.g., VideoGenerationResult)
+                        # Success
                         result = JobResult(
                             job_id=job.job_id,
                             success=business_success,
@@ -673,11 +223,9 @@ class BrowserWorkerPool:
                         worker.stats.success += 1
                         worker.stats.total_time += elapsed
 
-                        # Remove from pending
                         self._pending_jobs.pop(job.job_id, None)
                         job.status = JobStatus.COMPLETED
 
-                        # Signal waiters
                         if job.job_id in self._result_events:
                             self._result_events[job.job_id].set()
 
@@ -688,7 +236,6 @@ class BrowserWorkerPool:
                         consecutive_failures = 0
 
                 except Exception as e:
-                    # Hard failure - exception raised
                     await self._handle_job_failure(worker, job, str(e))
                     consecutive_failures += 1
 
@@ -696,7 +243,7 @@ class BrowserWorkerPool:
                     worker.mark_idle()
                     self.save_state()
 
-                # Fail-fast: if too many consecutive failures, check browser health
+                # Grok-specific: fail-fast if browser is dead
                 if (
                     consecutive_failures >= max_consecutive_failures
                     and not self._check_browser_alive(worker)
@@ -715,237 +262,35 @@ class BrowserWorkerPool:
                 logger.error(f"Worker {worker.worker_id} loop error: {e}")
                 await asyncio.sleep(1)  # Prevent tight loop on error
 
-    async def _handle_job_failure(self, worker: Worker, job: Job, error: str) -> None:
-        """Handle job failure - retry or mark as failed.
+    # =========================================================================
+    # Grok-specific health checks
+    # =========================================================================
 
-        Args:
-            worker: The worker that executed the job
-            job: The failed job
-            error: Error message describing the failure
-        """
-        job.retries += 1
-        worker.stats.fail += 1
+    def _check_browser_alive(self, worker: Worker) -> bool:
+        """Check if the worker's Chrome is still reachable."""
+        if not worker.port:
+            return False
+        return is_port_in_use(port=worker.port)
 
-        if job.max_retries == -1 or job.retries < job.max_retries:
-            # Re-queue for retry
-            job.status = JobStatus.PENDING
-            if self._requeue_position == "front":
-                await self._priority_queue.put(job)
-            else:
-                await self._job_queue.put(job)
-            logger.warning(
-                f"Worker {worker.worker_id} failed {job.task_type} "
-                f"({job.job_id[:8]}...), retry {job.retries}: {error}"
-            )
-        else:
-            # Max retries exceeded
+    async def _fail_all_pending_jobs(self, worker: Worker, reason: str) -> None:
+        """Fail all remaining pending jobs for a dead worker."""
+        drained: list[Job] = []
+        while not self._priority_queue.empty():
+            with contextlib.suppress(asyncio.QueueEmpty):
+                drained.append(self._priority_queue.get_nowait())
+        while not self._job_queue.empty():
+            with contextlib.suppress(asyncio.QueueEmpty):
+                drained.append(self._job_queue.get_nowait())
+
+        for job in drained:
             result = JobResult(
                 job_id=job.job_id,
                 success=False,
-                error=error,
+                error=reason,
                 worker_id=worker.worker_id,
             )
             self._results[job.job_id] = result
             self._pending_jobs.pop(job.job_id, None)
             job.status = JobStatus.FAILED
-
             if job.job_id in self._result_events:
                 self._result_events[job.job_id].set()
-
-            logger.error(
-                f"Worker {worker.worker_id} failed {job.task_type} "
-                f"({job.job_id[:8]}...) after {job.retries} retries: {error}"
-            )
-
-    def _make_shared_progress_callback(
-        self,
-        job_id: str,
-        shared_state: dict[str, int],
-        target: int,
-    ) -> Callable[[int], Awaitable[bool]]:
-        """Create progress callback for shared target mode.
-
-        Args:
-            job_id: This job's ID
-            shared_state: Dict shared across all workers {job_id: success_count}
-            target: Total success target across all workers
-
-        Returns:
-            Callback that reports progress and returns False when target reached.
-        """
-
-        async def callback(current_success: int) -> bool:
-            shared_state[job_id] = current_success
-            total = sum(shared_state.values())
-            should_continue = total < target
-            if not should_continue:
-                logger.info(f"[shared_target] Total {total} >= {target}, signaling stop")
-            return should_continue
-
-        return callback
-
-    def _wrap_selector(
-        self,
-        job_id: str,
-        original_selector: Callable,
-    ) -> Callable:
-        """Wrap thumbnail_selector to track selection phase.
-
-        This wrapper adds job_id to _jobs_in_selection when selection starts
-        and removes it when selection ends. wait() uses this to pause timeout
-        during human selection phases.
-
-        Args:
-            job_id: The job ID to track
-            original_selector: The original thumbnail_selector callback
-
-        Returns:
-            Wrapped selector that tracks selection phase.
-        """
-
-        async def wrapped_selector(item_count: int, scan_favorites) -> list[int]:
-            self._jobs_in_selection.add(job_id)
-            logger.info(f"[selection] Job {job_id[:8]}... entering selection phase")
-            try:
-                return await original_selector(item_count, scan_favorites)
-            finally:
-                self._jobs_in_selection.discard(job_id)
-                logger.info(f"[selection] Job {job_id[:8]}... exited selection phase")
-
-        return wrapped_selector
-
-    def _serialize_result(self, result: Any) -> Any:
-        """Convert result to JSON-serializable format.
-
-        Uses Pydantic's model_dump() if available, otherwise smart conversion.
-        This ensures consistent serialization across all task types while maintaining
-        zero maintenance overhead.
-
-        Args:
-            result: The result object from client method call
-
-        Returns:
-            JSON-serializable dict, list, or primitive value
-        """
-        # Pydantic models (VideoGenerationResult, PostDetails, etc.)
-        if hasattr(result, "model_dump"):
-            return result.model_dump(
-                mode="python",
-                exclude_none=True,  # Skip None values for cleaner output
-                exclude_unset=False,
-            )
-
-        # List of results (e.g., list_posts returns List[PostSummary])
-        if isinstance(result, list):
-            return [self._serialize_result(item) for item in result]
-
-        # Already serializable primitive types
-        if isinstance(result, dict | str | int | float | bool | type(None)):
-            return result
-
-        # Objects with to_dict() method (legacy support)
-        if hasattr(result, "to_dict") and callable(result.to_dict):
-            return result.to_dict()
-
-        # Fallback: convert __dict__ to dict, excluding private attributes
-        if hasattr(result, "__dict__"):
-            return {k: v for k, v in result.__dict__.items() if not k.startswith("_")}
-
-        # Return as-is (will fail during JSON serialization if not compatible)
-        return result
-
-    async def _execute_job(self, worker: Worker, job: Job) -> tuple[Any, bool]:
-        """Execute a job by dynamically calling the client method.
-
-        The task_type directly maps to GrokClient method names.
-        This approach maintains zero maintenance overhead - adding new client methods
-        automatically makes them available through the worker pool.
-
-        Examples:
-            task_type="create_video" → calls client.create_video(*args, **kwargs)
-            task_type="list_posts" → calls client.list_posts(*args, **kwargs)
-            task_type="delete_video" → calls client.delete_video(*args, **kwargs)
-
-        Args:
-            worker: The worker to use
-            job: The job to execute
-
-        Returns:
-            Tuple of (result_data, business_success):
-            - result_data: JSON-serializable result (automatically serialized)
-            - business_success: True if result.success is True or not defined
-
-        Raises:
-            RuntimeError: If worker has no client
-            ValueError: If task_type doesn't match any client method
-            AttributeError: If task_type is not callable
-        """
-        client = worker.client
-        if client is None:
-            raise RuntimeError(f"Worker {worker.worker_id} has no client")
-
-        # Copy kwargs to avoid modifying original job
-        kwargs = dict(job.kwargs)
-
-        # Extract ui_delay if present (for UI operations)
-        ui_delay = kwargs.pop("ui_delay", None)
-        if ui_delay is not None:
-            original_ui_delay = client._ui_delay
-            client._ui_delay = ui_delay
-
-        try:
-            # Dynamic method lookup - task_type must match a client method name
-            try:
-                method = getattr(client, job.task_type)
-            except AttributeError:
-                # Provide helpful error message with available methods
-                available = [
-                    m
-                    for m in dir(client)
-                    if not m.startswith("_") and callable(getattr(client, m, None))
-                ]
-                raise ValueError(
-                    f"Unknown task_type: '{job.task_type}'. "
-                    f"Available client methods: {', '.join(sorted(available)[:20])}..."
-                ) from None
-
-            # Verify it's callable
-            if not callable(method):
-                raise ValueError(f"task_type '{job.task_type}' is not a callable method")
-
-            # Inject progress_callback for shared target mode (if method supports it)
-            shared_target = self._shared_targets.get(job.job_id)
-            if shared_target is not None:
-                # Check if method accepts progress_callback parameter
-                sig = inspect.signature(method)
-                if "progress_callback" in sig.parameters:
-                    kwargs["progress_callback"] = self._make_shared_progress_callback(
-                        job.job_id, shared_target.state, shared_target.target
-                    )
-                    # If user didn't set min_success, default to shared target value
-                    # If user DID set min_success, honor both (callback AND min_success)
-                    if "min_success" in sig.parameters and "min_success" not in kwargs:
-                        kwargs["min_success"] = shared_target.target
-
-            # Wrap thumbnail_selector to track selection phase (for timeout handling)
-            original_selector = kwargs.get("thumbnail_selector")
-            if original_selector is not None:
-                kwargs["thumbnail_selector"] = self._wrap_selector(job.job_id, original_selector)
-
-            # Call the method with job args/kwargs
-            result = await method(*job.args, **kwargs)
-
-            # Check if result has a .success property (business-level success)
-            # e.g., VideoGenerationResult.success = progress == 100 and not moderated
-            if hasattr(result, "success") and isinstance(result.success, bool):
-                business_success = result.success
-            else:
-                business_success = True  # Default to True if no .success property
-
-            # Serialize result to JSON-compatible format
-            return self._serialize_result(result), business_success
-
-        finally:
-            # Restore original ui_delay
-            if ui_delay is not None:
-                client._ui_delay = original_ui_delay

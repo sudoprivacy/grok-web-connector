@@ -17,10 +17,12 @@ import json
 import time
 from pathlib import Path
 
+from ai_dev_browser import DEFAULT_DEBUG_PORT
+from ai_dev_browser.core import browser_start
 from ai_dev_browser.core.connection import connect_browser
 
 from .auth import DEFAULT_CONFIG_PATH
-from .browser import DEFAULT_DEBUG_PORT, ensure_chrome_running
+from .client import GROK_CHROME_PROFILE
 
 # Cookies we need from Grok
 REQUIRED_COOKIES = {"sso", "sso-rw", "x-userid", "cf_clearance"}
@@ -94,12 +96,16 @@ class AuthManager:
 
         browser = None
         try:
-            # Launch Chrome (ensure_chrome_running returns tuple of (process, actual_port))
+            # Launch Chrome via ai-dev-browser
             print("🌐 Launching Chrome...")
-            _, actual_port = await ensure_chrome_running(
+            result = browser_start(
                 port=DEFAULT_DEBUG_PORT,
                 headless=headless,
+                profile=GROK_CHROME_PROFILE,
             )
+            if "error" in result:
+                raise RuntimeError(result["error"])
+            actual_port = result["port"]
 
             # Connect to Chrome
             browser = await connect_browser(

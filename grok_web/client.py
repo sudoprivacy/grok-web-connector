@@ -14,6 +14,8 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
+from ai_dev_browser.core.config import DEFAULT_DEBUG_HOST
+
 from ._internal import (
     MEDIA_POST_GET_ENDPOINT,
     MEDIA_POST_LIKE_ENDPOINT,
@@ -23,7 +25,6 @@ from ._internal import (
     parse_video_ndjson_response,
 )
 from .auth import DEFAULT_CONFIG_PATH, load_config, save_cookies
-from .browser import DEFAULT_DEBUG_HOST
 from .exceptions import GrokAPIError, GrokAuthError, GrokNotFoundError
 from .models import (
     MODE_TXT2VID,
@@ -47,6 +48,9 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 # Constants
 # =============================================================================
+
+# Named profile for grok Chrome (persistent across runs)
+GROK_CHROME_PROFILE = "grok-chrome"
 
 # x-statsig-id is required for Grok API requests
 # This is a Statsig SDK client ID, reusable across requests
@@ -163,9 +167,8 @@ class GrokClient(ResponseParser):
         import asyncio
 
         from ai_dev_browser import cdp
+        from ai_dev_browser.core import browser_start
         from ai_dev_browser.core.connection import connect_browser
-
-        from .browser import ensure_chrome_running
 
         # Load cookies (deferred from __init__)
         if self._provided_cookies is not None:
@@ -177,13 +180,24 @@ class GrokClient(ResponseParser):
         actual_port = self._remote_port  # Default to requested port
         if self._auto_launch:
             try:
-                self._chrome_process, actual_port = await ensure_chrome_running(
-                    host=self._remote_host,
-                    port=self._remote_port,
-                    headless=self._headless,
-                    force_new=self._force_new_chrome,
-                    profile=self._profile,
-                )
+                profile_name = self._profile or GROK_CHROME_PROFILE
+                kwargs = {"headless": self._headless, "profile": profile_name}
+                if self._remote_port is not None:
+                    kwargs["port"] = self._remote_port
+                if self._force_new_chrome:
+                    kwargs["reuse"] = "none"
+
+                result = browser_start(**kwargs)
+                if "error" in result:
+                    raise RuntimeError(result["error"])
+
+                actual_port = result["port"]
+                if result.get("reused"):
+                    logger.info(f"Reusing Chrome on port {actual_port} (profile: {profile_name})")
+                else:
+                    logger.info(
+                        f"Started new Chrome on port {actual_port} (profile: {profile_name})"
+                    )
             except FileNotFoundError as e:
                 raise GrokAPIError(str(e)) from e
             except (TimeoutError, RuntimeError) as e:
