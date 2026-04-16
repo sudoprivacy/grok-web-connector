@@ -53,7 +53,12 @@ from .schema import (
 )
 from .selectors import select_all, signal_file_selector, timeout_selector
 
-__version__ = "0.6.0"
+try:
+    from importlib.metadata import version
+
+    __version__ = version("grok-web-connector")
+except Exception:
+    __version__ = "0.0.0"
 
 
 def get_client(
