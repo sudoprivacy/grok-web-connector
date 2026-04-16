@@ -1869,7 +1869,6 @@ class GrokClient(ResponseParser):
             click_submit,
             navigate_to_imagine,
             remove_all_images,
-            remove_moderated_images,
             set_mode,
             set_prompt,
             set_prompt_with_refs,
@@ -1895,16 +1894,12 @@ class GrokClient(ResponseParser):
         if moderated:
             total = len(image_paths)
             mod_indices = [i + 1 for i in moderated]  # 1-based for user
-            logger.warning(f"Moderated images detected: {mod_indices} of {total}")
-            # Remove moderated images so submit isn't blocked
-            removed = await remove_moderated_images(self._tab, delay=self._ui_delay)
-            remaining = total - removed
-            if remaining == 0:
-                raise GrokAPIError(
-                    f"All {total} images were moderated by Grok. "
-                    "Cannot proceed with video generation."
-                )
-            logger.info(f"Removed {removed} moderated images, {remaining} remaining")
+            mod_files = [str(image_paths[i]) for i in moderated if i < len(image_paths)]
+            raise GrokAPIError(
+                f"{len(moderated)} of {total} images were moderated by Grok "
+                f"(images {mod_indices}): {mod_files}. "
+                "All images must pass moderation to proceed."
+            )
 
         # Step 3: Switch to video mode
         await set_mode(self._tab, "视频", delay=self._ui_delay)
