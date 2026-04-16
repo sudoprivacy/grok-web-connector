@@ -113,8 +113,11 @@ async def _count_uploaded_images(tab) -> int:
 async def check_moderated_images(tab) -> list[int]:
     """Check which uploaded images have been moderated by Grok.
 
-    Moderated images show a warning triangle overlay (lucide-triangle-alert SVG
-    with backdrop-blur-sm) but remain in the UI with their 'Remove image' button.
+    Moderated images show a warning triangle overlay (lucide-triangle-alert SVG)
+    but remain in the UI with their 'Remove image' button.
+
+    Finds image containers by walking up from each 'Remove image' button
+    to avoid fragile CSS group selectors.
 
     Returns:
         List of 0-based indices of moderated images.
@@ -122,13 +125,11 @@ async def check_moderated_images(tab) -> list[int]:
     result = await tab.evaluate(
         """
         (function() {
-            const containers = document.querySelectorAll(
-                '.group\\/current-files .relative.shrink-0'
-            );
+            const buttons = document.querySelectorAll('button[aria-label="Remove image"]');
             const moderated = [];
-            containers.forEach((c, i) => {
-                if (c.querySelector('.lucide-triangle-alert') ||
-                    c.querySelector('.backdrop-blur-sm')) {
+            buttons.forEach(function(btn, i) {
+                var container = btn.closest('.relative.shrink-0') || btn.parentElement;
+                if (container && container.querySelector('.lucide-triangle-alert')) {
                     moderated.push(i);
                 }
             });
@@ -164,14 +165,10 @@ async def remove_moderated_images(tab, *, delay: float = 1.0) -> int:
         success = await tab.evaluate(
             f"""
             (function() {{
-                const containers = document.querySelectorAll(
-                    '.group\\/current-files .relative.shrink-0'
-                );
-                if ({idx} < containers.length) {{
-                    const btn = containers[{idx}].querySelector(
-                        'button[aria-label="Remove image"]'
-                    );
-                    if (btn) {{ btn.click(); return true; }}
+                var buttons = document.querySelectorAll('button[aria-label="Remove image"]');
+                if ({idx} < buttons.length) {{
+                    buttons[{idx}].click();
+                    return true;
                 }}
                 return false;
             }})()
