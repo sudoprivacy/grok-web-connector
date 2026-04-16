@@ -2658,7 +2658,6 @@ class GrokClient(ResponseParser):
         images = p.get("images", [])
         prompt = p.get("prompt", "")
         timeout = p.get("timeout", 300)
-        aspect_ratio = p.get("aspect_ratio", "2:3")
 
         # Normalize duration to int
         duration = p.get("duration", "10s")
@@ -2668,6 +2667,13 @@ class GrokClient(ResponseParser):
         resolution = p.get("resolution", "720p")
         preset = p.get("preset", "normal")
         wait_for_video = p.get("wait_for_video", True)
+
+        # aspect_ratio: default "2:3" for txt2vid, None for upload2vid
+        # (Grok UI hides aspect ratio dropdown for multi-image uploads)
+        if "aspect_ratio" in params:
+            aspect_ratio = p["aspect_ratio"]
+        else:
+            aspect_ratio = "2:3" if not images else None
 
         if not images:
             # txt2vid — text prompt only
