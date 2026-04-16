@@ -15,8 +15,11 @@ from typing import Any
 
 from .exceptions import GrokAPIError, GrokRateLimitError
 from .models import (
+    MODE_IMG2VID,
+    MODE_TXT2VID,
+    MODE_UNKNOWN,
+    MODE_UPLOAD2VID,
     ChildPost,
-    GenerationMode,
     PostDetails,
     PostSummary,
     VideoGenerationResult,
@@ -115,24 +118,27 @@ class ResponseParser:
     # Parsing methods
     # =========================================================================
 
-    def _detect_generation_mode(self, post_data: dict) -> GenerationMode:
-        """Detect generation mode from post metadata."""
+    def _detect_generation_mode(self, post_data: dict) -> str:
+        """Detect generation mode from post metadata.
+
+        Returns plain string: 'txt2img', 'img2vid', 'txt2vid', 'upload2vid', or 'unknown'.
+        """
         media_type = post_data.get("mediaType", "")
         prompt = post_data.get("prompt")
         mode = post_data.get("mode")
 
         if media_type == "MEDIA_POST_TYPE_VIDEO":
             if mode == "text":
-                return GenerationMode.TEXT_TO_VIDEO
-            return GenerationMode.UNKNOWN
+                return MODE_TXT2VID
+            return MODE_UNKNOWN
 
         if media_type == "MEDIA_POST_TYPE_IMAGE":
             if prompt:
-                return GenerationMode.GROK_IMAGE_TO_VIDEO
+                return MODE_IMG2VID
             else:
-                return GenerationMode.UPLOAD_IMAGE_TO_VIDEO
+                return MODE_UPLOAD2VID
 
-        return GenerationMode.UNKNOWN
+        return MODE_UNKNOWN
 
     def _parse_timestamp(self, value: Any) -> datetime | None:
         """Parse ISO timestamp string to datetime."""

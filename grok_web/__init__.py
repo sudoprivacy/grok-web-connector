@@ -5,7 +5,7 @@ Grok Web Connector - Python client for Grok Imagine web API.
 
     async with get_client() as client:
         posts = await client.list_posts()
-        video = await client.create_video("zoom in", source_post_id=post_id)
+        video = await client.create_video({"images": ["post:" + post_id], "prompt": "zoom in"})
 
 All APIs are public methods on GrokClient (see grok_web/client.py).
 For parallel processing, see BrowserWorkerPool (grok_web/pool/).
@@ -24,8 +24,12 @@ from .exceptions import (
     GrokRateLimitError,
 )
 from .models import (
+    MODE_IMG2VID,
+    MODE_TXT2IMG,
+    MODE_TXT2VID,
+    MODE_UNKNOWN,
+    MODE_UPLOAD2VID,
     ChildPost,
-    GenerationMode,
     GrokCookies,
     ImageEditResult,
     ImageGenerationResult,
@@ -35,9 +39,18 @@ from .models import (
     VideoExtendResult,
     VideoGenerationResult,
     VideoMatchResult,
-    VideoPreset,
 )
 from .pool import BrowserWorkerPool
+from .prompt_parser import classify_image_source, parse_prompt
+from .schema import (
+    EDIT_KEYS,
+    IMAGE_KEYS,
+    PARAMS,
+    VIDEO_KEYS,
+    schema_to_docstring,
+    schema_to_help,
+    validate_params,
+)
 from .selectors import select_all, signal_file_selector, timeout_selector
 
 __version__ = "0.6.0"
@@ -69,7 +82,7 @@ def get_client(
         async with get_client() as client:
             posts = await client.list_posts()
             await client.favorite_post(posts[0].id)
-            video = await client.create_video("zoom in", source_post_id=posts[0].id, preset="fun")
+            video = await client.create_video({"images": ["post:" + posts[0].id], "prompt": "zoom in"})
     """
     return GrokClient(
         cookies=cookies,
@@ -87,11 +100,27 @@ __all__ = [
     "GrokClient",
     # Worker Pool (for parallel processing)
     "BrowserWorkerPool",
+    # Schema (SSOT for params)
+    "PARAMS",
+    "VIDEO_KEYS",
+    "IMAGE_KEYS",
+    "EDIT_KEYS",
+    "schema_to_docstring",
+    "schema_to_help",
+    "validate_params",
+    # Prompt parser
+    "parse_prompt",
+    "classify_image_source",
+    # Generation mode constants
+    "MODE_TXT2IMG",
+    "MODE_IMG2VID",
+    "MODE_TXT2VID",
+    "MODE_UPLOAD2VID",
+    "MODE_UNKNOWN",
     # Models
     "PostSummary",
     "PostDetails",
     "ChildPost",
-    "GenerationMode",
     "GrokCookies",
     "ImageEditResult",
     "ImageGenerationResult",
@@ -99,7 +128,6 @@ __all__ = [
     "VideoMatchResult",
     "VideoExtendResult",
     "VideoGenerationResult",
-    "VideoPreset",
     # Exceptions
     "GrokError",
     "GrokAuthError",

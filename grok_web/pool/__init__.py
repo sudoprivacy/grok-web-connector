@@ -7,7 +7,9 @@ Example:
     async with BrowserWorkerPool(num_workers=3, state_file="progress.json") as pool:
         # Submit jobs
         for command in ["Orbit", "Pan Left", "Static Shot"]:
-            await pool.submit("create_video", post_id="abc123", adjustment_prompt=command)
+            await pool.submit("create_video", {
+                "images": ["post:abc123"], "prompt": command,
+            })
 
         # Dynamically add worker
         await pool.add_worker()

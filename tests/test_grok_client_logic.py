@@ -10,7 +10,7 @@ import pytest
 
 from grok_web._internal import ResponseParser
 from grok_web.exceptions import GrokAPIError
-from grok_web.models import GenerationMode, PostDetails
+from grok_web.models import MODE_IMG2VID, MODE_TXT2VID, PostDetails
 
 
 class TestResponseParserHelpers:
@@ -64,7 +64,7 @@ class TestResponseParserHelpers:
         details = PostDetails(
             id="child-video-id",
             user_id="user-123",
-            mode=GenerationMode.GROK_IMAGE_TO_VIDEO,
+            mode=MODE_IMG2VID,
             created_at=datetime.now(timezone.utc),
             raw_data={"post": {"originalPostId": "parent-post-id"}},
         )
@@ -79,7 +79,7 @@ class TestResponseParserHelpers:
         details = PostDetails(
             id="parent-video-id",
             user_id="user-123",
-            mode=GenerationMode.TEXT_TO_VIDEO,
+            mode=MODE_TXT2VID,
             created_at=datetime.now(timezone.utc),
             raw_data={"post": {"originalPostId": "parent-video-id"}},
         )
@@ -94,7 +94,7 @@ class TestResponseParserHelpers:
         details = PostDetails(
             id="video-id",
             user_id="user-123",
-            mode=GenerationMode.TEXT_TO_VIDEO,
+            mode=MODE_TXT2VID,
             created_at=datetime.now(timezone.utc),
             raw_data={"post": {}},
         )
@@ -109,7 +109,7 @@ class TestResponseParserHelpers:
         details = PostDetails(
             id="video-id",
             user_id="user-123",
-            mode=GenerationMode.TEXT_TO_VIDEO,
+            mode=MODE_TXT2VID,
             created_at=datetime.now(timezone.utc),
             raw_data=None,
         )
@@ -164,7 +164,7 @@ class TestResponseParserHelpers:
         details = PostDetails(
             id="video-id",
             user_id="user-123",
-            mode=GenerationMode.GROK_IMAGE_TO_VIDEO,
+            mode=MODE_IMG2VID,
             original_prompt="Orbit camera",
             created_at=datetime.now(timezone.utc),
         )
@@ -180,7 +180,7 @@ class TestResponseParserHelpers:
         assert result.parent_id == "parent-123"
         assert result.video_id == "video-456"
         assert result.is_parent_video is False
-        assert result.mode == GenerationMode.GROK_IMAGE_TO_VIDEO
+        assert result.mode == MODE_IMG2VID
         assert result.original_prompt == "Orbit camera"
         assert result.file_size == 12345
         assert result.new_filename == "grok-video_parent-123_video-456.mp4"
@@ -190,7 +190,7 @@ class TestResponseParserHelpers:
         details = PostDetails(
             id="parent-video-id",
             user_id="user-123",
-            mode=GenerationMode.TEXT_TO_VIDEO,
+            mode=MODE_TXT2VID,
             original_prompt="A cat playing",
             created_at=datetime.now(timezone.utc),
         )
@@ -206,7 +206,7 @@ class TestResponseParserHelpers:
         assert result.parent_id == "parent-123"
         assert result.video_id == "parent-123"
         assert result.is_parent_video is True
-        assert result.mode == GenerationMode.TEXT_TO_VIDEO
+        assert result.mode == MODE_TXT2VID
         assert result.file_size == 54321
         assert result.new_filename == "grok-video_parent-123_parent-123.mp4"
 
@@ -219,7 +219,7 @@ class TestResponseParserHelpers:
         details = PostDetails(
             id="video-id",
             user_id="user-123",
-            mode=GenerationMode.GROK_IMAGE_TO_VIDEO,
+            mode=MODE_IMG2VID,
             created_at=datetime.now(timezone.utc),
             media_url="https://example.com/video.mp4",
             hd_media_url="https://example.com/video_hd.mp4",
@@ -234,7 +234,7 @@ class TestResponseParserHelpers:
         details = PostDetails(
             id="video-id",
             user_id="user-123",
-            mode=GenerationMode.GROK_IMAGE_TO_VIDEO,
+            mode=MODE_IMG2VID,
             created_at=datetime.now(timezone.utc),
             media_url="https://example.com/video.mp4",
             hd_media_url=None,
@@ -249,7 +249,7 @@ class TestResponseParserHelpers:
         details = PostDetails(
             id="video-id",
             user_id="user-123",
-            mode=GenerationMode.GROK_IMAGE_TO_VIDEO,
+            mode=MODE_IMG2VID,
             created_at=datetime.now(timezone.utc),
             media_url=None,
             hd_media_url=None,
@@ -263,7 +263,7 @@ class TestResponseParserHelpers:
         details = PostDetails(
             id="video-id",
             user_id="user-123",
-            mode=GenerationMode.GROK_IMAGE_TO_VIDEO,
+            mode=MODE_IMG2VID,
             created_at=datetime.now(timezone.utc),
         )
 

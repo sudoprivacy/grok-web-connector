@@ -1,28 +1,19 @@
 """Data models for Grok Web Connector."""
 
 from datetime import datetime
-from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 
+# =============================================================================
+# Generation mode constants
+# =============================================================================
 
-class GenerationMode(str, Enum):
-    """Grok Imagine generation modes (4 pipelines)."""
-
-    TEXT_TO_IMAGE = "txt2img"  # Text→Image (starting point for long videos)
-    GROK_IMAGE_TO_VIDEO = "img2vid"  # Grok-generated image→Video
-    TEXT_TO_VIDEO = "txt2vid"  # Text→Video directly
-    UPLOAD_IMAGE_TO_VIDEO = "upload2vid"  # Upload external image→Video
-    UNKNOWN = "unknown"
-
-
-class VideoPreset(str, Enum):
-    """Video generation presets (UI buttons: Normal, Fun, Spicy)."""
-
-    NORMAL = "normal"  # Standard video generation
-    FUN = "extremely-crazy"  # More dynamic/creative motion
-    SPICY = "extremely-spicy-or-crazy"  # Most permissive content filter
+MODE_TXT2IMG = "txt2img"
+MODE_IMG2VID = "img2vid"
+MODE_TXT2VID = "txt2vid"
+MODE_UPLOAD2VID = "upload2vid"
+MODE_UNKNOWN = "unknown"
 
 
 class ChildPost(BaseModel):
@@ -95,7 +86,9 @@ class PostSummary(BaseModel):
     """Summary of a post for list_posts() response."""
 
     id: str = Field(..., description="Post UUID")
-    mode: GenerationMode = Field(..., description="Generation mode")
+    mode: str = Field(
+        ..., description="Generation mode (txt2img, img2vid, txt2vid, upload2vid, unknown)"
+    )
 
     # Preview info
     prompt_preview: str | None = Field(None, description="First 100 chars of prompt")
@@ -124,7 +117,9 @@ class PostDetails(BaseModel):
 
     id: str = Field(..., description="Post UUID")
     user_id: str | None = Field(None, description="Owner's user UUID")
-    mode: GenerationMode = Field(..., description="Detected generation mode")
+    mode: str = Field(
+        ..., description="Detected generation mode (txt2img, img2vid, txt2vid, upload2vid, unknown)"
+    )
 
     # Parent post info
     media_type: str | None = Field(
@@ -244,7 +239,9 @@ class ImageVideoMapping(BaseModel):
 
     post_id: str = Field(..., description="Source image post ID")
     media_url: str | None = Field(None, description="Source image URL")
-    videos: list[ChildPost] = Field(default_factory=list, description="Videos generated from this image")
+    videos: list[ChildPost] = Field(
+        default_factory=list, description="Videos generated from this image"
+    )
 
 
 class GrokCookies(BaseModel):
@@ -278,7 +275,9 @@ class VideoMatchResult(BaseModel):
     )
 
     # Metadata
-    mode: GenerationMode = Field(..., description="Generation mode")
+    mode: str = Field(
+        ..., description="Generation mode (txt2img, img2vid, txt2vid, upload2vid, unknown)"
+    )
     original_prompt: str | None = Field(None, description="Video generation prompt")
     file_size: int = Field(..., description="File size in bytes")
 

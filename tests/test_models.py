@@ -3,13 +3,13 @@
 from datetime import datetime, timezone
 
 from grok_web.models import (
+    MODE_IMG2VID,
+    MODE_TXT2VID,
     ChildPost,
-    GenerationMode,
     GrokCookies,
     PostDetails,
     PostSummary,
     VideoMatchResult,
-    VideoPreset,
 )
 
 
@@ -60,18 +60,6 @@ class TestGrokCookies:
         assert "x-userid" in result
 
 
-class TestGenerationMode:
-    """Tests for GenerationMode enum."""
-
-    def test_enum_values(self):
-        """All expected enum values exist."""
-        assert GenerationMode.TEXT_TO_VIDEO.value == "txt2vid"
-        assert GenerationMode.GROK_IMAGE_TO_VIDEO.value == "img2vid"
-        assert GenerationMode.UPLOAD_IMAGE_TO_VIDEO.value == "upload2vid"
-        assert GenerationMode.TEXT_TO_IMAGE.value == "txt2img"
-        assert GenerationMode.UNKNOWN.value == "unknown"
-
-
 class TestPostSummary:
     """Tests for PostSummary dataclass."""
 
@@ -79,10 +67,10 @@ class TestPostSummary:
         """Create with minimal required fields."""
         summary = PostSummary(
             id="test-id",
-            mode=GenerationMode.TEXT_TO_VIDEO,
+            mode=MODE_TXT2VID,
         )
         assert summary.id == "test-id"
-        assert summary.mode == GenerationMode.TEXT_TO_VIDEO
+        assert summary.mode == MODE_TXT2VID
         assert summary.prompt_preview is None
         assert summary.video_count == 0
 
@@ -91,7 +79,7 @@ class TestPostSummary:
         created = datetime(2025, 12, 10, 10, 30, 0, tzinfo=timezone.utc)
         summary = PostSummary(
             id="test-id",
-            mode=GenerationMode.GROK_IMAGE_TO_VIDEO,
+            mode=MODE_IMG2VID,
             prompt_preview="A beautiful sunset",
             video_count=3,
             created_at=created,
@@ -104,7 +92,7 @@ class TestPostSummary:
 
     def test_web_url_computed(self):
         """web_url is correctly computed."""
-        summary = PostSummary(id="test-id-123", mode=GenerationMode.TEXT_TO_VIDEO)
+        summary = PostSummary(id="test-id-123", mode=MODE_TXT2VID)
         assert summary.web_url == "https://grok.com/imagine/post/test-id-123"
 
 
@@ -113,7 +101,7 @@ class TestPostDetails:
 
     def test_create_minimal(self):
         """Create with minimal required fields."""
-        details = PostDetails(id="test-id", mode=GenerationMode.TEXT_TO_VIDEO)
+        details = PostDetails(id="test-id", mode=MODE_TXT2VID)
         assert details.id == "test-id"
         assert details.children == []
         assert details.raw_data is None
@@ -125,7 +113,7 @@ class TestPostDetails:
         )
         details = PostDetails(
             id="test-id",
-            mode=GenerationMode.GROK_IMAGE_TO_VIDEO,
+            mode=MODE_IMG2VID,
             children=[child],
         )
         assert len(details.children) == 1
@@ -135,7 +123,7 @@ class TestPostDetails:
         """All optional fields can be set."""
         details = PostDetails(
             id="test-id",
-            mode=GenerationMode.TEXT_TO_VIDEO,
+            mode=MODE_TXT2VID,
             user_id="user-123",
             media_type="MEDIA_POST_TYPE_VIDEO",
             prompt="A prompt",
@@ -162,14 +150,14 @@ class TestPostDetails:
         )
         details = PostDetails(
             id="test-id",
-            mode=GenerationMode.GROK_IMAGE_TO_VIDEO,
+            mode=MODE_IMG2VID,
             children=[child1, child2],
         )
         assert details.video_count == 2
 
     def test_has_children(self):
         """has_children property works correctly."""
-        details_no_children = PostDetails(id="test-1", mode=GenerationMode.TEXT_TO_VIDEO)
+        details_no_children = PostDetails(id="test-1", mode=MODE_TXT2VID)
         assert details_no_children.has_children is False
 
         child = ChildPost(
@@ -177,7 +165,7 @@ class TestPostDetails:
         )
         details_with_children = PostDetails(
             id="test-2",
-            mode=GenerationMode.GROK_IMAGE_TO_VIDEO,
+            mode=MODE_IMG2VID,
             children=[child],
         )
         assert details_with_children.has_children is True
@@ -259,7 +247,7 @@ class TestVideoMatchResult:
             parent_id="parent-123",
             video_id="video-456",
             is_parent_video=False,
-            mode=GenerationMode.GROK_IMAGE_TO_VIDEO,
+            mode=MODE_IMG2VID,
             original_prompt="A sunset",
             file_size=1234567,
             new_filename="grok-video_parent-123_video-456.mp4",
@@ -276,50 +264,8 @@ class TestVideoMatchResult:
         result = VideoMatchResult(
             parent_id="parent-123",
             video_id="video-456",
-            mode=GenerationMode.TEXT_TO_VIDEO,
+            mode=MODE_TXT2VID,
             file_size=1000,
             new_filename="test.mp4",
         )
         assert result.web_url == "https://grok.com/imagine/post/parent-123"
-
-
-class TestVideoPreset:
-    """Tests for VideoPreset enum."""
-
-    def test_enum_values(self):
-        """All expected enum values exist with correct API mode values."""
-        assert VideoPreset.NORMAL.value == "normal"
-        assert VideoPreset.FUN.value == "extremely-crazy"
-        assert VideoPreset.SPICY.value == "extremely-spicy-or-crazy"
-
-    def test_enum_value_is_string(self):
-        """VideoPreset enum values are strings."""
-        # VideoPreset.value returns the API mode string
-        assert VideoPreset.NORMAL.value == "normal"
-        assert VideoPreset.FUN.value == "extremely-crazy"
-        assert VideoPreset.SPICY.value == "extremely-spicy-or-crazy"
-        # Values are actual string instances
-        assert isinstance(VideoPreset.NORMAL.value, str)
-        assert isinstance(VideoPreset.FUN.value, str)
-
-    def test_enum_comparison(self):
-        """VideoPreset can be compared with strings."""
-        assert VideoPreset.NORMAL == "normal"
-        assert VideoPreset.FUN == "extremely-crazy"
-        assert VideoPreset.SPICY == "extremely-spicy-or-crazy"
-
-    def test_enum_from_string(self):
-        """VideoPreset can be created from string value."""
-        assert VideoPreset("normal") == VideoPreset.NORMAL
-        assert VideoPreset("extremely-crazy") == VideoPreset.FUN
-        assert VideoPreset("extremely-spicy-or-crazy") == VideoPreset.SPICY
-
-    def test_enum_names(self):
-        """VideoPreset enum names are user-friendly."""
-        assert VideoPreset.NORMAL.name == "NORMAL"
-        assert VideoPreset.FUN.name == "FUN"
-        assert VideoPreset.SPICY.name == "SPICY"
-
-
-# Note: TestVideoPresetMapping was removed as redundant.
-# The actual resolve_preset() function is tested in test_internal_utilities.py

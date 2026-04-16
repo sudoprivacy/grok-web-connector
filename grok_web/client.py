@@ -12,7 +12,7 @@ import logging
 import random
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any, overload
+from typing import Any
 
 from ._internal import (
     MEDIA_POST_GET_ENDPOINT,
@@ -26,7 +26,7 @@ from .auth import DEFAULT_CONFIG_PATH, load_config, save_cookies
 from .browser import DEFAULT_DEBUG_HOST
 from .exceptions import GrokAPIError, GrokAuthError, GrokNotFoundError
 from .models import (
-    GenerationMode,
+    MODE_TXT2VID,
     GrokCookies,
     ImageEditResult,
     ImageGenerationResult,
@@ -36,7 +36,6 @@ from .models import (
     VideoExtendResult,
     VideoGenerationResult,
     VideoMatchResult,
-    VideoPreset,
 )
 
 # =============================================================================
@@ -72,7 +71,7 @@ class GrokClient(ResponseParser):
     Usage:
         >>> async with GrokClient() as client:
         ...     posts = await client.list_posts(limit=10)
-        ...     result = await client.create_video(source_post_id=post_id)
+        ...     result = await client.create_video({"images": ["post:" + post_id]})
 
         >>> # Or use get_client() factory
         >>> from grok_web import get_client
@@ -604,7 +603,7 @@ class GrokClient(ResponseParser):
 
         videos_to_check = []
 
-        if details.mode == GenerationMode.TEXT_TO_VIDEO and details.hd_media_url:
+        if details.mode == MODE_TXT2VID and details.hd_media_url:
             videos_to_check.append(
                 {
                     "video_id": details.id,
@@ -732,7 +731,7 @@ class GrokClient(ResponseParser):
                 details = await self.get_post_details(post_summary.id)
 
                 # Check parent video (for txt2vid posts)
-                if details.mode == GenerationMode.TEXT_TO_VIDEO and details.hd_media_url:
+                if details.mode == MODE_TXT2VID and details.hd_media_url:
                     try:
                         web_size = await self.get_asset_file_size(details.hd_media_url)
                         if web_size == local_size:
@@ -1582,34 +1581,34 @@ class GrokClient(ResponseParser):
 
         return output_path
 
-    async def edit_image(
-        self, post_id: str, edit_prompt: str, timeout: int = 60
-    ) -> ImageEditResult:
-        """
-        Edit an image to generate new variations.
+    async def edit_image(self, params: dict) -> ImageEditResult:
+        """Edit an image to generate new variations.
 
-        This navigates to the post, clicks "编辑图像", enters the prompt,
+        Navigates to the post, clicks edit, enters the prompt,
         and captures the API response with generated images.
 
-        Each edit generates 2 images. Some may be moderated (blocked).
-
         Args:
-            post_id: The post UUID (parent image)
-            edit_prompt: The edit instruction (e.g., "add sunglasses", "改成白色丝绸")
-            timeout: Max seconds to wait for generation (default 60)
+            params: Dict with keys from EDIT_KEYS (see grok_web.schema):
+                post_id (str): Target post UUID.
+                edit_prompt (str): Edit instruction (e.g., 'add sunglasses').
+                timeout (int, default 300): Max seconds to wait.
 
         Returns:
-            ImageEditResult with image URLs and moderation info
+            ImageEditResult with image URLs and moderation info.
 
-        Raises:
-            GrokAPIError: If edit fails or times out
-
-        Example:
-            >>> result = await client.edit_image_via_ui("abc-123", "add wings")
-            >>> result.success_count  # Number of non-moderated images
-            >>> result.image_urls  # URLs of successful images
-            >>> result.has_enough_success(2)  # Check if got at least 2
+        Examples:
+            await client.edit_image({
+                "post_id": "abc-123",
+                "edit_prompt": "add wings",
+            })
         """
+        from .schema import EDIT_KEYS, validate_params
+
+        p = validate_params(params, EDIT_KEYS)
+
+        post_id = p["post_id"]
+        edit_prompt = p["edit_prompt"]
+        timeout = p.get("timeout", 60)
         import asyncio
         import json as json_mod
 
@@ -1811,11 +1810,9 @@ class GrokClient(ResponseParser):
             conversation_id=captured_data.get("conversation_id"),
         )
 
-    async def upload_image(self, image_path: str | Path, timeout: int = 15) -> int:
-        """
-        Upload a local image to Grok Imagine.
+    async def _upload_image(self, image_path: str | Path, timeout: int = 15) -> int:
+        """Upload a local image to Grok Imagine (internal).
 
-        The new UI (April 2026) keeps the user on the Imagine homepage.
         The image appears as a tag above the input bar. Multiple calls
         upload multiple images (supports "Image 1", "Image 2", etc.).
 
@@ -1825,15 +1822,6 @@ class GrokClient(ResponseParser):
 
         Returns:
             Number of images currently attached (e.g., 1 after first upload).
-
-        Raises:
-            FileNotFoundError: If the image file doesn't exist.
-            GrokAPIError: If upload fails or times out.
-
-        Example:
-            >>> await client.upload_image("/path/to/photo1.jpg")  # returns 1
-            >>> await client.upload_image("/path/to/photo2.jpg")  # returns 2
-            >>> result = await client.create_video("zoom in", source_image_path=None)
         """
         from .actions.imagine_input import navigate_to_imagine
         from .actions.imagine_input import upload_image as _upload
@@ -1843,26 +1831,28 @@ class GrokClient(ResponseParser):
 
     async def _create_video_from_upload(
         self,
-        image_path: str | Path,
+        image_paths: list[str | Path],
         prompt: str = "",
         timeout: int = 300,
         duration: int = 10,
         resolution: str = "720p",
         aspect_ratio: str | None = None,
     ) -> VideoGenerationResult:
-        """Generate video from a local image using the Imagine homepage flow.
+        """Generate video from local image(s) using the Imagine homepage flow.
 
-        New UI flow (April 2026):
+        Supports multiple images with @N references in the prompt.
+
+        Flow:
         1. Navigate to grok.com/imagine
-        2. Upload image via file input
+        2. Upload all images via file input
         3. Switch to video mode
         4. Set video options (resolution, duration, aspect ratio)
-        5. Optionally set prompt text
+        5. Set prompt (with @N references if present)
         6. Click submit and capture NDJSON response
 
         Args:
-            image_path: Path to the local image file
-            prompt: Optional prompt text (camera motion, style, etc.)
+            image_paths: List of local image file paths
+            prompt: Optional prompt text. Use @1, @2... to reference uploaded images.
             timeout: Max seconds to wait for video generation (default 300)
             duration: Video duration in seconds (6 or 10, default 10)
             resolution: Video resolution ("480p" or "720p", default "720p")
@@ -1879,18 +1869,21 @@ class GrokClient(ResponseParser):
             navigate_to_imagine,
             set_mode,
             set_prompt,
+            set_prompt_with_refs,
             set_video_options,
         )
         from .actions.imagine_input import (
             upload_image as _upload,
         )
         from .actions.network_monitor import CDPMonitor
+        from .prompt_parser import parse_prompt
 
         # Step 1: Navigate to imagine homepage
         await navigate_to_imagine(self._tab, delay=self._ui_delay)
 
-        # Step 2: Upload image
-        await _upload(self._tab, image_path, delay=self._ui_delay)
+        # Step 2: Upload all images
+        for path in image_paths:
+            await _upload(self._tab, path, delay=self._ui_delay)
 
         # Step 3: Switch to video mode
         await set_mode(self._tab, "视频", delay=self._ui_delay)
@@ -1904,9 +1897,14 @@ class GrokClient(ResponseParser):
             delay=self._ui_delay,
         )
 
-        # Step 5: Set prompt if provided
+        # Step 5: Set prompt — use @ref parser if images were uploaded
         if prompt:
-            await set_prompt(self._tab, prompt, delay=self._ui_delay)
+            segments = parse_prompt(prompt, [str(p) for p in image_paths])
+            has_refs = any(s["type"] == "ref" for s in segments)
+            if has_refs:
+                await set_prompt_with_refs(self._tab, segments, delay=self._ui_delay)
+            else:
+                await set_prompt(self._tab, prompt, delay=self._ui_delay)
 
         await asyncio.sleep(random.uniform(0.3, 0.8))
 
@@ -1960,64 +1958,52 @@ class GrokClient(ResponseParser):
 
     async def create_image(
         self,
-        prompt: str,
-        aspect_ratio: str = "portrait",
-        min_success: int = 1,
-        max_scroll: int = 5,
-        timeout: int = 120,
-        thumbnail_selector: "Callable[[int, Callable[[], Awaitable[list[int]]]], Awaitable[list[int]]] | None" = None,
+        params: dict,
+        *,
         progress_callback: "Callable[[int], Awaitable[bool]] | None" = None,
     ) -> ImageGenerationResult:
-        """
-        Generate images from a text prompt (txt2img).
+        """Generate images from a text prompt (txt2img).
 
-        This navigates to grok.com/imagine, selects Image mode,
-        enters the prompt, and captures generated images via WebSocket.
-        Will scroll to generate more images if needed.
+        Navigates to grok.com/imagine, selects Image mode, enters the prompt,
+        and captures generated images via WebSocket. Scrolls for more if needed.
 
-        IMPORTANT: Generated images are temporary! They're displayed on screen
-        but NOT automatically saved. The gallery disappears on page refresh.
-        To save an image, click the save/heart icon in the UI.
+        IMPORTANT: Generated images are temporary! The gallery disappears on refresh.
 
         Args:
-            prompt: Text description of the image to generate
-            aspect_ratio: "portrait" (2:3), "square" (1:1), or "landscape" (3:2)
-            min_success: Minimum completed images needed (default 1)
-            max_scroll: Maximum scroll attempts to generate more images (default 5)
-            timeout: Max seconds to wait for initial generation (default 120)
-            thumbnail_selector: Optional async callback to select which images to collect
-                post_ids for. Signature: async (count, scan_favorites) -> list[int]
-                - count: number of gallery items
-                - scan_favorites: async function to detect which items user favorited
-                - returns: list of indices to collect post_ids for
-                If None (default), no post_ids are collected.
-                See grok_web.selectors for pre-built selectors.
-            progress_callback: Optional async callback for shared target across workers.
-                Signature: async (success_count) -> bool
-                - success_count: current number of non-moderated images
-                - returns: True to continue scrolling, False to stop early
-                Used by BrowserWorkerPool for shared target mode where multiple
-                workers contribute to a common success target.
+            params: Dict with keys from IMAGE_KEYS (see grok_web.schema):
+                images (list[str]): Not used for create_image currently.
+                prompt (str): Text description of the image to generate.
+                aspect_ratio (str, default '2:3'): 'portrait', 'landscape', 'square',
+                    or ratio like '2:3', '1:1', '3:2'.
+                min_success (int, default 1): Minimum non-moderated images needed.
+                max_scroll (int, default 5): Max scroll attempts for more images.
+                timeout (int, default 300): Max seconds to wait.
+                thumbnail_selector (callable): Callback for image selection. Python API only.
+            progress_callback: Internal callback for shared target across workers.
 
         Returns:
-            ImageGenerationResult with job IDs and generation info.
-            If thumbnail_selector is None, selected_post_ids will be empty.
-            If thumbnail_selector is provided, selected_post_ids will contain
-            post_ids for the selected images (for video generation).
+            ImageGenerationResult with image URLs and generation info.
 
-        Raises:
-            GrokAPIError: If generation fails or times out
+        Examples:
+            await client.create_image({"prompt": "a cat wearing sunglasses"})
 
-        Example:
-            >>> # Without selection - just generate
-            >>> result = await client.create_image("a cat wearing sunglasses")
-            >>> result.success_count  # Number of completed images
-
-            >>> # With signal file selection (user favorites in browser, then signals done)
-            >>> from grok_web.selectors import signal_file_selector
-            >>> result = await client.create_image("a cat", thumbnail_selector=signal_file_selector())
-            >>> result.selected_post_ids  # Post IDs of favorited images
+            await client.create_image({
+                "prompt": "a cat",
+                "aspect_ratio": "portrait",
+                "min_success": 10,
+                "max_scroll": 8,
+            })
         """
+        from .schema import IMAGE_KEYS, validate_params
+
+        p = validate_params(params, IMAGE_KEYS)
+
+        prompt = p.get("prompt", "")
+        aspect_ratio = p.get("aspect_ratio", "2:3")
+        min_success = p.get("min_success", 1)
+        max_scroll = p.get("max_scroll", 5)
+        timeout = p.get("timeout", 300)
+        thumbnail_selector = p.get("thumbnail_selector")
         import asyncio
         import json as json_mod
 
@@ -2591,148 +2577,115 @@ class GrokClient(ResponseParser):
         )
 
     # =========================================================================
-    # Unified Video Generation API (for pool compatibility)
+    # Unified Video Generation API (dict-based, SSOT from schema.py)
     # =========================================================================
 
-    @overload
-    async def create_video(
-        self,
-        prompt: str,
-        *,
-        aspect_ratio: str = ...,
-        timeout: int = ...,
-        wait_for_video: bool = ...,
-    ) -> VideoGenerationResult:
-        """txt2vid: Generate video from text prompt only."""
-        ...
+    async def create_video(self, params: dict) -> VideoGenerationResult:
+        """Generate video from text, existing post, or uploaded images.
 
-    @overload
-    async def create_video(
-        self,
-        prompt: str,
-        *,
-        source_post_id: str,
-        preset: VideoPreset | str = ...,
-        aspect_ratio: str = ...,
-        timeout: int = ...,
-        duration: int = ...,
-        resolution: str = ...,
-        thumbnail_index: int | None = ...,
-    ) -> VideoGenerationResult:
-        """img2vid: Generate video with custom prompt."""
-        ...
-
-    @overload
-    async def create_video(
-        self,
-        *,
-        source_post_id: str,
-        preset: VideoPreset | str,
-        aspect_ratio: str = ...,
-        timeout: int = ...,
-        duration: int = ...,
-        resolution: str = ...,
-        thumbnail_index: int | None = ...,
-    ) -> VideoGenerationResult:
-        """img2vid: Generate video with preset only (no prompt)."""
-        ...
-
-    @overload
-    async def create_video(
-        self,
-        prompt: str,
-        *,
-        source_image_path: str | Path,
-        aspect_ratio: str = ...,
-        timeout: int = ...,
-        duration: int = ...,
-        resolution: str = ...,
-    ) -> VideoGenerationResult:
-        """upload2vid: Upload local image and generate video from it."""
-        ...
-
-    async def create_video(
-        self,
-        prompt: str = "",
-        *,
-        source_post_id: str | None = None,
-        source_image_path: str | Path | None = None,
-        preset: VideoPreset | str = "normal",
-        aspect_ratio: str = "portrait",
-        timeout: int = 300,
-        wait_for_video: bool = True,
-        duration: int = 10,
-        resolution: str = "720p",
-        thumbnail_index: int | None = None,
-    ) -> VideoGenerationResult:
-        """
-        Unified video generation API supporting multiple modes.
-
-        The mode is automatically detected based on which source parameter is provided:
-        - No source → txt2vid (generate video from text prompt)
-        - source_post_id → img2vid (generate video from existing Grok image)
-        - source_image_path → upload2vid (upload local image and generate video)
+        Mode is auto-detected from params:
+        - No images → txt2vid
+        - images with 'post:<uuid>' → img2vid (navigate to post, generate video)
+        - images with file paths → upload2vid (upload + generate from Imagine homepage)
 
         Args:
-            prompt: For txt2vid: full video description.
-                   For img2vid/upload2vid: adjustment instructions (camera, motion, style).
-
-            source_post_id: (img2vid) Existing Grok image post ID to animate.
-            source_image_path: (upload2vid) Local image path to upload and animate.
-
-            preset: Video style preset - 'normal', 'fun', or 'spicy'.
-                   Only used for img2vid mode.
-            aspect_ratio: Video aspect ratio.
-            timeout: Max seconds to wait for video generation (default 300).
-            wait_for_video: (txt2vid only) Wait for video element to load (default True).
-            duration: Video duration in seconds (default 10). Options: 6, 10.
-            resolution: Video resolution (default "720p"). Options: "480p", "720p".
-            thumbnail_index: (img2vid only) 1-based image thumbnail to generate video from.
-                            If None, uses the currently displayed image.
+            params: Dict with keys from VIDEO_KEYS (see grok_web.schema):
+                images (list[str]): Image sources. 'post:<uuid>' or local paths. Max 5.
+                prompt (str): Text prompt. Use @1, @2... to reference images.
+                mode (str, default 'video'): 'image' or 'video'.
+                resolution (str, default '720p'): '480p', '720p'.
+                duration (str, default '10s'): '6s', '10s'.
+                aspect_ratio (str, default '2:3'): '2:3', '3:2', '1:1', '9:16', '16:9', etc.
+                preset (str): 'normal', 'fun', 'spicy'.
+                timeout (int, default 300): Max seconds to wait.
+                wait_for_video (bool, default True): Wait for video to load (txt2vid only).
 
         Returns:
             VideoGenerationResult with video_id and metadata.
-        """
-        # Validate: cannot specify both sources
-        if source_post_id is not None and source_image_path is not None:
-            raise ValueError("Cannot specify both source_post_id and source_image_path.")
 
-        # Mode: upload2vid (upload local image → generate video from Imagine homepage)
-        if source_image_path is not None:
-            return await self._create_video_from_upload(
-                image_path=source_image_path,
+        Examples:
+            # txt2vid
+            await client.create_video({"prompt": "a cat dancing"})
+
+            # img2vid from existing post
+            await client.create_video({
+                "images": ["post:8ddd91f6-..."],
+                "prompt": "slow orbit around @1",
+            })
+
+            # upload2vid with multiple images
+            await client.create_video({
+                "images": ["./frame1.jpg", "./frame2.jpg"],
+                "prompt": "@1 is the main character, zoom into @2",
+                "resolution": "720p",
+                "duration": "10s",
+            })
+        """
+        from .schema import VIDEO_KEYS, validate_params
+
+        p = validate_params(params, VIDEO_KEYS)
+
+        images = p.get("images", [])
+        prompt = p.get("prompt", "")
+        timeout = p.get("timeout", 300)
+        aspect_ratio = p.get("aspect_ratio", "2:3")
+
+        # Normalize duration to int
+        duration = p.get("duration", "10s")
+        if isinstance(duration, str):
+            duration = int(duration.replace("s", ""))
+
+        resolution = p.get("resolution", "720p")
+        preset = p.get("preset", "normal")
+        wait_for_video = p.get("wait_for_video", True)
+
+        if not images:
+            # txt2vid — text prompt only
+            return await self._create_video_from_text(
                 prompt=prompt,
-                timeout=timeout,
-                duration=duration,
-                resolution=resolution,
                 aspect_ratio=aspect_ratio,
+                timeout=timeout,
+                wait_for_video=wait_for_video,
             )
 
-        # Mode: img2vid (from existing Grok image post)
-        if source_post_id is not None:
+        # Classify image sources
+        from .prompt_parser import classify_image_source
+
+        sources = [classify_image_source(img) for img in images]
+        has_posts = any(s[0] == "post" for s in sources)
+        has_files = any(s[0] == "file" for s in sources)
+
+        if has_posts and has_files:
+            raise ValueError("Cannot mix 'post:' references and file paths in images list.")
+
+        if has_posts:
+            # img2vid — use first post source
+            post_id = sources[0][1]
             return await self._create_video_via_ui(
-                parent_post_id=source_post_id,
+                parent_post_id=post_id,
                 preset=preset,
                 timeout=timeout,
                 adjustment_prompt=prompt if prompt else None,
                 duration=duration,
                 resolution=resolution,
                 aspect_ratio=aspect_ratio,
-                thumbnail_index=thumbnail_index,
             )
 
-        # Mode: txt2vid (from text prompt only)
-        return await self._create_video_from_text(
+        # upload2vid — upload file(s) and generate
+        file_paths = [s[1] for s in sources]
+        return await self._create_video_from_upload(
+            image_paths=file_paths,
             prompt=prompt,
-            aspect_ratio=aspect_ratio,
             timeout=timeout,
-            wait_for_video=wait_for_video,
+            duration=duration,
+            resolution=resolution,
+            aspect_ratio=aspect_ratio,
         )
 
     async def _create_video_via_ui(
         self,
         parent_post_id: str,
-        preset: VideoPreset | str = VideoPreset.NORMAL,
+        preset: str = "normal",
         timeout: int = 300,
         stable_id: str | None = None,
         adjustment_prompt: str | None = None,
@@ -2749,7 +2702,7 @@ class GrokClient(ResponseParser):
 
         Args:
             parent_post_id: The image post ID to generate video from
-            preset: Video style preset - 'normal', 'fun', or 'spicy' (or VideoPreset enum)
+            preset: Video style preset - 'normal', 'fun', or 'spicy'
             timeout: Max seconds to wait for video generation (default 300).
                     Video generation typically takes 2-5 minutes for img2vid mode.
             stable_id: Optional custom stable_id to inject before generation.
@@ -2776,7 +2729,7 @@ class GrokClient(ResponseParser):
             await self.set_stable_id(stable_id, reload_page=False)
 
         # Normalize preset to string
-        preset_str = preset.value if isinstance(preset, VideoPreset) else str(preset).lower()
+        preset_str = str(preset).lower()
 
         # Map preset string to menu text (case-sensitive as shown in UI)
         preset_menu_map = {

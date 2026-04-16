@@ -348,6 +348,76 @@ async def reference_image(tab, image_index: int, *, delay: float = 1.0) -> bool:
     return False
 
 
+async def set_prompt_with_refs(
+    tab,
+    segments: list[dict],
+    *,
+    delay: float = 1.0,
+) -> None:
+    """Set prompt with interleaved text and @N image references.
+
+    Clears the editor, then for each segment:
+    - text → insertText via execCommand
+    - ref  → type '@', wait for selector popup, click 'Image N'
+
+    Args:
+        tab: browser Tab instance
+        segments: Parsed segments from prompt_parser.parse_prompt().
+            Each is {"type": "text", "value": "..."} or {"type": "ref", "index": N}.
+        delay: UI delay multiplier
+    """
+    # Focus and clear editor
+    editor = await tab.query_selector(".tiptap.ProseMirror")
+    if not editor:
+        editor = await tab.query_selector('[contenteditable="true"]')
+    if not editor:
+        raise GrokAPIError("Contenteditable editor not found")
+
+    await editor.click()
+    await asyncio.sleep(0.2 * delay)
+
+    # Clear existing content
+    await tab.evaluate(
+        """
+        (function() {
+            const editor = document.querySelector('.tiptap.ProseMirror') ||
+                           document.querySelector('[contenteditable="true"]');
+            if (editor) {
+                editor.focus();
+                editor.innerHTML = '';
+                editor.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+        })()
+    """,
+        await_promise=False,
+    )
+    await asyncio.sleep(0.3 * delay)
+
+    for segment in segments:
+        if segment["type"] == "text":
+            # Insert text via execCommand (respects ProseMirror state)
+            text = segment["value"]
+            escaped = text.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n")
+            await tab.evaluate(
+                f"document.execCommand('insertText', false, '{escaped}')",
+                await_promise=False,
+            )
+            await asyncio.sleep(0.1 * delay)
+
+        elif segment["type"] == "ref":
+            # Use existing reference_image logic
+            index = segment["index"]
+            success = await reference_image(tab, index, delay=delay)
+            if not success:
+                logger.warning(f"Failed to insert @{index} reference, falling back to text")
+                await tab.evaluate(
+                    f"document.execCommand('insertText', false, '@{index}')",
+                    await_promise=False,
+                )
+
+    await asyncio.sleep(0.3 * delay)
+
+
 async def is_submit_enabled(tab) -> bool:
     """Check if the submit button is enabled."""
     return await tab.evaluate(

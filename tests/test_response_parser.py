@@ -5,7 +5,14 @@ from datetime import datetime, timezone
 import pytest
 
 from grok_web._internal import ResponseParser
-from grok_web.models import GenerationMode, PostDetails, PostSummary
+from grok_web.models import (
+    MODE_IMG2VID,
+    MODE_TXT2VID,
+    MODE_UNKNOWN,
+    MODE_UPLOAD2VID,
+    PostDetails,
+    PostSummary,
+)
 
 
 class TestResponseParser:
@@ -23,36 +30,36 @@ class TestResponseParser:
     def test_detect_mode_text_to_video(self, parser: ResponseParser):
         """Text-to-video: mediaType=VIDEO, mode=text."""
         data = {"mediaType": "MEDIA_POST_TYPE_VIDEO", "mode": "text"}
-        assert parser._detect_generation_mode(data) == GenerationMode.TEXT_TO_VIDEO
+        assert parser._detect_generation_mode(data) == MODE_TXT2VID
 
     def test_detect_mode_grok_image_to_video(self, parser: ResponseParser):
         """Grok image-to-video: mediaType=IMAGE, has prompt."""
         data = {"mediaType": "MEDIA_POST_TYPE_IMAGE", "prompt": "some prompt"}
-        assert parser._detect_generation_mode(data) == GenerationMode.GROK_IMAGE_TO_VIDEO
+        assert parser._detect_generation_mode(data) == MODE_IMG2VID
 
     def test_detect_mode_upload_image_to_video(self, parser: ResponseParser):
         """Upload image-to-video: mediaType=IMAGE, no prompt."""
         data = {"mediaType": "MEDIA_POST_TYPE_IMAGE", "prompt": None}
-        assert parser._detect_generation_mode(data) == GenerationMode.UPLOAD_IMAGE_TO_VIDEO
+        assert parser._detect_generation_mode(data) == MODE_UPLOAD2VID
 
     def test_detect_mode_upload_image_empty_prompt(self, parser: ResponseParser):
         """Upload image-to-video: mediaType=IMAGE, empty string prompt."""
         data = {"mediaType": "MEDIA_POST_TYPE_IMAGE", "prompt": ""}
-        assert parser._detect_generation_mode(data) == GenerationMode.UPLOAD_IMAGE_TO_VIDEO
+        assert parser._detect_generation_mode(data) == MODE_UPLOAD2VID
 
     def test_detect_mode_video_unknown(self, parser: ResponseParser):
         """Unknown video mode: mediaType=VIDEO, mode not text."""
         data = {"mediaType": "MEDIA_POST_TYPE_VIDEO", "mode": "normal"}
-        assert parser._detect_generation_mode(data) == GenerationMode.UNKNOWN
+        assert parser._detect_generation_mode(data) == MODE_UNKNOWN
 
     def test_detect_mode_unknown_media_type(self, parser: ResponseParser):
         """Unknown mode: unrecognized mediaType."""
         data = {"mediaType": "MEDIA_POST_TYPE_AUDIO"}
-        assert parser._detect_generation_mode(data) == GenerationMode.UNKNOWN
+        assert parser._detect_generation_mode(data) == MODE_UNKNOWN
 
     def test_detect_mode_empty_data(self, parser: ResponseParser):
         """Unknown mode: empty data."""
-        assert parser._detect_generation_mode({}) == GenerationMode.UNKNOWN
+        assert parser._detect_generation_mode({}) == MODE_UNKNOWN
 
     # =========================================================================
     # _parse_timestamp tests
@@ -103,7 +110,7 @@ class TestResponseParser:
 
         assert isinstance(summary, PostSummary)
         assert summary.id == "test-post-id-1234"
-        assert summary.mode == GenerationMode.GROK_IMAGE_TO_VIDEO
+        assert summary.mode == MODE_IMG2VID
         assert summary.prompt_preview == "A beautiful sunset over the ocean"
         assert summary.video_count == 2
         assert summary.media_type == "MEDIA_POST_TYPE_IMAGE"
@@ -167,7 +174,7 @@ class TestResponseParser:
         assert isinstance(details, PostDetails)
         assert details.id == "test-post-id-1234"
         assert details.user_id == "user-123"
-        assert details.mode == GenerationMode.GROK_IMAGE_TO_VIDEO
+        assert details.mode == MODE_IMG2VID
         assert details.prompt == "A beautiful sunset over the ocean"
         assert details.media_url == "https://assets.grok.com/image.jpg"
         assert details.hd_media_url == "https://assets.grok.com/image_hd.jpg"
