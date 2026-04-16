@@ -100,10 +100,14 @@ async def upload_image(
 
 async def _count_uploaded_images(tab) -> int:
     """Count the number of uploaded images by counting 'Remove image' buttons."""
-    return await tab.evaluate(
+    result = await tab.evaluate(
         "document.querySelectorAll('button[aria-label=\"Remove image\"]').length",
         await_promise=False,
     )
+    if not isinstance(result, int | float):
+        logger.warning(f"_count_uploaded_images got {type(result).__name__}, returning 0")
+        return 0
+    return int(result)
 
 
 async def check_moderated_images(tab) -> list[int]:
@@ -115,7 +119,7 @@ async def check_moderated_images(tab) -> list[int]:
     Returns:
         List of 0-based indices of moderated images.
     """
-    return await tab.evaluate(
+    result = await tab.evaluate(
         """
         (function() {
             const containers = document.querySelectorAll(
@@ -133,6 +137,11 @@ async def check_moderated_images(tab) -> list[int]:
     """,
         await_promise=False,
     )
+    # CDP may return ExceptionDetails instead of a list on JS errors
+    if not isinstance(result, list):
+        logger.warning(f"check_moderated_images got {type(result).__name__}, returning empty")
+        return []
+    return result
 
 
 async def remove_moderated_images(tab, *, delay: float = 1.0) -> int:
