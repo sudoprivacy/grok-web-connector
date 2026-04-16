@@ -106,6 +106,76 @@ async def _count_uploaded_images(tab) -> int:
     )
 
 
+async def check_moderated_images(tab) -> list[int]:
+    """Check which uploaded images have been moderated by Grok.
+
+    Moderated images show a warning triangle overlay (lucide-triangle-alert SVG
+    with backdrop-blur-sm) but remain in the UI with their 'Remove image' button.
+
+    Returns:
+        List of 0-based indices of moderated images.
+    """
+    return await tab.evaluate(
+        """
+        (function() {
+            const containers = document.querySelectorAll(
+                '.group\\/current-files .relative.shrink-0'
+            );
+            const moderated = [];
+            containers.forEach((c, i) => {
+                if (c.querySelector('.lucide-triangle-alert') ||
+                    c.querySelector('.backdrop-blur-sm')) {
+                    moderated.push(i);
+                }
+            });
+            return moderated;
+        })()
+    """,
+        await_promise=False,
+    )
+
+
+async def remove_moderated_images(tab, *, delay: float = 1.0) -> int:
+    """Remove all moderated images from the input bar.
+
+    Moderated images block submit. This removes them so remaining clean
+    images can still be used.
+
+    Returns:
+        Number of moderated images removed.
+    """
+    removed = 0
+    while True:
+        # Re-check each time since indices shift after removal
+        moderated = await check_moderated_images(tab)
+        if not moderated:
+            break
+        # Always remove the first moderated one (index shifts after each removal)
+        idx = moderated[0]
+        success = await tab.evaluate(
+            f"""
+            (function() {{
+                const containers = document.querySelectorAll(
+                    '.group\\/current-files .relative.shrink-0'
+                );
+                if ({idx} < containers.length) {{
+                    const btn = containers[{idx}].querySelector(
+                        'button[aria-label="Remove image"]'
+                    );
+                    if (btn) {{ btn.click(); return true; }}
+                }}
+                return false;
+            }})()
+        """,
+            await_promise=False,
+        )
+        if not success:
+            break
+        await asyncio.sleep(0.3 * delay)
+        removed += 1
+    return removed
+
+
 async def remove_all_images(tab, *, delay: float = 1.0) -> int:
     """Remove all uploaded images from the input bar.
 
@@ -246,7 +316,10 @@ async def set_video_options(
                 await_promise=False,
             )
             if not option:
-                logger.warning(f"Aspect ratio option '{aspect_ratio}' not found in dropdown")
+                raise GrokAPIError(
+                    f"Aspect ratio '{aspect_ratio}' not found in dropdown. "
+                    "Available options may differ for multi-image uploads."
+                )
             await asyncio.sleep(0.3 * delay)
 
 
@@ -409,10 +482,9 @@ async def set_prompt_with_refs(
             index = segment["index"]
             success = await reference_image(tab, index, delay=delay)
             if not success:
-                logger.warning(f"Failed to insert @{index} reference, falling back to text")
-                await tab.evaluate(
-                    f"document.execCommand('insertText', false, '@{index}')",
-                    await_promise=False,
+                raise GrokAPIError(
+                    f"Image reference @{index} not found in @ menu. "
+                    "The image may have been moderated — check with check_moderated_images()."
                 )
 
     await asyncio.sleep(0.3 * delay)

@@ -1865,8 +1865,11 @@ class GrokClient(ResponseParser):
         import random
 
         from .actions.imagine_input import (
+            check_moderated_images,
             click_submit,
             navigate_to_imagine,
+            remove_all_images,
+            remove_moderated_images,
             set_mode,
             set_prompt,
             set_prompt_with_refs,
@@ -1878,12 +1881,30 @@ class GrokClient(ResponseParser):
         from .actions.network_monitor import CDPMonitor
         from .prompt_parser import parse_prompt
 
-        # Step 1: Navigate to imagine homepage
+        # Step 1: Navigate to imagine homepage (clean state)
         await navigate_to_imagine(self._tab, delay=self._ui_delay)
+        await remove_all_images(self._tab, delay=self._ui_delay)
 
         # Step 2: Upload all images
         for path in image_paths:
             await _upload(self._tab, path, delay=self._ui_delay)
+
+        # Step 2.5: Wait briefly then check for moderated images
+        await asyncio.sleep(2)
+        moderated = await check_moderated_images(self._tab)
+        if moderated:
+            total = len(image_paths)
+            mod_indices = [i + 1 for i in moderated]  # 1-based for user
+            logger.warning(f"Moderated images detected: {mod_indices} of {total}")
+            # Remove moderated images so submit isn't blocked
+            removed = await remove_moderated_images(self._tab, delay=self._ui_delay)
+            remaining = total - removed
+            if remaining == 0:
+                raise GrokAPIError(
+                    f"All {total} images were moderated by Grok. "
+                    "Cannot proceed with video generation."
+                )
+            logger.info(f"Removed {removed} moderated images, {remaining} remaining")
 
         # Step 3: Switch to video mode
         await set_mode(self._tab, "视频", delay=self._ui_delay)
