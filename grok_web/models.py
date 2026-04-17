@@ -310,6 +310,18 @@ class VideoGenerationResult(BaseModel):
     # Conversation info (for debugging)
     conversation_id: str | None = Field(None, description="Chat conversation UUID")
 
+    # Uploaded asset references (populated on upload2vid flows). Use these
+    # as "file:<id>" entries in a follow-up create_video() call to retry
+    # generation without re-uploading the images.
+    image_file_ids: list[str] = Field(
+        default_factory=list,
+        description=(
+            "fileMetadataIds of uploaded images (upload2vid only). Pass back "
+            "as images=['file:<id>', ...] to retry generation without "
+            "re-uploading (e.g., after moderated=True on the output video)."
+        ),
+    )
+
     # Style control (for MCTS pipeline)
     statsig_id: str | None = Field(
         None,

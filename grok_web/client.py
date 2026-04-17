@@ -133,6 +133,10 @@ class GrokClient(ResponseParser):
         self._chrome_process = None  # Track Chrome process we launched
         self._ui_delay = ui_delay
 
+        # Snitch for x-statsig-id (populated passively from any grok.com request
+        # seen on this tab). Used by direct REST submit to pass anti-bot check.
+        self._statsig_snitch = None
+
         # Browser connection settings
         self._remote_host = host or DEFAULT_DEBUG_HOST
         self._remote_port = port  # None = let start_browser auto-assign
@@ -260,6 +264,14 @@ class GrokClient(ResponseParser):
         result = await cloudflare_verify(self._tab, max_retries=15)
         if not result.get("verified"):
             raise GrokAuthError("Failed to bypass Cloudflare challenge")
+
+        # Install passive x-statsig-id snitch. The frontend rotates this
+        # header on every outbound API call; we cache the latest for
+        # direct REST submits (e.g. create_video with file: references).
+        from .actions.direct_rest import StatsigSnitch
+
+        self._statsig_snitch = StatsigSnitch(self._tab)
+        await self._statsig_snitch.install()
 
         self._initialized = True
         return self
@@ -1843,6 +1855,164 @@ class GrokClient(ResponseParser):
         await navigate_to_imagine(self._tab, delay=self._ui_delay)
         return await _upload(self._tab, image_path, timeout=timeout, delay=self._ui_delay)
 
+    async def upload_images(self, params: dict) -> list[str]:
+        """Upload local image files and return reusable reference strings.
+
+        Each returned string is of the form ``"file:<fileMetadataId>"`` and
+        can be passed back to :meth:`create_video` as an ``images`` entry.
+        This avoids re-uploading when retrying generation (e.g. after the
+        server moderates the first attempt's output video even though the
+        images themselves passed moderation).
+
+        Args:
+            params: Dict with one required key:
+
+                - images (list[str]): Local image file paths to upload.
+
+        Returns:
+            List of ``"file:<uuid>"`` strings, one per input path, in order.
+
+        Example:
+            >>> refs = await client.upload_images({"images": ["a.jpg", "b.jpg"]})
+            >>> refs
+            ['file:477c03f8-...', 'file:09b7e799-...']
+            >>> # Retry up to 3 times without re-uploading:
+            >>> for _ in range(3):
+            ...     res = await client.create_video({"images": refs, "prompt": "@1 @2"})
+            ...     if not res.moderated:
+            ...         break
+        """
+        from .actions.direct_rest import capture_upload_file_id
+        from .actions.imagine_input import (
+            navigate_to_imagine,
+            remove_all_images,
+        )
+        from .actions.imagine_input import upload_image as _upload
+        from .schema import UPLOAD_KEYS, validate_params
+
+        p = validate_params(params, UPLOAD_KEYS)
+        image_paths = p.get("images", [])
+        if not image_paths:
+            raise ValueError("upload_images requires 'images' list with at least one path")
+
+        await navigate_to_imagine(self._tab, delay=self._ui_delay)
+        await remove_all_images(self._tab, delay=self._ui_delay)
+
+        refs: list[str] = []
+        for path in image_paths:
+            data = await capture_upload_file_id(
+                self._tab,
+                lambda p=path: _upload(self._tab, p, timeout=15, delay=self._ui_delay),
+            )
+            file_id = data.get("fileMetadataId")
+            if not file_id:
+                raise GrokAPIError(f"Upload of {path} did not return a fileMetadataId")
+            refs.append(f"file:{file_id}")
+
+        return refs
+
+    async def _create_video_from_file_ids(
+        self,
+        file_ids: list[str],
+        prompt: str = "",
+        duration: int = 10,
+        resolution: str = "720p",
+        aspect_ratio: str | None = None,
+        preset: str = "normal",
+        timeout: int = 300,
+    ) -> VideoGenerationResult:
+        """Submit video generation directly via REST, reusing uploaded file IDs.
+
+        Bypasses the UI flow entirely:
+        - No upload (caller already uploaded via :meth:`upload_images`)
+        - No mode/options/prompt UI interaction
+        - No click_submit
+
+        Relies on a recently-captured x-statsig-id (populated passively by
+        StatsigSnitch from ordinary page telemetry). Without a fresh token
+        the server rejects the POST as anti-bot.
+        """
+        from .actions.direct_rest import (
+            build_video_submit_payload,
+            create_media_post,
+            direct_submit_video,
+        )
+
+        # We need the fileUri alongside the fileMetadataId for the `message`
+        # field. Reconstruct from the known per-user scheme.
+        if not self.cookies or not self.cookies.x_userid:
+            raise GrokAPIError("Cannot reconstruct asset URIs without x-userid cookie")
+        user_id = self.cookies.x_userid
+        file_uris = [f"users/{user_id}/{fid}/content" for fid in file_ids]
+
+        # Snitch caches sids per-endpoint. A prior UI-triggered create_video
+        # populates both /rest/media/post/create and
+        # /rest/app-chat/conversations/new.
+        snitch = self._statsig_snitch
+        if snitch is None:
+            raise GrokAPIError("Direct REST submit requires a StatsigSnitch on the client")
+        create_sid = await snitch.get("/rest/media/post/create", timeout=2.0)
+        conv_sid = await snitch.get("/rest/app-chat/conversations/new", timeout=2.0)
+        if not (create_sid and conv_sid):
+            raise GrokAPIError(
+                "Direct REST submit requires cached x-statsig-id tokens from a "
+                "prior UI-triggered create_video(). Run at least one "
+                "create_video() with local file paths before using 'file:' "
+                "references on the same client."
+            )
+
+        # Step 1: ask Grok to register a new post (parentPostId). Using a
+        # client-made UUID here returns 404 "Source post not found".
+        parent_post_id = await create_media_post(
+            self._tab,
+            statsig_id=create_sid,
+            prompt=prompt,
+            media_type="MEDIA_POST_TYPE_VIDEO",
+        )
+
+        # Step 2: submit the video generation request.
+        payload = build_video_submit_payload(
+            file_ids=file_ids,
+            file_uris=file_uris,
+            parent_post_id=parent_post_id,
+            prompt=prompt,
+            duration=duration,
+            resolution=resolution,
+            aspect_ratio=aspect_ratio,
+        )
+        # `preset` is unused in the direct path — the "--mode=normal/custom"
+        # tag is driven by prompt presence inside build_video_submit_payload,
+        # matching what the UI actually sends.
+        _ = preset
+
+        _ = timeout  # reserved; direct fetch waits for Grok's NDJSON stream
+        try:
+            response_text = await direct_submit_video(
+                self._tab,
+                payload=payload,
+                statsig_id=conv_sid,
+            )
+        except RuntimeError as e:
+            # x-statsig-id appears to be effectively single-use per endpoint;
+            # after one successful direct submit, the cached sid is stale and
+            # Grok returns HTTP 403 anti-bot. Give the caller a clear signal
+            # rather than letting the cryptic error bubble up.
+            if "403" in str(e):
+                # Invalidate the cache so a subsequent UI-path create_video
+                # can repopulate from fresh telemetry.
+                snitch._by_endpoint.pop("/rest/app-chat/conversations/new", None)
+                snitch._by_endpoint.pop("/rest/media/post/create", None)
+                raise GrokAPIError(
+                    "Direct REST submit rejected by anti-bot (cached "
+                    "x-statsig-id consumed). Re-prime by calling "
+                    "create_video() once with local file paths, then retry."
+                ) from e
+            raise
+
+        return parse_video_ndjson_response(
+            response_text, parent_post_id=parent_post_id, statsig_id=conv_sid
+        )
+
     async def _create_video_from_upload(
         self,
         image_paths: list[str | Path],
@@ -1878,6 +2048,8 @@ class GrokClient(ResponseParser):
         import asyncio
         import random
 
+        from ai_dev_browser import cdp
+
         from .actions.imagine_input import (
             check_moderated_images,
             click_submit,
@@ -1898,9 +2070,34 @@ class GrokClient(ResponseParser):
         await navigate_to_imagine(self._tab, delay=self._ui_delay)
         await remove_all_images(self._tab, delay=self._ui_delay)
 
-        # Step 2: Upload all images
+        # Step 2: Upload all images, sniffing fileMetadataIds from the
+        # /rest/app-chat/upload-file responses so the caller can later retry
+        # without re-uploading (see VideoGenerationResult.image_file_ids).
+        captured_file_ids: list[str] = []
+        seen_upload_req_id: dict[str, int | None] = {"id": None}
+
+        async def _sniff_upload(event):
+            if "/rest/app-chat/upload-file" in event.response.url:
+                seen_upload_req_id["id"] = event.request_id
+
+        await self._tab.send(cdp.network.enable())
+        self._tab.add_handler(cdp.network.ResponseReceived, _sniff_upload)
+
         for path in image_paths:
+            seen_upload_req_id["id"] = None
             await _upload(self._tab, path, delay=self._ui_delay)
+            req_id = seen_upload_req_id["id"]
+            if req_id:
+                try:
+                    body = await self._tab.send(cdp.network.get_response_body(request_id=req_id))
+                    body_text = body[0] if isinstance(body, tuple) else body
+                    import json as _json
+
+                    fid = _json.loads(body_text).get("fileMetadataId")
+                    if fid:
+                        captured_file_ids.append(fid)
+                except Exception:
+                    pass  # best-effort; upload already succeeded
 
         # Step 2.5: Wait briefly then check for moderated images
         await asyncio.sleep(2)
@@ -1948,9 +2145,13 @@ class GrokClient(ResponseParser):
             response_text = await monitor.wait_for_body(timeout=timeout)
 
         # Parse NDJSON response — parent_post_id from response itself
-        return parse_video_ndjson_response(
+        result = parse_video_ndjson_response(
             response_text, parent_post_id="", statsig_id=monitor.statsig_id
         )
+        # Attach uploaded file IDs so the caller can retry via 'file:' refs
+        # (bypasses both re-upload and the UI flow on subsequent calls).
+        result.image_file_ids = captured_file_ids
+        return result
 
     async def _scan_favorited_indices(self) -> list[int]:
         """Scan gallery DOM to find which items have been favorited.
@@ -2688,13 +2889,17 @@ class GrokClient(ResponseParser):
         from .prompt_parser import classify_image_source
 
         sources = [classify_image_source(img) for img in images]
-        has_posts = any(s[0] == "post" for s in sources)
-        has_files = any(s[0] == "file" for s in sources)
+        types = {s[0] for s in sources}
 
-        if has_posts and has_files:
-            raise ValueError("Cannot mix 'post:' references and file paths in images list.")
+        if len(types) > 1:
+            raise ValueError(
+                "Cannot mix source types in images list — use only one of: "
+                "'post:<uuid>', 'file:<uuid>' (previously uploaded), or local paths."
+            )
 
-        if has_posts:
+        kind = next(iter(types))
+
+        if kind == "post":
             # img2vid — use first post source
             post_id = sources[0][1]
             return await self._create_video_via_ui(
@@ -2705,6 +2910,20 @@ class GrokClient(ResponseParser):
                 duration=duration,
                 resolution=resolution,
                 aspect_ratio=aspect_ratio,
+            )
+
+        if kind == "upload":
+            # Previously uploaded file IDs — direct REST path (no re-upload,
+            # no UI interaction).
+            file_ids = [s[1] for s in sources]
+            return await self._create_video_from_file_ids(
+                file_ids=file_ids,
+                prompt=prompt,
+                duration=duration,
+                resolution=resolution,
+                aspect_ratio=aspect_ratio,
+                preset=preset,
+                timeout=timeout,
             )
 
         # upload2vid — upload file(s) and generate

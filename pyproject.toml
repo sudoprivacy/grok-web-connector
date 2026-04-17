@@ -16,7 +16,7 @@ authors = [
 ]
 dependencies = [
     "pydantic>=2.0.0",
-    "ai-dev-browser @ git+https://github.com/sudoprivacy/ai-dev-browser.git@v0.4.2",
+    "ai-dev-browser @ git+https://github.com/sudoprivacy/ai-dev-browser.git@v0.4.4",
 ]
 
 [project.scripts]

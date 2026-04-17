@@ -59,19 +59,25 @@ def classify_image_source(source: str) -> tuple[str, str]:
     """Classify an image source string.
 
     Args:
-        source: Image source — either 'post:<uuid>' or a file path.
+        source: Image source — 'post:<uuid>', 'file:<uuid>', or a file path.
 
     Returns:
         Tuple of (source_type, value):
-        - ('post', '<uuid>') for existing Grok posts
-        - ('file', '<path>') for local file paths
+        - ('post', '<uuid>') for existing Grok posts (img2vid via UI)
+        - ('upload', '<fileMetadataId>') for previously uploaded files
+          (direct REST, no re-upload needed)
+        - ('file', '<path>') for local file paths (will be uploaded)
 
     Examples:
         >>> classify_image_source('post:8ddd91f6-abcd-1234-5678-abcdef012345')
         ('post', '8ddd91f6-abcd-1234-5678-abcdef012345')
+        >>> classify_image_source('file:477c03f8-f4ca-4226-989a-040ed21ef7ec')
+        ('upload', '477c03f8-f4ca-4226-989a-040ed21ef7ec')
         >>> classify_image_source('./frame1.jpg')
         ('file', './frame1.jpg')
     """
     if source.startswith("post:"):
         return ("post", source[5:])
+    if source.startswith("file:"):
+        return ("upload", source[5:])
     return ("file", source)
