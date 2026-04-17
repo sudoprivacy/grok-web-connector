@@ -142,7 +142,17 @@ async def check_moderated_images(tab) -> list[int]:
     if not isinstance(result, list):
         logger.warning(f"check_moderated_images got {type(result).__name__}, returning empty")
         return []
-    return result
+    # ai-dev-browser's deep serialization wraps list elements as
+    # {"type": "number", "value": N}; unwrap to plain ints.
+    indices = []
+    for item in result:
+        if isinstance(item, int):
+            indices.append(item)
+        elif isinstance(item, dict) and item.get("type") == "number":
+            indices.append(int(item["value"]))
+        else:
+            logger.warning(f"check_moderated_images unexpected element: {item!r}")
+    return indices
 
 
 async def remove_moderated_images(tab, *, delay: float = 1.0) -> int:
