@@ -22,14 +22,24 @@ BASE_URL = "https://grok.com"
 
 
 async def navigate_to_imagine(tab, *, delay: float = 1.0) -> None:
-    """Navigate to the Imagine homepage if not already there.
+    """Navigate to the Imagine homepage, forcing navigation unless already
+    on the clean homepage.
+
+    Skips navigation only if the URL is exactly /imagine (with optional
+    trailing slash or query). Template pages (/imagine/templates/...),
+    post pages (/imagine/post/...), and sub-routes all force a fresh
+    navigation to avoid operating inside a modal or detail view where
+    selectors match the wrong elements.
 
     Args:
         tab: browser Tab instance
         delay: UI delay multiplier
     """
     current_url = await tab.evaluate("window.location.href")
-    if "/imagine" not in current_url or "/imagine/post/" in current_url:
+    # Normalize: strip query/hash, trailing slash
+    path = current_url.split("?", 1)[0].split("#", 1)[0].rstrip("/")
+    on_clean_homepage = path.endswith("/imagine")
+    if not on_clean_homepage:
         await tab.get(f"{BASE_URL}/imagine")
         await asyncio.sleep(2 * delay)
 
@@ -113,7 +123,7 @@ async def _count_uploaded_images(tab) -> int:
 async def check_moderated_images(tab) -> list[int]:
     """Check which uploaded images have been moderated by Grok.
 
-    Moderated images show a warning triangle overlay (lucide-triangle-alert SVG)
+    Moderated images show a warning triangle overlay (`.lucide-triangle-alert`)
     but remain in the UI with their 'Remove image' button.
 
     Finds image containers by walking up from each 'Remove image' button
@@ -397,16 +407,26 @@ async def reference_image(tab, image_index: int, *, delay: float = 1.0) -> bool:
     Returns:
         True if the image was selected, False if not found.
     """
-    # Focus editor and type @
-    editor = await tab.query_selector(".tiptap.ProseMirror")
-    if not editor:
-        editor = await tab.query_selector('[contenteditable="true"]')
-    if not editor:
+    # Focus editor and type @.
+    # Use JS focus + insert_text instead of click + dispatch_key_event because:
+    # - .click() on a ProseMirror DIV sometimes targets BODY
+    # - dispatch_key_event("char") does not insert text into ProseMirror's internal
+    #   model; insert_text sends an InputEvent which ProseMirror honors.
+    editor_exists = await tab.evaluate(
+        '!!(document.querySelector(".tiptap.ProseMirror") || '
+        "document.querySelector('[contenteditable=\"true\"]'))",
+        await_promise=False,
+    )
+    if not editor_exists:
         raise GrokAPIError("Contenteditable editor not found")
 
-    await editor.click()
+    await tab.evaluate(
+        '(document.querySelector(".tiptap.ProseMirror") || '
+        "document.querySelector('[contenteditable=\"true\"]')).focus()",
+        await_promise=False,
+    )
     await asyncio.sleep(0.2 * delay)
-    await tab.send(cdp.input_.dispatch_key_event("char", text="@"))
+    await tab.send(cdp.input_.insert_text(text="@"))
     await asyncio.sleep(0.5 * delay)
 
     # Wait for and click "Image N" button
