@@ -2227,19 +2227,102 @@ class GrokClient(ResponseParser):
 
         await asyncio.sleep(random.uniform(0.3, 0.8))
 
-        # Step 6: Set up network monitor, click submit, capture response
+        # Step 6: Set up network monitor, click submit, capture response.
+        #
+        # Grok's frontend streams the /app-chat/conversations/new response as
+        # NDJSON and, as soon as it sees the generated video_id in the stream,
+        # router.push's to /imagine/post/{video_id}. That SPA navigation can
+        # abort the in-flight XHR BEFORE the browser fires LoadingFinished
+        # — the tab ends up on the post page, the video exists, but our
+        # CDPMonitor (which only watches LoadingFinished) hangs forever.
+        #
+        # To keep the flow reliable we race two signals: (a) CDPMonitor gets
+        # the body the normal way, OR (b) the tab URL lands on
+        # /imagine/post/{uuid}. Whichever comes first wins.
+        import re as _re
+
+        _post_re = _re.compile(r"/imagine/post/([0-9a-f-]{36})")
+
+        async def _wait_body_or_nav(timeout_s: float) -> tuple[str, str] | None:
+            """Return (mode, payload):
+            ('body', ndjson_text) — got the full NDJSON body, normal path
+            ('url', video_id)     — tab navigated to post page; fall back
+            """
+            start = asyncio.get_event_loop().time()
+            while True:
+                if monitor.body is not None:
+                    return ("body", monitor.body)
+                try:
+                    cur = await asyncio.wait_for(
+                        self._tab.evaluate(
+                            "window.location.href",
+                            await_promise=False,
+                            return_by_value=True,
+                        ),
+                        timeout=2.0,
+                    )
+                except Exception:
+                    cur = ""
+                if isinstance(cur, str):
+                    m = _post_re.search(cur)
+                    if m:
+                        return ("url", m.group(1))
+                if asyncio.get_event_loop().time() - start > timeout_s:
+                    return None
+                await asyncio.sleep(1.0)
+
         async with CDPMonitor(self._tab, "/app-chat/conversations/new") as monitor:
             await click_submit(self._tab, delay=self._ui_delay)
 
             if not await monitor.wait_for_request(timeout=8):
                 raise GrokAPIError("Submit did not trigger video generation request")
 
-            response_text = await monitor.wait_for_body(timeout=timeout)
+            outcome = await _wait_body_or_nav(timeout_s=float(timeout))
+            if outcome is None:
+                raise GrokAPIError(
+                    f"Timed out waiting for video generation response "
+                    f"({timeout}s). Neither NDJSON body nor post-page "
+                    f"navigation observed. Tab may be stuck."
+                )
 
-        # Parse NDJSON response — parent_post_id from response itself
-        result = parse_video_ndjson_response(
-            response_text, parent_post_id="", statsig_id=monitor.statsig_id
-        )
+        mode, payload = outcome
+        if mode == "body":
+            # Happy path — parse the full NDJSON stream.
+            result = parse_video_ndjson_response(
+                payload, parent_post_id="", statsig_id=monitor.statsig_id
+            )
+        else:
+            # Fallback — XHR was aborted by SPA nav but Grok still completed
+            # the generation. Reconstruct a VideoGenerationResult from the
+            # post's REST record.
+            video_id = payload
+            logger.warning(
+                f"CDP NDJSON body never arrived for video {video_id}; "
+                f"recovering via /rest/media/post/get (happens when Grok's "
+                f"frontend router.push's before the XHR stream closes)."
+            )
+            try:
+                details = await self.get_post_details(video_id)
+                raw = details.raw_data.get("post", details.raw_data) if details.raw_data else {}
+                # Minimal fields — parse_video_ndjson_response's output shape
+                result = VideoGenerationResult(
+                    video_id=video_id,
+                    parent_post_id=raw.get("originalPostId") or video_id,
+                    moderated=False,  # verify_final (if set) will re-check
+                    progress=100,
+                    mode=raw.get("mode") or "normal",
+                    model_name=raw.get("modelName"),
+                    image_reference=None,
+                    conversation_id=None,
+                    statsig_id=monitor.statsig_id,
+                )
+            except Exception as e:
+                raise GrokAPIError(
+                    f"NDJSON body missing and REST recovery failed: {e}. "
+                    f"The video was created (id={video_id}) but its details "
+                    f"could not be fetched."
+                ) from e
+
         # Attach uploaded file IDs so the caller can retry via 'file:' refs
         # (bypasses both re-upload and the UI flow on subsequent calls).
         result.image_file_ids = captured_file_ids
