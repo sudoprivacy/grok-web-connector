@@ -34,6 +34,12 @@ class CDPMonitor:
         self.request_id: str | None = None
         self.body: str | None = None
         self.statsig_id: str | None = None
+        # Transport-level failure (TCP drop, abort, etc.) fires LoadingFailed,
+        # NOT LoadingFinished — body stays None forever unless we also watch
+        # that event. This field is set when CDP reports the matching
+        # request's transport aborted; callers can tell "body lost to abort"
+        # apart from "body genuinely not yet arrived".
+        self.failed_reason: str | None = None
         self._active = False
 
     async def __aenter__(self):
@@ -70,8 +76,25 @@ class CDPMonitor:
                 except Exception:
                     logger.debug("Failed to get response body for %s", event.request_id)
 
+        async def _on_loading_failed(event: cdp.network.LoadingFailed):
+            if not monitor._active:
+                return
+            if monitor.request_id and monitor.request_id == event.request_id:
+                reason = getattr(event, "error_text", None) or getattr(
+                    event, "blocked_reason", None
+                )
+                monitor.failed_reason = (
+                    str(reason) if reason is not None else "LoadingFailed (no reason given)"
+                )
+                logger.info(
+                    "CDPMonitor: request %s failed at transport — %s",
+                    event.request_id,
+                    monitor.failed_reason,
+                )
+
         self.tab.add_handler(cdp.network.RequestWillBeSent, _on_request)
         self.tab.add_handler(cdp.network.LoadingFinished, _on_loading_finished)
+        self.tab.add_handler(cdp.network.LoadingFailed, _on_loading_failed)
         self._active = True
 
         return self

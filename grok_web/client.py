@@ -2280,11 +2280,14 @@ class GrokClient(ResponseParser):
             """Return (mode, payload):
             ('body', ndjson_text) — got the full NDJSON body, normal path
             ('url', video_id)     — tab navigated to post page; fall back
+            ('failed', reason)    — CDP reported transport-level failure
             """
             start = asyncio.get_event_loop().time()
             while True:
                 if monitor.body is not None:
                     return ("body", monitor.body)
+                if monitor.failed_reason is not None:
+                    return ("failed", monitor.failed_reason)
                 try:
                     cur = await asyncio.wait_for(
                         self._tab.evaluate(
@@ -2304,6 +2307,55 @@ class GrokClient(ResponseParser):
                     return None
                 await asyncio.sleep(1.0)
 
+        async def _snapshot_tab_diagnostics() -> str:
+            """Gather a short human-readable blob describing the tab state
+            when a submit hangs — saves a round-trip to the user for the
+            next bug report."""
+            probes: list[str] = []
+            try:
+                url = await asyncio.wait_for(
+                    self._tab.evaluate(
+                        "window.location.href",
+                        await_promise=False,
+                        return_by_value=True,
+                    ),
+                    timeout=2.0,
+                )
+                probes.append(f"url={url!r}")
+            except Exception as e:
+                probes.append(f"url=<evaluate failed: {e}>")
+            try:
+                # Visible toast/banner text, if any. Grok tends to surface
+                # rate-limit / anti-abuse messages via role=status or
+                # role=alert nodes, plus body text scrap.
+                err_text = await asyncio.wait_for(
+                    self._tab.evaluate(
+                        """
+                        (function() {
+                            var parts = [];
+                            document.querySelectorAll(
+                              '[role=status], [role=alert], [aria-live]'
+                            ).forEach(n => {
+                                var t = (n.textContent || '').trim();
+                                if (t) parts.push(t.substring(0, 200));
+                            });
+                            return parts.join(' | ');
+                        })()
+                        """,
+                        await_promise=False,
+                        return_by_value=True,
+                    ),
+                    timeout=2.0,
+                )
+                probes.append(f"toasts={err_text!r}")
+            except Exception as e:
+                probes.append(f"toasts=<evaluate failed: {e}>")
+            probes.append(f"monitor.request_id={monitor.request_id!r}")
+            probes.append(f"monitor.body_received={monitor.body is not None}")
+            probes.append(f"monitor.failed_reason={monitor.failed_reason!r}")
+            probes.append(f"monitor.statsig_id_captured={monitor.statsig_id is not None}")
+            return " ; ".join(probes)
+
         async with CDPMonitor(self._tab, "/app-chat/conversations/new") as monitor:
             await click_submit(self._tab, delay=self._ui_delay)
 
@@ -2312,10 +2364,14 @@ class GrokClient(ResponseParser):
 
             outcome = await _wait_body_or_nav(timeout_s=float(timeout))
             if outcome is None:
+                # Timed out. Snapshot the tab so the next bug report has
+                # enough context to distinguish Grok-side rate limiting
+                # from a transport-level drop we didn't observe in time.
+                diag = await _snapshot_tab_diagnostics()
                 raise GrokAPIError(
-                    f"Timed out waiting for video generation response "
-                    f"({timeout}s). Neither NDJSON body nor post-page "
-                    f"navigation observed. Tab may be stuck."
+                    f"Timed out ({timeout}s) waiting for video generation "
+                    f"response. Neither NDJSON body nor post-page "
+                    f"navigation observed. Diagnostics: {diag}"
                 )
 
         mode, payload = outcome
@@ -2324,7 +2380,19 @@ class GrokClient(ResponseParser):
             result = parse_video_ndjson_response(
                 payload, parent_post_id="", statsig_id=monitor.statsig_id
             )
-        else:
+        elif mode == "failed":
+            # CDP told us the request's transport dropped (TCP reset,
+            # net::ERR_ABORTED, etc.). We have no body and no video_id.
+            # Attach any tab-state context the user might want to see.
+            diag = await _snapshot_tab_diagnostics()
+            raise GrokAPIError(
+                f"Video generation request failed at transport level "
+                f"(CDP LoadingFailed: {payload}). This usually means "
+                f"Grok dropped the connection — possible causes include "
+                f"anti-abuse rate limiting after prior moderation events, "
+                f"auth expiry, or a network blip. Diagnostics: {diag}"
+            )
+        else:  # mode == "url"
             # Fallback — XHR was aborted by SPA nav but Grok still completed
             # the generation. Reconstruct a VideoGenerationResult from the
             # post's REST record.
