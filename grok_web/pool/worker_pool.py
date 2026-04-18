@@ -19,9 +19,43 @@ from ai_dev_browser.pool.job import Job, JobResult, JobStatus
 from ai_dev_browser.pool.worker import Worker, WorkerStatus
 
 from ..client import GROK_CHROME_PROFILE, GrokClient
+from ..exceptions import GrokError
 from ..models import GrokCookies
 
 logger = logging.getLogger(__name__)
+
+
+# Substrings that, when seen in an exception's string form, strongly suggest
+# the Chrome/CDP transport is dead — the connection was refused, the socket
+# was reset, or the WebSocket hung up. Anything matching these counts toward
+# the dead-browser detector; plain business errors (GrokAPIError "No match..."
+# etc.) do not.
+_INFRA_ERROR_HINTS = (
+    "connection refused",
+    "connectionrefusederror",
+    "connectionreseterror",
+    "winerror 1225",  # no connection due to target active refusal (Windows)
+    "winerror 10054",  # connection reset by peer
+    "websocket",
+    "protocolexception",
+    "cdp command timed out",
+    "target closed",
+    "browser disconnected",
+)
+
+
+def _is_infra_failure(exc: BaseException) -> bool:
+    """Return True if the exception looks like browser/transport trouble
+    rather than a legitimate business failure.
+
+    Business failures inherit from GrokError (GrokAPIError, GrokNotFoundError,
+    etc.) — we explicitly exclude those. Everything else is checked against a
+    small allow-list of strings that actually indicate a dead CDP connection.
+    """
+    if isinstance(exc, GrokError):
+        return False
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(hint in text for hint in _INFRA_ERROR_HINTS)
 
 
 class BrowserWorkerPool(BrowserPool[GrokClient]):
@@ -117,13 +151,21 @@ class BrowserWorkerPool(BrowserPool[GrokClient]):
         # Each worker gets its own named profile for Chrome reuse
         profile = f"{GROK_CHROME_PROFILE}-w{worker_id}"
 
-        # Initialize browser client with per-worker profile
+        # Initialize browser client with per-worker profile.
+        # force_new_chrome=True -> pass reuse="none" to browser_start. This
+        # SKIPS ai-dev-browser's workspace-wide reuse (which is
+        # profile-agnostic and would collapse all workers onto the first
+        # existing Chrome), while STILL honoring the profile-dir-conflict
+        # safety path — i.e. cross-run reuse of the same per-worker profile
+        # is preserved. Without this, multiple workers silently share one
+        # Chrome on one port, defeating the whole point of the pool.
         client = GrokClient(
             cookies=self._cookies,
             config_path=self._config_path,
             headless=self._headless,
             auto_launch=True,
             profile=profile,
+            force_new_chrome=True,
         )
 
         try:
@@ -174,9 +216,16 @@ class BrowserWorkerPool(BrowserPool[GrokClient]):
     async def _worker_loop(self, worker: Worker) -> None:
         """Main loop for a worker - pulls jobs from queue and executes them.
 
-        Extends base _worker_loop with consecutive failure detection:
-        after 3+ consecutive failures, checks if Chrome is still alive
-        and fails all pending jobs if not.
+        Extends base _worker_loop with a fail-fast branch for genuine
+        browser death: if we rack up consecutive "infrastructure" failures
+        AND the Chrome port is no longer reachable, this worker exits its
+        loop and leaves the shared job queues alone. Other live workers
+        keep consuming — we never drain pending jobs out from under them.
+
+        Only failures that plausibly indicate browser trouble count toward
+        the consecutive_failures tally. Legitimate business failures
+        (GrokAPIError, ValueError, etc.) are not symptoms of a dead
+        browser — they reset the counter.
         """
         consecutive_failures = 0
         max_consecutive_failures = 3
@@ -210,7 +259,8 @@ class BrowserWorkerPool(BrowserPool[GrokClient]):
                         await self._handle_job_failure(
                             worker, job, f"fail_condition returned True: {result_data}"
                         )
-                        consecutive_failures += 1
+                        # Soft failures reflect business state (e.g. moderated
+                        # output), not browser health — don't count them.
                     else:
                         # Success
                         result = JobResult(
@@ -237,23 +287,34 @@ class BrowserWorkerPool(BrowserPool[GrokClient]):
 
                 except Exception as e:
                     await self._handle_job_failure(worker, job, str(e))
-                    consecutive_failures += 1
+                    if _is_infra_failure(e):
+                        consecutive_failures += 1
+                    else:
+                        # Legitimate business failure ("No matching video
+                        # found", validation errors, etc.) — reset the
+                        # browser-health counter. Repeated business misses
+                        # must NOT be interpreted as a dead browser.
+                        consecutive_failures = 0
 
                 finally:
                     worker.mark_idle()
                     self.save_state()
 
-                # Grok-specific: fail-fast if browser is dead
+                # Fail-fast: if only infra-style failures keep piling up AND
+                # Chrome is unreachable, stop THIS worker. Do NOT drain the
+                # shared queues — surviving workers on other Chromes must
+                # keep processing the backlog.
                 if (
                     consecutive_failures >= max_consecutive_failures
                     and not self._check_browser_alive(worker)
                 ):
-                    reason = (
+                    logger.error(
                         f"Worker {worker.worker_id} browser on port {worker.port} "
-                        f"is dead after {consecutive_failures} consecutive failures"
+                        f"is dead after {consecutive_failures} consecutive failures; "
+                        f"stopping this worker — other workers continue."
                     )
-                    logger.error(reason)
-                    await self._fail_all_pending_jobs(worker, reason)
+                    worker.mark_stopping()
+                    break
                     break
 
             except asyncio.CancelledError:
