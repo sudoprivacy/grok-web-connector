@@ -4,8 +4,8 @@ requires-python = ">=3.10"
 
 [[package]]
 name = "ai-dev-browser"
-version = "0.4.5"
-source = { git = "https://github.com/sudoprivacy/ai-dev-browser.git?rev=v0.4.5#3eb9306b4fff2f1db895dd86f6f892df236ab142" }
+version = "0.5.0"
+source = { git = "https://github.com/sudoprivacy/ai-dev-browser.git?rev=v0.5.0#fdf29f5609dafd90901bdc02bbe82d0b282fb4ab" }
 dependencies = [
     { name = "deprecated" },
     { name = "pillow" },
@@ -109,7 +109,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "ai-dev-browser", git = "https://github.com/sudoprivacy/ai-dev-browser.git?rev=v0.4.5" },
+    { name = "ai-dev-browser", git = "https://github.com/sudoprivacy/ai-dev-browser.git?rev=v0.5.0" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.6.0" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4.0" },
