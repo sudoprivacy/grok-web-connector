@@ -2395,7 +2395,8 @@ class GrokClient(ResponseParser):
         else:  # mode == "url"
             # Fallback — XHR was aborted by SPA nav but Grok still completed
             # the generation. Reconstruct a VideoGenerationResult from the
-            # post's REST record.
+            # post's REST record. Cap the REST read at 15s so a stuck
+            # /rest/media/post/get doesn't silently stall the whole call.
             video_id = payload
             logger.warning(
                 f"CDP NDJSON body never arrived for video {video_id}; "
@@ -2403,7 +2404,10 @@ class GrokClient(ResponseParser):
                 f"frontend router.push's before the XHR stream closes)."
             )
             try:
-                details = await self.get_post_details(video_id)
+                details = await asyncio.wait_for(
+                    self.get_post_details(video_id),
+                    timeout=15.0,
+                )
                 raw = details.raw_data.get("post", details.raw_data) if details.raw_data else {}
                 # Minimal fields — parse_video_ndjson_response's output shape
                 result = VideoGenerationResult(
@@ -2417,6 +2421,13 @@ class GrokClient(ResponseParser):
                     conversation_id=None,
                     statsig_id=monitor.statsig_id,
                 )
+            except asyncio.TimeoutError as e:
+                raise GrokAPIError(
+                    f"NDJSON body missing; REST recovery via get_post_details "
+                    f"timed out after 15s. Video {video_id} exists in Grok but "
+                    f"/rest/media/post/get is not returning — likely Grok-side "
+                    f"rate limiting, or the post has not been indexed yet."
+                ) from e
             except Exception as e:
                 raise GrokAPIError(
                     f"NDJSON body missing and REST recovery failed: {e}. "
@@ -3253,9 +3264,37 @@ class GrokClient(ResponseParser):
         # immediate NDJSON response only reflects prompt/ref moderation; a
         # video can pass that and still be blocked after rendering.
         if verify_final and result.video_id and not result.moderated:
+            import asyncio as _asyncio_vf
+
+            logger.info(
+                "verify_final: probing /rest/media/post/get for %s (15s cap)",
+                result.video_id,
+            )
             try:
-                if await self.check_video_moderated(result.video_id):
+                # Hard cap at 15s: this is a single REST read, no streaming.
+                # If it takes longer than that, Grok is throttling / the
+                # video isn't indexed yet / something is wrong — don't let
+                # it silently hang the whole create_video() call.
+                mod = await _asyncio_vf.wait_for(
+                    self.check_video_moderated(result.video_id),
+                    timeout=15.0,
+                )
+                if mod:
                     result.moderated = True
+                logger.info(
+                    "verify_final: moderated=%s for %s",
+                    result.moderated,
+                    result.video_id,
+                )
+            except _asyncio_vf.TimeoutError:
+                logger.warning(
+                    "verify_final: check_video_moderated(%s) timed out after "
+                    "15s — leaving result.moderated=%s. Grok may be rate-"
+                    "limiting /rest/media/post/get or the video has not yet "
+                    "been indexed.",
+                    result.video_id,
+                    result.moderated,
+                )
             except Exception as e:
                 logger.warning(
                     f"verify_final check failed ({e}); leaving result.moderated unchanged"
