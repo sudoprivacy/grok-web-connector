@@ -2123,6 +2123,25 @@ class GrokClient(ResponseParser):
         from .actions.network_monitor import CDPMonitor
         from .prompt_parser import parse_prompt
 
+        # Step 0: Fast health-check the tab. If the browser died between
+        # calls (e.g. after a previous upload-moderation raise the user
+        # observed Chrome on port N disappear), we want to surface that
+        # here as a clear error rather than hanging later on a CDP call
+        # whose target is gone.
+        try:
+            await asyncio.wait_for(
+                self._tab.evaluate("1", await_promise=False, return_by_value=True),
+                timeout=5.0,
+            )
+        except Exception as e:
+            raise GrokAPIError(
+                f"Browser tab appears unresponsive or closed "
+                f"(health check failed: {type(e).__name__}: {e}). "
+                f"This usually means Chrome crashed or the debug port is "
+                f"no longer reachable. Exit and re-enter the get_client() "
+                f"context to recover."
+            ) from e
+
         # Step 1: Navigate to imagine homepage (clean state)
         await navigate_to_imagine(self._tab, delay=self._ui_delay)
         await remove_all_images(self._tab, delay=self._ui_delay)
@@ -2130,44 +2149,60 @@ class GrokClient(ResponseParser):
         # Step 2: Upload all images, sniffing fileMetadataIds from the
         # /rest/app-chat/upload-file responses so the caller can later retry
         # without re-uploading (see VideoGenerationResult.image_file_ids).
+        # ai-dev-browser has no remove_handler, so we install exactly one
+        # handler and gate its body with an 'active' flag — when this
+        # call exits (success or raise), the handler becomes a no-op.
         captured_file_ids: list[str] = []
         seen_upload_req_id: dict[str, int | None] = {"id": None}
+        sniff_state: dict[str, bool] = {"active": True}
 
         async def _sniff_upload(event):
+            if not sniff_state["active"]:
+                return
             if "/rest/app-chat/upload-file" in event.response.url:
                 seen_upload_req_id["id"] = event.request_id
 
         await self._tab.send(cdp.network.enable())
         self._tab.add_handler(cdp.network.ResponseReceived, _sniff_upload)
 
-        for path in image_paths:
-            seen_upload_req_id["id"] = None
-            await _upload(self._tab, path, delay=self._ui_delay)
-            req_id = seen_upload_req_id["id"]
-            if req_id:
-                try:
-                    body = await self._tab.send(cdp.network.get_response_body(request_id=req_id))
-                    body_text = body[0] if isinstance(body, tuple) else body
-                    import json as _json
+        try:
+            for path in image_paths:
+                seen_upload_req_id["id"] = None
+                await _upload(self._tab, path, delay=self._ui_delay)
+                req_id = seen_upload_req_id["id"]
+                if req_id:
+                    try:
+                        body = await self._tab.send(
+                            cdp.network.get_response_body(request_id=req_id)
+                        )
+                        body_text = body[0] if isinstance(body, tuple) else body
+                        import json as _json
 
-                    fid = _json.loads(body_text).get("fileMetadataId")
-                    if fid:
-                        captured_file_ids.append(fid)
-                except Exception:
-                    pass  # best-effort; upload already succeeded
+                        fid = _json.loads(body_text).get("fileMetadataId")
+                        if fid:
+                            captured_file_ids.append(fid)
+                    except Exception:
+                        pass  # best-effort; upload already succeeded
 
-        # Step 2.5: Wait briefly then check for moderated images
-        await asyncio.sleep(2)
-        moderated = await check_moderated_images(self._tab)
-        if moderated:
-            total = len(image_paths)
-            mod_indices = [i + 1 for i in moderated]  # 1-based for user
-            mod_files = [str(image_paths[i]) for i in moderated if i < len(image_paths)]
-            raise GrokAPIError(
-                f"{len(moderated)} of {total} images were moderated by Grok "
-                f"(images {mod_indices}): {mod_files}. "
-                "All images must pass moderation to proceed."
-            )
+            # Step 2.5: Wait briefly then check for moderated images
+            await asyncio.sleep(2)
+            moderated = await check_moderated_images(self._tab)
+            if moderated:
+                total = len(image_paths)
+                mod_indices = [i + 1 for i in moderated]  # 1-based for user
+                mod_files = [str(image_paths[i]) for i in moderated if i < len(image_paths)]
+                raise GrokAPIError(
+                    f"{len(moderated)} of {total} images were moderated by Grok "
+                    f"(images {mod_indices}): {mod_files}. "
+                    "All images must pass moderation to proceed."
+                )
+        except BaseException:
+            # Stop the sniff handler early on ANY exit path, not just the
+            # happy one. We can't remove the handler from the tab, so mark
+            # it inactive — subsequent fires become cheap no-ops instead
+            # of accumulating over repeated create_video() calls.
+            sniff_state["active"] = False
+            raise
 
         # Step 3: Switch to video mode
         await set_mode(self._tab, "视频", delay=self._ui_delay)
@@ -2208,6 +2243,10 @@ class GrokClient(ResponseParser):
         # Attach uploaded file IDs so the caller can retry via 'file:' refs
         # (bypasses both re-upload and the UI flow on subsequent calls).
         result.image_file_ids = captured_file_ids
+        # Stop the upload sniffer now that this call has finished. Each
+        # create_video() installs its own closure-scoped sniffer; without
+        # this, repeated calls accumulate dead handlers.
+        sniff_state["active"] = False
         return result
 
     async def _scan_favorited_indices(self) -> list[int]:
