@@ -4,13 +4,17 @@ requires-python = ">=3.10"
 
 [[package]]
 name = "ai-dev-browser"
-version = "0.5.0"
-source = { git = "https://github.com/sudoprivacy/ai-dev-browser.git?rev=v0.5.0#fdf29f5609dafd90901bdc02bbe82d0b282fb4ab" }
+version = "0.5.3"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "deprecated" },
     { name = "pillow" },
     { name = "websocket-client" },
     { name = "websockets" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/2d/4e/b36c1105d3c190e5b4bbb88349fe2ec22ec8b70895b17354a657bd182ef1/ai_dev_browser-0.5.3.tar.gz", hash = "sha256:d8f02f4908b5943c95b7afe69715bbc8d924c2b5dc227ee48598243cc38552f2", size = 425599, upload-time = "2026-04-18T14:19:25.43Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a8/da/8fd8c6bcd8faea0470619ce61884a7aca39c15abbafe29329229acefdde2/ai_dev_browser-0.5.3-py3-none-any.whl", hash = "sha256:8f40a42000d0690907eb9aa4f510be3de273043e7ce4361d0b3aaf4aba9cd893", size = 410986, upload-time = "2026-04-18T14:19:23.853Z" },
 ]
 
 [[package]]
@@ -109,7 +113,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "ai-dev-browser", git = "https://github.com/sudoprivacy/ai-dev-browser.git?rev=v0.5.0" },
+    { name = "ai-dev-browser", specifier = ">=0.5.3,<0.6" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.6.0" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4.0" },
