@@ -52,6 +52,12 @@ logger = logging.getLogger(__name__)
 # Named profile for grok Chrome (persistent across runs)
 GROK_CHROME_PROFILE = "grok-chrome"
 
+# Grok returns this fixed thumbnail image UUID when a post is moderated
+# (hidden-from-view, shown in UI as a slashed-eye icon). Observed directly
+# via /rest/media/post/get on moderated videos, both for immediate and
+# post-render moderation.
+MODERATED_THUMBNAIL_UUID = "21d8b635-e385-4cff-8faf-6716975dbd2a"
+
 # x-statsig-id is required for Grok API requests
 # This is a Statsig SDK client ID, reusable across requests
 DEFAULT_STATSIG_ID = (
@@ -558,6 +564,53 @@ class GrokClient(ResponseParser):
         data = await self._api_request("POST", MEDIA_POST_GET_ENDPOINT, {"id": post_id})
         post_data = data.get("post", data)
         return self._parse_post_details(post_data, post_id, raw_data=data)
+
+    async def check_video_moderated(self, video_id: str) -> bool:
+        """Check whether a generated video was moderated by Grok.
+
+        Unlike the ``moderated`` field on ``VideoGenerationResult`` — which
+        only reflects the immediate NDJSON response from the generation
+        endpoint — this consults ``/rest/media/post/get`` which is updated
+        with the post-render moderation verdict. Use this after
+        ``create_video()`` to catch videos that *passed* initial prompt/ref
+        moderation but were blocked by post-render content review.
+
+        Detection signals (any one → moderated):
+
+        - ``mediaUrl`` is empty on the post or its first child video
+          (non-moderated finished videos always have a populated URL)
+        - ``thumbnailImageUrl`` contains the fixed moderated-placeholder
+          image UUID (``MODERATED_THUMBNAIL_UUID``)
+
+        Args:
+            video_id: UUID returned by ``create_video()`` (or equivalently
+                ``VideoGenerationResult.video_id``).
+
+        Returns:
+            True if Grok moderated the final video, False otherwise.
+
+        Example:
+            >>> result = await client.create_video({"images": paths, "prompt": "..."})
+            >>> if not result.moderated and await client.check_video_moderated(result.video_id):
+            ...     # post-render moderation caught it — retry with different frames
+            ...     ...
+        """
+        data = await self._api_request("POST", MEDIA_POST_GET_ENDPOINT, {"id": video_id})
+        post = data.get("post", data)
+
+        def _is_moderated_obj(obj: dict) -> bool:
+            if not obj.get("mediaUrl"):
+                return True
+            thumb = obj.get("thumbnailImageUrl") or ""
+            return MODERATED_THUMBNAIL_UUID in thumb
+
+        # Check the root post; if it has child videos, also check the first
+        # one (for upload2vid the root is the container and the video sits
+        # under videos[0] / childPosts).
+        if _is_moderated_obj(post):
+            return True
+        videos = post.get("videos") or []
+        return bool(videos and _is_moderated_obj(videos[0]))
 
     async def get_asset_file_size(self, asset_url: str) -> int:
         """Get file size of a Grok asset via HEAD request."""
@@ -2868,6 +2921,7 @@ class GrokClient(ResponseParser):
         resolution = p.get("resolution", "720p")
         preset = p.get("preset", "normal")
         wait_for_video = p.get("wait_for_video", True)
+        verify_final = p.get("verify_final", False)
 
         # aspect_ratio: default "2:3" for txt2vid, None for upload2vid
         # (Grok UI hides aspect ratio dropdown for multi-image uploads)
@@ -2878,64 +2932,76 @@ class GrokClient(ResponseParser):
 
         if not images:
             # txt2vid — text prompt only
-            return await self._create_video_from_text(
+            result = await self._create_video_from_text(
                 prompt=prompt,
                 aspect_ratio=aspect_ratio,
                 timeout=timeout,
                 wait_for_video=wait_for_video,
             )
+        else:
+            # Classify image sources
+            from .prompt_parser import classify_image_source
 
-        # Classify image sources
-        from .prompt_parser import classify_image_source
+            sources = [classify_image_source(img) for img in images]
+            types = {s[0] for s in sources}
 
-        sources = [classify_image_source(img) for img in images]
-        types = {s[0] for s in sources}
+            if len(types) > 1:
+                raise ValueError(
+                    "Cannot mix source types in images list — use only one of: "
+                    "'post:<uuid>', 'file:<uuid>' (previously uploaded), or local paths."
+                )
 
-        if len(types) > 1:
-            raise ValueError(
-                "Cannot mix source types in images list — use only one of: "
-                "'post:<uuid>', 'file:<uuid>' (previously uploaded), or local paths."
-            )
+            kind = next(iter(types))
 
-        kind = next(iter(types))
+            if kind == "post":
+                # img2vid — use first post source
+                post_id = sources[0][1]
+                result = await self._create_video_via_ui(
+                    parent_post_id=post_id,
+                    preset=preset,
+                    timeout=timeout,
+                    adjustment_prompt=prompt if prompt else None,
+                    duration=duration,
+                    resolution=resolution,
+                    aspect_ratio=aspect_ratio,
+                )
+            elif kind == "upload":
+                # Previously uploaded file IDs — direct REST path.
+                file_ids = [s[1] for s in sources]
+                result = await self._create_video_from_file_ids(
+                    file_ids=file_ids,
+                    prompt=prompt,
+                    duration=duration,
+                    resolution=resolution,
+                    aspect_ratio=aspect_ratio,
+                    preset=preset,
+                    timeout=timeout,
+                )
+            else:
+                # upload2vid — upload file(s) and generate
+                file_paths = [s[1] for s in sources]
+                result = await self._create_video_from_upload(
+                    image_paths=file_paths,
+                    prompt=prompt,
+                    timeout=timeout,
+                    duration=duration,
+                    resolution=resolution,
+                    aspect_ratio=aspect_ratio,
+                )
 
-        if kind == "post":
-            # img2vid — use first post source
-            post_id = sources[0][1]
-            return await self._create_video_via_ui(
-                parent_post_id=post_id,
-                preset=preset,
-                timeout=timeout,
-                adjustment_prompt=prompt if prompt else None,
-                duration=duration,
-                resolution=resolution,
-                aspect_ratio=aspect_ratio,
-            )
+        # Optional: confirm post-render moderation verdict via REST. The
+        # immediate NDJSON response only reflects prompt/ref moderation; a
+        # video can pass that and still be blocked after rendering.
+        if verify_final and result.video_id and not result.moderated:
+            try:
+                if await self.check_video_moderated(result.video_id):
+                    result.moderated = True
+            except Exception as e:
+                logger.warning(
+                    f"verify_final check failed ({e}); leaving result.moderated unchanged"
+                )
 
-        if kind == "upload":
-            # Previously uploaded file IDs — direct REST path (no re-upload,
-            # no UI interaction).
-            file_ids = [s[1] for s in sources]
-            return await self._create_video_from_file_ids(
-                file_ids=file_ids,
-                prompt=prompt,
-                duration=duration,
-                resolution=resolution,
-                aspect_ratio=aspect_ratio,
-                preset=preset,
-                timeout=timeout,
-            )
-
-        # upload2vid — upload file(s) and generate
-        file_paths = [s[1] for s in sources]
-        return await self._create_video_from_upload(
-            image_paths=file_paths,
-            prompt=prompt,
-            timeout=timeout,
-            duration=duration,
-            resolution=resolution,
-            aspect_ratio=aspect_ratio,
-        )
+        return result
 
     async def _create_video_via_ui(
         self,

@@ -61,6 +61,15 @@ PARAMS: dict[str, dict[str, Any]] = {
         "type": "bool",
         "default": True,
     },
+    "verify_final": {
+        "desc": (
+            "After generation, fetch the post via REST and confirm it was "
+            "not post-render moderated. If so, result.moderated is set True. "
+            "Adds one extra API call (~150ms). Default False."
+        ),
+        "type": "bool",
+        "default": False,
+    },
     "min_success": {
         "desc": "Minimum non-moderated images needed.",
         "type": "int",
@@ -99,6 +108,7 @@ VIDEO_KEYS = [
     "preset",
     "timeout",
     "wait_for_video",
+    "verify_final",
 ]
 
 IMAGE_KEYS = [
