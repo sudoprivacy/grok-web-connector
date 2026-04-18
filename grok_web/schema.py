@@ -20,7 +20,11 @@ logger = logging.getLogger(__name__)
 
 PARAMS: dict[str, dict[str, Any]] = {
     "images": {
-        "desc": "Image sources. Local file paths for upload, or 'post:<uuid>' for existing Grok posts. Max 5.",
+        "desc": (
+            "Image sources. Local file paths (uploads), 'post:<uuid>' "
+            "(existing Grok post), or 'file:<uuid>' (previously uploaded "
+            "via client.upload_images — skips re-upload). Max 5."
+        ),
         "type": "list[str]",
     },
     "prompt": {
@@ -63,9 +67,11 @@ PARAMS: dict[str, dict[str, Any]] = {
     },
     "verify_final": {
         "desc": (
-            "After generation, fetch the post via REST and confirm it was "
-            "not post-render moderated. If so, result.moderated is set True. "
-            "Adds one extra API call (~150ms). Default False."
+            "After generation, confirm post-render moderation via REST and "
+            "OR the verdict into result.moderated. Grok moderates twice — "
+            "once on the prompt/refs (reflected in the immediate response) "
+            "and again after the video renders. Adds ~150ms. For finer "
+            "control call client.check_video_moderated(video_id) directly."
         ),
         "type": "bool",
         "default": False,

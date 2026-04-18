@@ -299,7 +299,18 @@ class VideoGenerationResult(BaseModel):
     parent_post_id: str = Field(..., description="Parent image post UUID")
 
     # Generation status
-    moderated: bool = Field(False, description="True if content was flagged by moderation")
+    moderated: bool = Field(
+        False,
+        description=(
+            "True if content was flagged by moderation. "
+            "NOTE: reflects only the IMMEDIATE NDJSON response (prompt/"
+            "reference-image moderation). Grok also runs a second "
+            "post-render moderation pass whose verdict is NOT in this "
+            "field. To catch post-render moderation, pass "
+            "verify_final=True to create_video() or call "
+            "client.check_video_moderated(video_id) afterwards."
+        ),
+    )
     progress: int = Field(100, description="Generation progress (100 = complete)")
 
     # Metadata

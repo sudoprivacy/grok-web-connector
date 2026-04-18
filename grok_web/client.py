@@ -1929,9 +1929,13 @@ class GrokClient(ResponseParser):
             >>> refs = await client.upload_images({"images": ["a.jpg", "b.jpg"]})
             >>> refs
             ['file:477c03f8-...', 'file:09b7e799-...']
-            >>> # Retry up to 3 times without re-uploading:
+            >>> # Retry up to 3 times without re-uploading. Use
+            >>> # verify_final=True to also catch post-render moderation
+            >>> # (see client.check_video_moderated for details).
             >>> for _ in range(3):
-            ...     res = await client.create_video({"images": refs, "prompt": "@1 @2"})
+            ...     res = await client.create_video({
+            ...         "images": refs, "prompt": "@1 @2", "verify_final": True,
+            ...     })
             ...     if not res.moderated:
             ...         break
         """
@@ -2038,12 +2042,12 @@ class GrokClient(ResponseParser):
         # matching what the UI actually sends.
         _ = preset
 
-        _ = timeout  # reserved; direct fetch waits for Grok's NDJSON stream
         try:
             response_text = await direct_submit_video(
                 self._tab,
                 payload=payload,
                 statsig_id=conv_sid,
+                timeout=float(timeout),
             )
         except RuntimeError as e:
             # x-statsig-id appears to be effectively single-use per endpoint;
@@ -2874,7 +2878,9 @@ class GrokClient(ResponseParser):
 
         Args:
             params: Dict with keys from VIDEO_KEYS (see grok_web.schema):
-                images (list[str]): Image sources. 'post:<uuid>' or local paths. Max 5.
+                images (list[str]): Image sources. Local file paths (upload),
+                    'post:<uuid>' (existing post), or 'file:<uuid>' (previously
+                    uploaded via client.upload_images — skips re-upload). Max 5.
                 prompt (str): Text prompt. Use @1, @2... to reference images.
                 mode (str, default 'video'): 'image' or 'video'.
                 resolution (str, default '720p'): '480p', '720p'.
@@ -2883,9 +2889,28 @@ class GrokClient(ResponseParser):
                 preset (str): 'normal', 'fun', 'spicy'.
                 timeout (int, default 300): Max seconds to wait.
                 wait_for_video (bool, default True): Wait for video to load (txt2vid only).
+                verify_final (bool, default False): Double-check post-render
+                    moderation via REST after the immediate response. See
+                    'Moderation' note below.
 
         Returns:
             VideoGenerationResult with video_id and metadata.
+            - result.moderated reflects only the immediate NDJSON verdict
+              unless verify_final=True was passed (see below).
+            - result.image_file_ids lists the fileMetadataIds of any
+              uploaded images; reuse as ['file:<id>', ...] to retry
+              generation without re-uploading.
+
+        Moderation (two stages):
+            Grok moderates in two passes. The immediate pass checks the
+            prompt and reference images; its verdict populates
+            result.moderated. The second pass runs AFTER the video
+            actually renders — a video can pass the immediate pass and
+            still be replaced with a hidden-content placeholder.
+
+            To catch the second pass, either:
+              * pass verify_final=True (adds ~150ms, OR'd into moderated), or
+              * call client.check_video_moderated(video_id) when you need it.
 
         Examples:
             # txt2vid
@@ -2904,6 +2929,18 @@ class GrokClient(ResponseParser):
                 "resolution": "720p",
                 "duration": "10s",
             })
+
+            # Retry loop that survives both moderation stages
+            refs = None
+            for _ in range(5):
+                params = {"images": refs or ["./a.jpg", "./b.jpg"],
+                          "prompt": "zoom @1 @2",
+                          "verify_final": True}
+                r = await client.create_video(params)
+                if not r.moderated:
+                    break
+                # Reuse uploaded files on the next attempt (no re-upload).
+                refs = [f"file:{fid}" for fid in r.image_file_ids]
         """
         from .schema import VIDEO_KEYS, validate_params
 

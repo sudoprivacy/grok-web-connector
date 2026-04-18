@@ -305,16 +305,25 @@ async def direct_submit_video(
     tab,
     payload: dict,
     statsig_id: str,
+    timeout: float = 300.0,
 ) -> str:
     """POST the video-generation payload directly via in-page fetch.
 
     Uses the tab's session cookies (credentials: "include") plus the
     provided x-statsig-id to pass Grok's anti-bot check. Waits for the
     complete NDJSON stream (Grok holds the HTTP response open until
-    generation finishes, typically 20-60 s) and returns the full text.
+    generation finishes, typically 20-60 s).
+
+    The fetch runs as a detached JS task; Python polls ``window`` for
+    its result every 1 s. This avoids ai-dev-browser's 30 s per-CDP-
+    command timeout (a single ``tab.evaluate(..., await_promise=True)``
+    blocking for the whole stream would hit ``COMMAND_TIMEOUT`` and
+    then fail obscurely via the ``send_raw`` retry path's snake_case
+    bug on the ``allowUnsafeEvalBlockedByCSP`` CDP parameter).
 
     Raises:
-        RuntimeError: On non-2xx HTTP status.
+        RuntimeError: On non-2xx HTTP status or if the total wait
+            exceeds ``timeout``.
     """
     import uuid
 
@@ -325,7 +334,7 @@ async def direct_submit_video(
         "x-statsig-id": statsig_id,
     }
 
-    # Stash payload + headers on window to avoid escaping issues
+    # Stash payload + headers on window so we never embed them in JS source.
     await tab.evaluate(
         "window.__grokSubmitPayload = " + json.dumps(json.dumps(payload)),
         await_promise=False,
@@ -335,8 +344,12 @@ async def direct_submit_video(
         await_promise=False,
     )
 
-    result_json = await tab.evaluate(
+    # Kick off the fetch as a detached promise (NOT awaited here — each CDP
+    # command stays short so we don't trip COMMAND_TIMEOUT).
+    await tab.evaluate(
         """
+        window.__grokResult = null;
+        window.__grokError = null;
         (async () => {
           try {
             const resp = await fetch('/rest/app-chat/conversations/new', {
@@ -346,15 +359,33 @@ async def direct_submit_video(
               credentials: 'include',
             });
             const text = await resp.text();
-            return JSON.stringify({status: resp.status, body: text});
+            window.__grokResult = JSON.stringify({status: resp.status, body: text});
           } catch (e) {
-            return JSON.stringify({status: 0, body: 'FETCH_ERR: ' + e.message});
+            window.__grokError = 'FETCH_ERR: ' + (e && e.message ? e.message : String(e));
           }
-        })()
+        })();
         """,
-        await_promise=True,
-        return_by_value=True,
+        await_promise=False,
     )
+
+    # Poll. Each evaluate is sub-second so CDP never times out, regardless
+    # of how long Grok takes to finish the NDJSON stream.
+    start = asyncio.get_event_loop().time()
+    while True:
+        if asyncio.get_event_loop().time() - start > timeout:
+            raise RuntimeError(f"direct_submit_video: timed out after {timeout}s")
+        status = await tab.evaluate(
+            "JSON.stringify({r: window.__grokResult, e: window.__grokError})",
+            await_promise=False,
+            return_by_value=True,
+        )
+        parsed = json.loads(status) if isinstance(status, str) else {}
+        if parsed.get("e"):
+            raise RuntimeError(parsed["e"])
+        if parsed.get("r"):
+            result_json = parsed["r"]
+            break
+        await asyncio.sleep(1.0)
 
     result = json.loads(result_json) if isinstance(result_json, str) else result_json
     status = result.get("status", 0)
