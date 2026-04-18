@@ -1,175 +1,318 @@
 {
   "config": {
     "language": "python",
+    "framework": "pytest-asyncio",
     "imports": [
-      "from grok_web import get_client, PostDetails, VideoGenerationResult, ImageGenerationResult, VideoMatchResult"
+      "from grok_web import get_client, BrowserWorkerPool, VideoGenerationResult, ImageGenerationResult, PostDetails, VideoMatchResult"
     ],
     "call_style": "client",
     "extract_style": "attr",
     "required_env_vars": [],
+    "optional_env_vars": [
+      "TEST_SOURCE_POST_ID",
+      "TEST_LOCAL_FRAMES_DIR"
+    ],
     "smoke_test_assertions": [
       "get_client is not None",
-      "PostDetails is not None",
+      "BrowserWorkerPool is not None",
       "VideoGenerationResult is not None",
       "ImageGenerationResult is not None",
+      "PostDetails is not None",
       "VideoMatchResult is not None"
     ],
-    "note": "Tests are async (pytest-asyncio). generate.py does not support async, so test_workflows.py is hand-written following the same conventions."
+    "note": "Tests are async; generate.py does not emit async code. test_workflows.py is hand-written following these scenarios verbatim. Every scenario reflects the dict-based create_video({...}) API (v0.9.x)."
   },
   "scenarios": [
     {
-      "name": "browse_and_favorite",
-      "title": "Browse gallery, inspect a post, and favorite it",
-      "workflow": "list_posts → get_post_details → favorite_post → list_posts(favorites) verify → unfavorite_post (cleanup)",
-      "user_problem": "User browses their gallery, finds an interesting image, saves it to favorites for later, then un-favorites when done",
-      "skip_reason": "Requires real Chrome and Grok credentials",
+      "name": "browse_favorite_unfavorite",
+      "title": "Browse gallery, favorite a post, verify, unfavorite",
+      "workflow": "list_posts -> get_post_details -> favorite_post -> list_posts(favorites) -> unfavorite_post (cleanup)",
+      "user_problem": "User browses their gallery, saves something to favorites to revisit later, then unsaves it.",
+      "skip_reason": "Requires real Chrome and a logged-in Grok account.",
       "steps": [
         {
           "function": "list_posts",
           "params": {"limit": 5, "source": "all"},
           "var_name": "posts",
-          "description": "list_posts returns list of PostSummary with post IDs"
+          "description": "list_posts returns PostSummary list with post IDs"
         },
         {
           "function": "get_post_details",
-          "params": {"post_id": {"var": "post_id"}},
+          "params": {"post_id": {"var": "posts[0].id"}},
           "var_name": "details",
-          "description": "get_post_details uses first post ID to get full details (children, media URLs)"
+          "description": "get_post_details fetches full post record for the first returned post"
         },
         {
           "function": "favorite_post",
-          "params": {"post_id": {"var": "post_id"}},
+          "params": {"post_id": {"var": "posts[0].id"}},
           "var_name": "fav_ok",
-          "description": "favorite_post saves the post to favorites"
+          "description": "favorite_post saves the post"
         },
         {
           "function": "list_posts",
           "params": {"limit": 50, "source": "favorites"},
           "var_name": "favs",
-          "description": "list_posts(favorites) verifies the post appears in favorites"
+          "description": "list_posts(source=favorites) should now contain the post we just saved"
         },
         {
           "function": "unfavorite_post",
-          "params": {"post_id": {"var": "post_id"}},
+          "params": {"post_id": {"var": "posts[0].id"}},
           "var_name": "unfav_ok",
-          "description": "unfavorite_post removes the post (cleanup)",
+          "description": "unfavorite_post cleans up — un-stars the post so the test leaves no trace",
           "cleanup": true
         }
       ]
     },
     {
-      "name": "generate_video_720p_10s",
-      "title": "Generate 720p 10s video from an existing image",
-      "workflow": "create_video(720p, 10s) → get_post_details → verify resolution → delete_video (cleanup)",
-      "user_problem": "User wants to animate an existing Grok image into a high-quality 720p 10-second video and verify the output resolution",
-      "skip_reason": "Requires real Chrome, creates real video (consumes Grok credits)",
+      "name": "img2vid_roundtrip",
+      "title": "Generate video from an existing post and verify it appears as a child",
+      "workflow": "create_video(images=[post:<uuid>]) -> get_post_details -> verify child.id -> delete_video (cleanup)",
+      "user_problem": "User animates an existing Grok image post into a video and wants to confirm the video was registered under that parent.",
+      "skip_reason": "Creates a real video (consumes Grok credits).",
       "steps": [
         {
           "function": "create_video",
-          "params": {"source_post_id": {"var": "TEST_POST_ID"}, "duration": 10, "resolution": "720p"},
-          "var_name": "result",
-          "description": "create_video generates a 720p 10s video from the test image post"
+          "params": {
+            "params": {
+              "images": ["post:<TEST_SOURCE_POST_ID>"],
+              "prompt": "slow orbit around @1",
+              "resolution": "480p",
+              "duration": "6s"
+            }
+          },
+          "var_name": "video_result",
+          "description": "dict-based create_video with a post: reference runs the img2vid UI flow"
         },
         {
           "function": "get_post_details",
-          "params": {"post_id": {"var": "TEST_POST_ID"}},
-          "var_name": "details",
-          "description": "get_post_details fetches parent to find the new child video"
+          "params": {"post_id": {"var": "TEST_SOURCE_POST_ID"}},
+          "var_name": "parent_details",
+          "description": "get_post_details on the parent should list the new video as a child"
         },
         {
           "function": "delete_video",
-          "params": {"video_id": {"var": "result.video_id"}},
+          "params": {"video_id": {"var": "video_result.video_id"}},
           "var_name": "deleted",
-          "description": "delete_video cleans up the generated video",
+          "description": "delete_video cleans up",
           "cleanup": true
         }
       ]
     },
     {
-      "name": "generate_download_and_match",
-      "title": "Generate video, download it, then match the local file back to Grok",
-      "workflow": "create_video → download_video → match_local_video → verify → delete_video (cleanup)",
-      "user_problem": "User generates a video, downloads it locally, and later wants to find the original Grok post from the local file",
-      "skip_reason": "Requires real Chrome, creates/downloads real video",
+      "name": "upload2vid_retry_without_reupload",
+      "title": "Upload local frames once, retry generation cheaply via file: refs",
+      "workflow": "create_video(local files) -> capture image_file_ids -> create_video(images=['file:<id>',...]) -> delete_video x2 (cleanup)",
+      "user_problem": "User generates a video from local frames. The output gets moderated. They want to retry with the SAME uploaded frames instead of paying the upload cost again.",
+      "skip_reason": "Creates real videos (consumes Grok credits) and requires sample frame files.",
       "steps": [
         {
           "function": "create_video",
-          "params": {"source_post_id": {"var": "TEST_POST_ID"}, "duration": 6, "resolution": "480p"},
-          "var_name": "result",
-          "description": "create_video generates a quick 480p 6s video"
+          "params": {
+            "params": {
+              "images": [{"var": "local_frames"}],
+              "prompt": "zoom into @1",
+              "resolution": "480p",
+              "duration": "6s",
+              "verify_final": true
+            }
+          },
+          "var_name": "first",
+          "description": "First pass: real upload + generation. image_file_ids captured from /rest/app-chat/upload-file responses."
+        },
+        {
+          "function": "create_video",
+          "params": {
+            "params": {
+              "images": {"var": "[f'file:{fid}' for fid in first.image_file_ids]"},
+              "prompt": "pan across @1",
+              "resolution": "480p",
+              "duration": "6s",
+              "verify_final": true
+            }
+          },
+          "var_name": "second",
+          "description": "Second pass: direct REST using 'file:' refs. No UI, no re-upload. Should be noticeably faster than the first call."
+        },
+        {
+          "function": "delete_video",
+          "params": {"video_id": {"var": "first.video_id"}},
+          "var_name": "deleted1",
+          "description": "cleanup first video",
+          "cleanup": true
+        },
+        {
+          "function": "delete_video",
+          "params": {"video_id": {"var": "second.video_id"}},
+          "var_name": "deleted2",
+          "description": "cleanup second video",
+          "cleanup": true
+        }
+      ]
+    },
+    {
+      "name": "upload_images_then_reuse",
+      "title": "Standalone upload_images API, then generate from the returned refs",
+      "workflow": "create_video(prime) -> upload_images(...) -> create_video(images=['file:<id>',...])",
+      "user_problem": "User wants explicit control over upload lifecycle: upload once, then run N generations with different prompts on the same frames.",
+      "skip_reason": "Requires a prior UI-path create_video to prime the x-statsig-id cache (direct REST gate).",
+      "steps": [
+        {
+          "function": "create_video",
+          "params": {
+            "params": {
+              "images": [{"var": "local_frames_prime"}],
+              "prompt": "prime",
+              "resolution": "480p",
+              "duration": "6s"
+            }
+          },
+          "var_name": "prime",
+          "description": "Prime run — required so StatsigSnitch captures conversations/new and post/create sids."
+        },
+        {
+          "function": "upload_images",
+          "params": {"params": {"images": [{"var": "local_frames"}]}},
+          "var_name": "refs",
+          "description": "upload_images returns list of 'file:<uuid>' strings ready to be passed to create_video"
+        },
+        {
+          "function": "create_video",
+          "params": {
+            "params": {
+              "images": {"var": "refs"},
+              "prompt": "test using @1",
+              "resolution": "480p",
+              "duration": "6s"
+            }
+          },
+          "var_name": "gen",
+          "description": "Generation that consumes the pre-uploaded refs via direct REST"
+        },
+        {
+          "function": "delete_video",
+          "params": {"video_id": {"var": "prime.video_id"}},
+          "var_name": "d1",
+          "description": "cleanup prime",
+          "cleanup": true
+        },
+        {
+          "function": "delete_video",
+          "params": {"video_id": {"var": "gen.video_id"}},
+          "var_name": "d2",
+          "description": "cleanup reused-refs video",
+          "cleanup": true
+        }
+      ]
+    },
+    {
+      "name": "catch_post_render_moderation",
+      "title": "Generate, then verify Grok did NOT hide the video after rendering",
+      "workflow": "create_video -> check_video_moderated -> act on verdict",
+      "user_problem": "Immediate NDJSON moderated=False is not the whole story — Grok runs a second moderation pass AFTER the video renders. User wants to catch that.",
+      "skip_reason": "Requires real Chrome and borderline content to exercise post-render moderation.",
+      "steps": [
+        {
+          "function": "create_video",
+          "params": {
+            "params": {
+              "images": ["post:<TEST_SOURCE_POST_ID>"],
+              "prompt": "slow zoom",
+              "resolution": "480p",
+              "duration": "6s"
+            }
+          },
+          "var_name": "gen",
+          "description": "Run a normal generation. gen.moderated reflects only the immediate NDJSON verdict."
+        },
+        {
+          "function": "check_video_moderated",
+          "params": {"video_id": {"var": "gen.video_id"}},
+          "var_name": "final_mod",
+          "description": "Consult /rest/media/post/get: empty mediaUrl or placeholder-thumbnail means post-render moderation."
+        },
+        {
+          "function": "delete_video",
+          "params": {"video_id": {"var": "gen.video_id"}},
+          "var_name": "deleted",
+          "description": "cleanup",
+          "cleanup": true
+        }
+      ]
+    },
+    {
+      "name": "download_and_match_roundtrip",
+      "title": "Generate, download, then re-identify the post from the local file",
+      "workflow": "create_video -> download_video -> match_local_video -> verify round-trip -> delete_video (cleanup)",
+      "user_problem": "User has a locally-saved Grok video file and wants to find the post it came from — useful for reorganizers that sync local archives back to source posts.",
+      "skip_reason": "Creates a real video and writes it to a temp directory.",
+      "steps": [
+        {
+          "function": "create_video",
+          "params": {
+            "params": {
+              "images": ["post:<TEST_SOURCE_POST_ID>"],
+              "prompt": "test-for-match",
+              "resolution": "480p",
+              "duration": "6s"
+            }
+          },
+          "var_name": "gen",
+          "description": "Fresh video on the test post"
         },
         {
           "function": "download_video",
-          "params": {"video_id": {"var": "result.video_id"}, "output_path": {"var": "download_path"}, "parent_post_id": {"var": "TEST_POST_ID"}},
-          "var_name": "saved_path",
-          "description": "download_video downloads the video to a temp file"
+          "params": {
+            "video_id": {"var": "gen.video_id"},
+            "output_path": {"var": "str(tmp_path / 'v.mp4')"},
+            "parent_post_id": {"var": "TEST_SOURCE_POST_ID"}
+          },
+          "var_name": "local_path",
+          "description": "Save the video locally for match step"
         },
         {
           "function": "match_local_video",
-          "params": {"local_path": {"var": "saved_path"}},
+          "params": {"local_path": {"var": "local_path"}},
           "var_name": "match",
-          "description": "match_local_video identifies the Grok post from the downloaded file"
+          "description": "match_local_video should map the local file back to the Grok post and video"
         },
         {
           "function": "delete_video",
-          "params": {"video_id": {"var": "result.video_id"}},
+          "params": {"video_id": {"var": "gen.video_id"}},
           "var_name": "deleted",
-          "description": "delete_video cleans up the generated video",
+          "description": "cleanup",
           "cleanup": true
         }
       ]
     },
     {
-      "name": "text_to_image_to_video",
-      "title": "Create image from text, then animate it into a video",
-      "workflow": "create_image → create_video(img2vid) → get_post_details → verify",
-      "user_problem": "User has a creative idea, generates an image from text, then animates the result into a video — the full creative pipeline",
-      "skip_reason": "Requires real Chrome, creates both image and video (consumes credits)",
+      "name": "pool_parallel_generation",
+      "title": "Run N generations in parallel via BrowserWorkerPool",
+      "workflow": "BrowserWorkerPool(2 workers) -> submit N jobs -> wait -> verify all completed",
+      "user_problem": "User has many camera commands to apply to the same source post and wants the wall-clock time to scale with worker count, not job count.",
+      "skip_reason": "Spawns multiple real Chromes. Expensive. Use --run-integration deliberately.",
       "steps": [
         {
-          "function": "create_image",
-          "params": {"prompt": "A serene lake at sunset with mountains in the background"},
-          "var_name": "image_result",
-          "description": "create_image generates an image from text prompt, returns post IDs"
-        },
-        {
-          "function": "create_video",
-          "params": {"source_post_id": {"var": "image_post_id"}, "preset": "normal", "duration": 6},
-          "var_name": "video_result",
-          "description": "create_video animates the generated image into a video"
-        },
-        {
-          "function": "get_post_details",
-          "params": {"post_id": {"var": "image_post_id"}},
-          "var_name": "details",
-          "description": "get_post_details verifies the video appears as a child of the image"
-        }
-      ]
-    },
-    {
-      "name": "social_feedback_workflow",
-      "title": "Review posts and give social feedback",
-      "workflow": "list_posts → get_post_details → like_post → dislike_post (different child)",
-      "user_problem": "User reviews their generated content, gives thumbs up to good results and thumbs down to bad ones",
-      "skip_reason": "Requires real Chrome and Grok credentials",
-      "steps": [
-        {
-          "function": "list_posts",
-          "params": {"limit": 5, "source": "all"},
-          "var_name": "posts",
-          "description": "list_posts returns recent posts to review"
-        },
-        {
-          "function": "get_post_details",
-          "params": {"post_id": {"var": "post_id"}},
-          "var_name": "details",
-          "description": "get_post_details shows all child videos for evaluation"
-        },
-        {
-          "function": "like_post",
-          "params": {"post_id": {"var": "child_id"}},
-          "var_name": "liked",
-          "description": "like_post gives thumbs up to a good video"
+          "raw_code": [
+            "async with BrowserWorkerPool(num_workers=2, max_retries=1, headless=True, close_chrome=True) as pool:",
+            "    prompts = ['Zoom In', 'Zoom Out', 'Dolly In']",
+            "    ids = [",
+            "        await pool.submit('create_video', {",
+            "            'images': [f'post:{TEST_SOURCE_POST_ID}'],",
+            "            'prompt': p,",
+            "            'resolution': '480p',",
+            "            'duration': '6s',",
+            "        })",
+            "        for p in prompts",
+            "    ]",
+            "    results = await pool.wait(timeout=600)",
+            "    assert len(results) == len(ids), 'all jobs must finish'",
+            "    workers_used = {r.worker_id for r in results.values()}",
+            "    assert len(workers_used) >= 2, 'pool should distribute across workers'",
+            "    for job_id, r in results.items():",
+            "        if r.success and r.data and r.data.get('video_id'):",
+            "            await client.delete_video(r.data['video_id'])"
+          ],
+          "description": "Run the three camera commands concurrently; both workers should pick up work, and any successful videos are cleaned up after."
         }
       ]
     }

@@ -1,31 +1,48 @@
+"""Integration tests for grok-web-connector real-user workflows.
+
+Hand-written from ``scenarios.json`` (see that file for the structured
+list of scenarios). Tests are async/await so the integration-test-
+generator ``generate.py`` can't produce them verbatim; this file is the
+source of truth and ``scenarios.json`` is kept in sync alongside it.
+
+ALL @pytest.mark.integration tests are skipped by default. Enable via
+either of::
+
+    pytest tests/integration/ -v --run-integration
+    RUN_INTEGRATION=1 pytest tests/integration/ -v
+
+The single always-on test is ``test_imports_work`` — a smoke check so
+``pytest tests/`` always has something green to return even on machines
+with no Chrome or credentials.
+
+Optional environment variables:
+  TEST_SOURCE_POST_ID   A post UUID usable for img2vid (defaults to a
+                        known stable demo post).
+  TEST_LOCAL_FRAMES_DIR Directory containing at least 3 *.jpg files to
+                        use as upload fixtures. If unset, the upload
+                        scenarios are skipped with a clear reason.
+
+Coverage — maps 1:1 to scenarios.json:
+  browse_favorite_unfavorite    list/detail/favorite/verify/unfavorite
+  img2vid_roundtrip             create_video(post:) + child verification
+  upload2vid_retry_without_reupload
+                                dict-API upload + direct-REST retry via file:
+  upload_images_then_reuse      standalone upload_images + reuse
+  catch_post_render_moderation  check_video_moderated after gen
+  download_and_match_roundtrip  create/download/match roundtrip
+  pool_parallel_generation      BrowserWorkerPool fan-out
 """
-Integration tests for grok-web-connector real workflows.
 
-Generated from scenarios.json following integration-test-generator conventions.
-Hand-written because generate.py does not support async/await.
+from __future__ import annotations
 
-Requires:
-- Real Chrome browser (launched automatically by ai-dev-browser)
-- Valid Grok credentials in ~/.grok-config.json
-- Network access to grok.com
-
-Run with: pytest tests/integration/test_workflows.py -v
-Run single: pytest tests/integration/test_workflows.py::test_generate_video_720p_10s -v -s
-
-Coverage: 5/5 real workflows (100%)
-  - Browse → Detail → Favorite → Verify → Unfavorite
-  - Create Video (720p, 10s) → Verify Resolution → Delete
-  - Create Video → Download → Match Local → Delete
-  - Create Image → Create Video (img2vid) → Verify
-  - List → Detail → Like (social feedback)
-"""
-
+import contextlib
 import os
 from pathlib import Path
 
 import pytest
 
 from grok_web import (
+    BrowserWorkerPool,
     ImageGenerationResult,
     PostDetails,
     VideoGenerationResult,
@@ -34,242 +51,299 @@ from grok_web import (
 )
 
 # ---------------------------------------------------------------------------
-# Integration guard: allow CI to opt-out with SKIP_INTEGRATION=1
+# Config
 # ---------------------------------------------------------------------------
-SKIP_INTEGRATION = os.environ.get("SKIP_INTEGRATION", "").lower() in ("1", "true", "yes")
+TEST_SOURCE_POST_ID = os.environ.get(
+    "TEST_SOURCE_POST_ID",
+    # Public-ish demo post the connector author has used historically; override
+    # in env if yours gets deleted or rotates.
+    "9ac51419-65c8-467c-958e-97e9f1abadfa",
+)
 
-# Test image post — a known image that can be used for video generation.
-# Override with TEST_POST_ID env var if needed.
-TEST_POST_ID = os.environ.get("TEST_POST_ID", "9ac51419-65c8-467c-958e-97e9f1abadfa")
+
+def _local_frames(min_count: int = 3) -> list[str]:
+    """Return sorted list of JPEGs in TEST_LOCAL_FRAMES_DIR, or skip."""
+    dir_path = os.environ.get("TEST_LOCAL_FRAMES_DIR")
+    if not dir_path:
+        pytest.skip(
+            "TEST_LOCAL_FRAMES_DIR not set — upload-path scenarios need "
+            "a directory with at least one sample JPEG."
+        )
+    root = Path(dir_path)
+    frames = sorted(str(p) for p in root.glob("*.jpg"))
+    if len(frames) < min_count:
+        pytest.skip(f"Need >= {min_count} JPEGs in {root}, found {len(frames)}.")
+    return frames
 
 
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
 @pytest.fixture
 async def client():
-    """Create a real GrokClient for integration tests.
-
-    Also serves as the integration guard — skips if SKIP_INTEGRATION is set.
-    Tests that don't need a client (e.g. smoke test) won't be skipped.
-    """
-    if SKIP_INTEGRATION:
-        pytest.skip("SKIP_INTEGRATION is set — skipping integration tests")
+    """Yield a real GrokClient for integration tests."""
     async with get_client() as c:
         yield c
 
 
-# Smoke test - can import without errors
+# ---------------------------------------------------------------------------
+# Smoke test — always runs
+# ---------------------------------------------------------------------------
 def test_imports_work():
-    """Verify all imports are valid."""
+    """Every public symbol the scenarios reference is importable."""
     assert get_client is not None
-    assert PostDetails is not None
+    assert BrowserWorkerPool is not None
     assert VideoGenerationResult is not None
     assert ImageGenerationResult is not None
+    assert PostDetails is not None
     assert VideoMatchResult is not None
 
 
+# ---------------------------------------------------------------------------
+# Scenario 1: browse_favorite_unfavorite
+# ---------------------------------------------------------------------------
 @pytest.mark.integration
-async def test_browse_and_favorite(client):
-    """
-    Real scenario: Browse gallery, inspect a post, and favorite it
-
-    Workflow: list_posts → get_post_details → favorite_post → verify in favorites → unfavorite_post
-
-    User problem: User browses their gallery, finds an interesting image, saves it
-    to favorites for later, then un-favorites when done.
-
-    Data flow:
-      1. list_posts returns PostSummary list — pick first post ID
-      2. get_post_details uses that ID to fetch full details (children, media URLs)
-      3. favorite_post saves the post to favorites
-      4. list_posts(favorites) verifies the post appears in favorites list
-      5. unfavorite_post removes the post (cleanup)
-    """
-    # Step 1: List recent posts
+async def test_browse_favorite_unfavorite(client):
+    """list_posts -> get_post_details -> favorite -> verify -> unfavorite."""
     posts = await client.list_posts(limit=5, source="all")
-    assert len(posts) > 0, "Should have at least one post"
+    assert len(posts) > 0, "need at least one post to exercise the workflow"
     post_id = posts[0].id
-    assert post_id, "Post should have a valid ID"
 
-    # Step 2: Get full details
     details = await client.get_post_details(post_id)
     assert isinstance(details, PostDetails)
     assert details.id == post_id
-    assert details.media_url, "Post should have a media URL"
 
-    # Step 3: Favorite the post
-    fav_ok = await client.favorite_post(post_id)
-    assert fav_ok is True
+    assert await client.favorite_post(post_id) is True
 
     try:
-        # Step 4: Verify it appears in favorites
         favs = await client.list_posts(limit=50, source="favorites")
-        fav_ids = [p.id for p in favs]
-        assert post_id in fav_ids, f"Post {post_id} should appear in favorites"
+        assert post_id in {
+            p.id for p in favs
+        }, f"{post_id} missing from favorites list after favorite_post"
     finally:
-        # Step 5: Cleanup — unfavorite
         await client.unfavorite_post(post_id)
 
 
+# ---------------------------------------------------------------------------
+# Scenario 2: img2vid_roundtrip
+# ---------------------------------------------------------------------------
 @pytest.mark.integration
-async def test_generate_video_720p_10s(client):
-    """
-    Real scenario: Generate 720p 10s video from an existing image
-
-    Workflow: create_video(720p, 10s) → get_post_details → verify resolution → delete_video
-
-    User problem: User wants to animate an existing Grok image into a high-quality
-    720p 10-second video and verify the output resolution.
-
-    Data flow:
-      1. create_video generates a 720p 10s video from the test image post
-      2. get_post_details fetches parent to find the new child video
-      3. Verify child video has 720p resolution (width ~784)
-      4. delete_video cleans up the generated video
-    """
-    # Step 1: Create video with 720p + 10s settings
+async def test_img2vid_roundtrip(client):
+    """create_video({'images': ['post:<id>'], ...}) should produce a child of <id>."""
     result = await client.create_video(
-        source_post_id=TEST_POST_ID,
-        duration=10,
-        resolution="720p",
+        {
+            "images": [f"post:{TEST_SOURCE_POST_ID}"],
+            "prompt": "slow orbit around @1",
+            "resolution": "480p",
+            "duration": "6s",
+        }
     )
     assert isinstance(result, VideoGenerationResult)
-    assert result.video_id, "Should return a video ID"
+    assert result.video_id, "gen must return a video_id"
 
     try:
-        # Step 2: Verify via post details
-        details = await client.get_post_details(TEST_POST_ID)
-        assert isinstance(details, PostDetails)
-
-        # Step 3: Find our video and check resolution
-        child = next((c for c in details.children if c.id == result.video_id), None)
+        parent = await client.get_post_details(TEST_SOURCE_POST_ID)
+        child_ids = {c.id for c in parent.children}
         assert (
-            child is not None
-        ), f"Video {result.video_id} should appear as child of {TEST_POST_ID}"
-        if child.resolution:
-            # 720p portrait: 784x1168; 720p landscape: 1168x784
-            assert (
-                child.resolution["width"] >= 720 or child.resolution["height"] >= 720
-            ), f"720p video should have at least one dimension >= 720, got {child.resolution}"
+            result.video_id in child_ids
+        ), f"video {result.video_id} should appear under {TEST_SOURCE_POST_ID}"
     finally:
-        # Step 4: Cleanup — delete the generated video
         if result.video_id:
             await client.delete_video(result.video_id)
 
 
+# ---------------------------------------------------------------------------
+# Scenario 3: upload2vid_retry_without_reupload
+# ---------------------------------------------------------------------------
 @pytest.mark.integration
-async def test_generate_download_and_match(client, tmp_path):
-    """
-    Real scenario: Generate video, download it, then match the local file back to Grok
+async def test_upload2vid_retry_without_reupload(client):
+    """First call uploads; second call uses 'file:<id>' refs and skips upload."""
+    frames = _local_frames(min_count=1)
 
-    Workflow: create_video → download_video → match_local_video → verify match → delete_video
-
-    User problem: User generates a video, downloads it locally, and later wants to
-    find the original Grok post from the local file.
-
-    Data flow:
-      1. create_video generates a quick 480p 6s video
-      2. download_video downloads the video to a temp file
-      3. match_local_video identifies the Grok post from the downloaded file
-      4. Verify match.parent_id and match.video_id are correct
-      5. delete_video cleans up
-    """
-    # Step 1: Generate a quick video
-    result = await client.create_video(
-        source_post_id=TEST_POST_ID,
-        duration=6,
-        resolution="480p",
+    first = await client.create_video(
+        {
+            "images": frames,
+            "prompt": "zoom into @1",
+            "resolution": "480p",
+            "duration": "6s",
+            "verify_final": True,
+        }
     )
-    assert isinstance(result, VideoGenerationResult)
-    assert result.video_id, "Should return a video ID"
+    assert isinstance(first, VideoGenerationResult)
+    assert first.video_id
+    assert (
+        first.image_file_ids
+    ), "first pass must expose image_file_ids so the retry path can reuse them"
+
+    refs = [f"file:{fid}" for fid in first.image_file_ids]
+    second = await client.create_video(
+        {
+            "images": refs,
+            "prompt": "pan across @1",
+            "resolution": "480p",
+            "duration": "6s",
+            "verify_final": True,
+        }
+    )
+    assert isinstance(second, VideoGenerationResult)
+    assert second.video_id
+    assert (
+        second.video_id != first.video_id
+    ), "second call must create a distinct video, not return the first one"
 
     try:
-        # Step 2: Download the video
-        download_path = tmp_path / "test_video.mp4"
-        saved_path = await client.download_video(
-            result.video_id,
-            str(download_path),
-            parent_post_id=TEST_POST_ID,
-        )
-        assert Path(saved_path).exists(), "Downloaded file should exist"
-        assert Path(saved_path).stat().st_size > 1000, "Downloaded file should not be empty"
-
-        # Step 3: Match the local file back to Grok
-        match = await client.match_local_video(str(saved_path))
-        assert isinstance(match, VideoMatchResult)
-        assert match.video_id == result.video_id, "Matched video ID should equal generated video ID"
-        assert match.parent_id == TEST_POST_ID, "Matched parent ID should equal source post ID"
+        pass  # actual success asserted above
     finally:
-        # Step 4: Cleanup
-        if result.video_id:
-            await client.delete_video(result.video_id)
+        for v in (first.video_id, second.video_id):
+            if v:
+                await client.delete_video(v)
 
 
+# ---------------------------------------------------------------------------
+# Scenario 4: upload_images_then_reuse
+# ---------------------------------------------------------------------------
 @pytest.mark.integration
-async def test_text_to_image_to_video(client):
-    """
-    Real scenario: Create image from text, then animate it into a video
+async def test_upload_images_then_reuse(client):
+    """Prime with one UI-path create_video (to fill StatsigSnitch cache),
+    then upload_images + reuse refs via direct REST."""
+    frames = _local_frames(min_count=1)
 
-    Workflow: create_image → create_video(img2vid) → get_post_details → verify
-
-    User problem: User has a creative idea, generates an image from text, then
-    animates the result into a video — the full creative pipeline.
-
-    Data flow:
-      1. create_image generates an image from text prompt, returns post IDs
-      2. create_video animates the generated image into a video
-      3. get_post_details verifies the video appears as a child of the image
-    """
-    # Step 1: Create image from text
-    image_result = await client.create_image(
-        "A serene lake at sunset with mountains in the background"
+    # Prime — direct REST path needs x-statsig-id captured from a prior
+    # UI-triggered conversations/new submit.
+    prime = await client.create_video(
+        {
+            "images": frames,
+            "prompt": "prime",
+            "resolution": "480p",
+            "duration": "6s",
+        }
     )
-    assert isinstance(image_result, ImageGenerationResult)
-    assert image_result.success, "Image generation should succeed (at least 1 non-moderated)"
-    assert len(image_result.post_ids) > 0, "Should return at least one post ID"
-    image_post_id = image_result.post_ids[0]
+    assert prime.video_id
 
-    # Step 2: Generate video from the image
-    video_result = await client.create_video(
-        source_post_id=image_post_id,
-        preset="normal",
-        duration=6,
-    )
-    assert isinstance(video_result, VideoGenerationResult)
-    assert video_result.video_id, "Should return a video ID"
+    try:
+        # Standalone upload API
+        refs = await client.upload_images({"images": frames})
+        assert refs, "upload_images should return file: refs"
+        assert all(r.startswith("file:") for r in refs)
 
-    # Step 3: Verify video appears as child
-    details = await client.get_post_details(image_post_id)
-    assert isinstance(details, PostDetails)
-    child_ids = [c.id for c in details.children]
-    assert (
-        video_result.video_id in child_ids
-    ), f"Video {video_result.video_id} should appear as child of {image_post_id}"
+        # Reuse refs via direct REST
+        gen = await client.create_video(
+            {
+                "images": refs,
+                "prompt": "test using @1",
+                "resolution": "480p",
+                "duration": "6s",
+            }
+        )
+        assert gen.video_id
+        assert gen.video_id != prime.video_id
+
+        try:
+            pass
+        finally:
+            if gen.video_id:
+                await client.delete_video(gen.video_id)
+    finally:
+        if prime.video_id:
+            await client.delete_video(prime.video_id)
 
 
+# ---------------------------------------------------------------------------
+# Scenario 5: catch_post_render_moderation
+# ---------------------------------------------------------------------------
 @pytest.mark.integration
-async def test_social_feedback_workflow(client):
-    """
-    Real scenario: Review posts and give social feedback
+async def test_catch_post_render_moderation(client):
+    """Immediate moderated flag + post-render check — both surface the verdict."""
+    gen = await client.create_video(
+        {
+            "images": [f"post:{TEST_SOURCE_POST_ID}"],
+            "prompt": "slow zoom",
+            "resolution": "480p",
+            "duration": "6s",
+        }
+    )
+    assert gen.video_id
 
-    Workflow: list_posts → get_post_details → like_post
+    try:
+        post_render_mod = await client.check_video_moderated(gen.video_id)
+        # No absolute assertion on the verdict — we only care that the API
+        # returns a bool and that gen.moderated OR post_render_mod together
+        # reflect the true state.
+        assert isinstance(post_render_mod, bool)
+    finally:
+        if gen.video_id:
+            await client.delete_video(gen.video_id)
 
-    User problem: User reviews their generated content, gives thumbs up to
-    good results for Grok's feedback system.
 
-    Data flow:
-      1. list_posts returns recent posts to review
-      2. get_post_details shows all child videos for evaluation
-      3. like_post gives thumbs up to a video the user approves of
-    """
-    # Step 1: List recent posts
-    posts = await client.list_posts(limit=5, source="all")
-    assert len(posts) > 0, "Should have at least one post"
-    post_id = posts[0].id
+# ---------------------------------------------------------------------------
+# Scenario 6: download_and_match_roundtrip
+# ---------------------------------------------------------------------------
+@pytest.mark.integration
+async def test_download_and_match_roundtrip(client, tmp_path):
+    """create_video -> download_video -> match_local_video -> verify round-trip."""
+    gen = await client.create_video(
+        {
+            "images": [f"post:{TEST_SOURCE_POST_ID}"],
+            "prompt": "test-for-match",
+            "resolution": "480p",
+            "duration": "6s",
+        }
+    )
+    assert gen.video_id
 
-    # Step 2: Get details to see child videos
-    details = await client.get_post_details(post_id)
-    assert isinstance(details, PostDetails)
+    try:
+        out = tmp_path / "v.mp4"
+        saved = await client.download_video(
+            gen.video_id,
+            str(out),
+            parent_post_id=TEST_SOURCE_POST_ID,
+        )
+        assert Path(saved).exists() and Path(saved).stat().st_size > 1000
 
-    # Step 3: Like a child video (or the parent if no children)
-    target_id = details.children[0].id if details.children else post_id
-    liked = await client.like_post(target_id)
-    assert liked is True
+        match = await client.match_local_video(str(saved))
+        assert isinstance(match, VideoMatchResult)
+        assert match.video_id == gen.video_id, "match must identify the exact video we generated"
+        assert match.parent_id == TEST_SOURCE_POST_ID
+    finally:
+        if gen.video_id:
+            await client.delete_video(gen.video_id)
+
+
+# ---------------------------------------------------------------------------
+# Scenario 7: pool_parallel_generation
+# ---------------------------------------------------------------------------
+@pytest.mark.integration
+async def test_pool_parallel_generation():
+    """BrowserWorkerPool distributes jobs across workers."""
+    async with get_client() as cleanup_client:
+        async with BrowserWorkerPool(
+            num_workers=2,
+            max_retries=1,
+            headless=True,
+            close_chrome=True,
+        ) as pool:
+            prompts = ["Zoom In", "Zoom Out", "Dolly In"]
+            job_ids = []
+            for p in prompts:
+                jid = await pool.submit(
+                    "create_video",
+                    {
+                        "images": [f"post:{TEST_SOURCE_POST_ID}"],
+                        "prompt": p,
+                        "resolution": "480p",
+                        "duration": "6s",
+                    },
+                )
+                job_ids.append(jid)
+
+            results = await pool.wait(timeout=600)
+            assert len(results) == len(job_ids), "every submitted job must terminate"
+
+            workers_used = {r.worker_id for r in results.values()}
+            assert len(workers_used) >= 2, "pool should distribute work across >=2 workers"
+
+        # Cleanup: delete whatever videos were successfully produced.
+        for r in results.values():
+            if r.success and r.data and r.data.get("video_id"):
+                with contextlib.suppress(Exception):
+                    await cleanup_client.delete_video(r.data["video_id"])

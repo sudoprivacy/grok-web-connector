@@ -39,14 +39,16 @@ include = ["grok_web*"]
 # =============================================================================
 [tool.pytest.ini_options]
 minversion = "7.0"
-addopts = ["-ra", "-q", "--strict-markers", "--ignore=tests/integration"]
+# Integration tests live under tests/integration/ and are skipped by default.
+# Enable via `pytest --run-integration` or RUN_INTEGRATION=1 (see conftest.py).
+addopts = ["-ra", "-q", "--strict-markers"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 markers = [
-    "integration: marks tests as integration tests (require real Chrome/credentials, deselect with '--ignore=tests/integration')",
+    "integration: requires real Chrome + Grok session (off by default; --run-integration or RUN_INTEGRATION=1 to enable)",
 ]
 
 # =============================================================================
