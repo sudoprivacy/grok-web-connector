@@ -444,11 +444,24 @@ class GrokClient(ResponseParser):
     async def _asset_request_head(self, asset_url: str) -> int:
         """Make HEAD request to asset URL via CDP Network.loadNetworkResource.
 
-        This bypasses JavaScript fetch CORS restrictions by using Chrome DevTools Protocol directly.
-        Works reliably on both Windows and macOS.
+        This bypasses JavaScript fetch CORS restrictions by using Chrome
+        DevTools Protocol directly. Works reliably on both Windows and
+        macOS.
+
+        CRITICAL: ``Network.loadNetworkResource`` hands back an ``IO``
+        stream handle pointing at the response body. The caller is
+        expected to release it via ``IO.close`` — we don't read the body
+        (we only care about the Content-Length header), so the stream
+        sits unclosed otherwise. In a BrowserWorkerPool the leak
+        compounds: ``match_local_video`` issues dozens of these per
+        favorite scanned, and after a few hundred unreleased handles
+        Chrome starts refusing new CDP WebSocket upgrades with HTTP 500.
+        The fix is a ``finally`` that always closes the stream, even on
+        error paths.
         """
         from ai_dev_browser import cdp
 
+        stream_handle = None
         try:
             # Get the main frame ID for the current page
             frame_tree = await self._tab.send(cdp.page.get_frame_tree())
@@ -471,6 +484,11 @@ class GrokClient(ResponseParser):
             # Check if request succeeded
             if not response:
                 raise GrokAPIError(f"Failed to load network resource: {asset_url}")
+
+            # Remember the stream handle (if Chrome gave one) so we can
+            # release it in `finally` regardless of which branch returns
+            # or raises below.
+            stream_handle = getattr(response, "stream", None)
 
             # Response is directly LoadNetworkResourcePageResult (not wrapped)
             # Check if there was a network error
@@ -500,6 +518,21 @@ class GrokClient(ResponseParser):
             raise GrokAPIError(
                 f"CDP network request failed for asset. URL: {asset_url}, Error: {e}"
             ) from e
+        finally:
+            # Release the stream handle even if we bailed early — we
+            # never read the body, Chrome has nothing to wait for.
+            if stream_handle is not None:
+                try:
+                    await self._tab.send(cdp.io.close(handle=stream_handle))
+                except Exception as close_err:  # noqa: BLE001
+                    # Closing is best-effort. Log quietly — the main
+                    # work already succeeded or failed with its own
+                    # error.
+                    logger.debug(
+                        "Failed to close CDP stream handle for %s: %s",
+                        asset_url,
+                        close_err,
+                    )
 
     # =========================================================================
     # API Methods (business logic using the I/O primitives above)
