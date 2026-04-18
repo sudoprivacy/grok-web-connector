@@ -314,12 +314,19 @@ async def direct_submit_video(
     complete NDJSON stream (Grok holds the HTTP response open until
     generation finishes, typically 20-60 s).
 
-    The fetch runs as a detached JS task; Python polls ``window`` for
-    its result every 1 s. This avoids ai-dev-browser's 30 s per-CDP-
-    command timeout (a single ``tab.evaluate(..., await_promise=True)``
-    blocking for the whole stream would hit ``COMMAND_TIMEOUT`` and
-    then fail obscurely via the ``send_raw`` retry path's snake_case
-    bug on the ``allowUnsafeEvalBlockedByCSP`` CDP parameter).
+    The fetch runs as a **detached** JS task; Python polls ``window``
+    for its result every 1 s. Each CDP ``evaluate`` stays sub-second
+    so we never hit ai-dev-browser's 30 s per-command timeout.
+
+    The detached-poll pattern is not a workaround — it is load-bearing
+    for correctness on non-idempotent endpoints. A single
+    ``tab.evaluate(..., await_promise=True)`` blocking for the whole
+    stream exceeds ``COMMAND_TIMEOUT`` (30 s), and the CDP transport
+    then re-runs the same ``Runtime.evaluate`` command, which means
+    re-executing the in-page fetch. ``POST /rest/app-chat/conversations/new``
+    is non-idempotent: each call creates a new conversation, consumes
+    another single-use x-statsig-id, and generates another video. We'd
+    silently duplicate work. Polling keeps the fetch to a single call.
 
     Raises:
         RuntimeError: On non-2xx HTTP status or if the total wait
