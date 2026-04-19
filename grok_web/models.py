@@ -242,6 +242,125 @@ class PostDetails(BaseModel):
                 return child.original_post_id
         return None
 
+    # =========================================================================
+    # Unified navigation (works from ANY id in the edit tree)
+    # =========================================================================
+    #
+    # Grok's edit tree is a DAG of posts linked by ``original_post_id``.
+    # Nodes can be images (MEDIA_POST_TYPE_IMAGE) or videos
+    # (MEDIA_POST_TYPE_VIDEO). Both can have children:
+    #   * image -> image   (edit)
+    #   * image -> video   (img2vid)
+    #   * video -> video   (video-extend)
+    # The helpers below treat all of these uniformly — give them any id
+    # in the tree and they navigate by ``original_post_id`` links,
+    # without caring whether each link is an edit, a generation, or an
+    # extension.
+    # =========================================================================
+
+    def find(self, post_id: str) -> "ChildPost | None":
+        """Look up any post (image or video) in this tree by id.
+
+        Returns the root itself as a synthetic ``ChildPost`` if
+        ``post_id == self.id``, otherwise searches ``children``.
+        Returns ``None`` if not found.
+        """
+        if post_id == self.id:
+            return ChildPost(
+                id=self.id,
+                media_type=self.media_type or "MEDIA_POST_TYPE_IMAGE",
+                original_post_id=self.original_post_id or self.id,
+                original_prompt=self.original_prompt,
+                prompt=self.prompt,
+                media_url=self.media_url,
+                hd_media_url=self.hd_media_url,
+                thumbnail_url=self.thumbnail_url,
+                created_at=self.created_at,
+                resolution=self.resolution,
+                model_name=self.model_name,
+            )
+        for c in self.children:
+            if c.id == post_id:
+                return c
+        return None
+
+    def parent_of(self, post_id: str) -> "ChildPost | None":
+        """Return the ChildPost that ``post_id`` was generated from.
+
+        Works for any node in the tree — image edits, videos, or the
+        root (returns None for the root since it has no parent WITHIN
+        this post; see ``PostDetails.original_post_id`` for the parent
+        across posts).
+        """
+        node = self.find(post_id)
+        if node is None:
+            return None
+        if node.original_post_id == node.id:
+            return None  # root has no self-parent
+        return self.find(node.original_post_id)
+
+    def children_of(self, post_id: str) -> list["ChildPost"]:
+        """Return everything (images + videos) directly generated from
+        ``post_id``.
+
+        Covers the two common questions:
+          * "What edits were made on top of this image?" → filter result
+            by ``is_image``
+          * "What videos were generated from this image?" → filter by
+            ``is_video`` (equivalent to
+            ``videos_by_parent_image()[post_id]``)
+        """
+        return [c for c in self.children if c.original_post_id == post_id]
+
+    def siblings_of(self, post_id: str) -> list["ChildPost"]:
+        """Return other posts that share the same immediate parent as
+        ``post_id`` (i.e. other edits/videos from the same source).
+        """
+        node = self.find(post_id)
+        if node is None:
+            return []
+        return [
+            c
+            for c in self.children
+            if c.original_post_id == node.original_post_id and c.id != post_id
+        ]
+
+    def ancestors_of(self, post_id: str) -> list["ChildPost"]:
+        """Walk up the edit chain from ``post_id`` to the root.
+
+        Returns the ancestors in order (immediate parent first, root
+        last). Empty if ``post_id`` is the root or not found. Guards
+        against cycles: stops if a repeat id is seen.
+        """
+        chain: list[ChildPost] = []
+        seen: set[str] = set()
+        cur = self.parent_of(post_id)
+        while cur is not None and cur.id not in seen:
+            chain.append(cur)
+            seen.add(cur.id)
+            cur = self.parent_of(cur.id)
+        return chain
+
+    def descendants_of(self, post_id: str) -> list["ChildPost"]:
+        """Return the full subtree under ``post_id`` in BFS order.
+
+        Includes direct children, their children, etc. Does not
+        include ``post_id`` itself.
+        """
+        out: list[ChildPost] = []
+        seen: set[str] = {post_id}
+        frontier = self.children_of(post_id)
+        while frontier:
+            next_frontier: list[ChildPost] = []
+            for node in frontier:
+                if node.id in seen:
+                    continue
+                seen.add(node.id)
+                out.append(node)
+                next_frontier.extend(self.children_of(node.id))
+            frontier = next_frontier
+        return out
+
 
 class ImageVideoMapping(BaseModel):
     """Mapping of a source image to its generated videos."""
