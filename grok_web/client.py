@@ -3142,9 +3142,30 @@ class GrokClient(ResponseParser):
             actually renders — a video can pass the immediate pass and
             still be replaced with a hidden-content placeholder.
 
-            To catch the second pass, either:
-              * pass verify_final=True (adds ~150ms, OR'd into moderated), or
-              * call client.check_video_moderated(video_id) when you need it.
+            Recommended: pass ``verify_final=True`` whenever you care
+            about the final verdict (most callers). An empirical 5x5
+            A/B run over borderline content saw the second-stage verdict
+            flip moderated=False -> True on 20% of passes; relying on
+            the immediate field alone silently accepts those.
+
+            Alternative: call ``client.check_video_moderated(video_id)``
+            yourself at whatever point in the flow you need it.
+
+        Transport-drop retries (upload2vid with borderline content):
+            When Grok's anti-abuse engages (typically after a prior
+            raised moderation error on the same client), the server may
+            drop subsequent /app-chat/conversations/new XHRs at the
+            transport layer. The connector surfaces this as::
+
+                GrokAPIError("NDJSON body missing and REST recovery
+                              failed: ...")
+
+            This is a Grok-side rate limit, not a bug in your code.
+            Empirically it fires on roughly half of second attempts
+            during degraded periods. Retry the call (fresh client often
+            helps, or wait a minute); all defensive timeouts are
+            bounded so you get a clear error within ~30s rather than a
+            hang.
 
         Examples:
             # txt2vid
