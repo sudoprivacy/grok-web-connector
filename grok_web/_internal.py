@@ -180,29 +180,77 @@ class ResponseParser:
         post_id: str,
         raw_data: dict | None = None,
     ) -> PostDetails:
-        """Parse API response into PostDetails with all children."""
+        """Parse API response into PostDetails with all children.
+
+        Grok's /rest/media/post/get response represents the full edit
+        tree via three arrays:
+
+        - ``images[]``  — every image in the edit tree, INCLUDING this
+                          post itself if it is an image.
+        - ``videos[]``  — every video in the edit tree, INCLUDING this
+                          post itself if it is a video.
+        - ``childPosts[]`` — legacy field, strict children (does not
+                             include self). Can be incomplete under the
+                             post 2026 UI (observed missing both
+                             edit-image and video entries that DO appear
+                             in ``images[]`` / ``videos[]``).
+
+        Parent/child lineage is expressed by each entry's
+        ``originalPostId`` — the image or video it was generated from.
+        A video whose ``originalPostId`` points at an entry in
+        ``images[]`` was made from that image.
+
+        Strategy: union ``images[]`` + ``videos[]`` (the authoritative
+        arrays), de-duplicate by id, drop self-references. Fall back to
+        ``childPosts[]`` only for entries that the new arrays are
+        missing — keeps us robust if Grok rolls back.
+        """
         mode = self._detect_generation_mode(data)
 
-        children = []
-        for child in data.get("childPosts", []):
-            media_type = child.get("mediaType")
-            if media_type in ("MEDIA_POST_TYPE_VIDEO", "MEDIA_POST_TYPE_IMAGE"):
-                child_post = ChildPost(
-                    id=child.get("id", ""),
-                    media_type=media_type,
-                    original_post_id=child.get("originalPostId", post_id),
-                    original_prompt=child.get("originalPrompt"),
-                    prompt=child.get("prompt"),
-                    media_url=child.get("mediaUrl"),
-                    hd_media_url=child.get("hdMediaUrl"),
-                    thumbnail_url=child.get("thumbnailImageUrl"),
-                    created_at=self._parse_timestamp(child.get("createTime")),
-                    resolution=child.get("resolution"),
-                    duration=child.get("duration"),
-                    model_name=child.get("modelName"),
-                    mode=child.get("mode"),
-                )
-                children.append(child_post)
+        def _to_child(entry: dict) -> ChildPost | None:
+            media_type = entry.get("mediaType")
+            if media_type not in ("MEDIA_POST_TYPE_VIDEO", "MEDIA_POST_TYPE_IMAGE"):
+                return None
+            return ChildPost(
+                id=entry.get("id", ""),
+                media_type=media_type,
+                original_post_id=entry.get("originalPostId") or post_id,
+                original_prompt=entry.get("originalPrompt"),
+                prompt=entry.get("prompt"),
+                media_url=entry.get("mediaUrl"),
+                hd_media_url=entry.get("hdMediaUrl"),
+                thumbnail_url=entry.get("thumbnailImageUrl"),
+                created_at=self._parse_timestamp(entry.get("createTime")),
+                resolution=entry.get("resolution"),
+                duration=entry.get("duration"),
+                model_name=entry.get("modelName"),
+                mode=entry.get("mode"),
+            )
+
+        children: list[ChildPost] = []
+        seen_ids: set[str] = {post_id}  # exclude self to keep ChildPost semantics
+        # Prefer the new top-level arrays first.
+        for bucket_key in ("images", "videos"):
+            for entry in data.get(bucket_key) or []:
+                eid = entry.get("id")
+                if not eid or eid in seen_ids:
+                    continue
+                child = _to_child(entry)
+                if child is None:
+                    continue
+                seen_ids.add(eid)
+                children.append(child)
+        # Fall back to childPosts[] for anything still missing (legacy +
+        # defensive). Skip entries we already captured.
+        for entry in data.get("childPosts") or []:
+            eid = entry.get("id")
+            if not eid or eid in seen_ids:
+                continue
+            child = _to_child(entry)
+            if child is None:
+                continue
+            seen_ids.add(eid)
+            children.append(child)
 
         return PostDetails(
             id=data.get("id", post_id),

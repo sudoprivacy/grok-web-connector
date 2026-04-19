@@ -190,7 +190,16 @@ class PostDetails(BaseModel):
 
     @property
     def all_images(self) -> list["ChildPost"]:
-        """All images including root as a synthetic ChildPost + edited variants."""
+        """All images in this post's edit tree, root first.
+
+        Returns ``[root_as_ChildPost, *image_children]``. In the new
+        (post-2026) REST schema, ``images[]`` from the server already
+        contains both root and edits; ``_parse_post_details`` unions
+        it with ``childPosts`` to populate ``children``. We reconstruct
+        ``root_as_child`` from the parent ``PostDetails`` fields so
+        this method returns a consistent list regardless of whether
+        the root was represented as a bare field or a ``ChildPost``.
+        """
         root_as_child = ChildPost(
             id=self.id,
             media_type=self.media_type or "MEDIA_POST_TYPE_IMAGE",
