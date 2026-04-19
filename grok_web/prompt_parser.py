@@ -56,21 +56,28 @@ def parse_prompt(prompt: str, images: list[str]) -> list[dict]:
 
 
 def classify_image_source(source: str) -> tuple[str, str]:
-    """Classify an image source string.
+    """Classify a source string that appears in ``create_video({"images": [...]})``.
 
     Args:
-        source: Image source — 'post:<uuid>', 'file:<uuid>', or a file path.
+        source: One of
+          * ``'post:<uuid>'``  — existing Grok IMAGE post (img2vid via UI)
+          * ``'video:<uuid>'`` — existing Grok VIDEO post (video-extend)
+          * ``'file:<uuid>'``  — previously uploaded asset
+                                 (direct REST, no re-upload needed)
+          * bare local file path (will be uploaded)
 
     Returns:
         Tuple of (source_type, value):
-        - ('post', '<uuid>') for existing Grok posts (img2vid via UI)
-        - ('upload', '<fileMetadataId>') for previously uploaded files
-          (direct REST, no re-upload needed)
-        - ('file', '<path>') for local file paths (will be uploaded)
+          * ``('post', '<uuid>')``    → img2vid from an existing image post
+          * ``('video', '<uuid>')``   → video-extend from an existing video post
+          * ``('upload', '<uuid>')``  → direct REST using a prior upload
+          * ``('file', '<path>')``    → local file to upload and use
 
     Examples:
         >>> classify_image_source('post:8ddd91f6-abcd-1234-5678-abcdef012345')
         ('post', '8ddd91f6-abcd-1234-5678-abcdef012345')
+        >>> classify_image_source('video:db00bb5d-fb4b-4ec8-ab1b-97f81f46a484')
+        ('video', 'db00bb5d-fb4b-4ec8-ab1b-97f81f46a484')
         >>> classify_image_source('file:477c03f8-f4ca-4226-989a-040ed21ef7ec')
         ('upload', '477c03f8-f4ca-4226-989a-040ed21ef7ec')
         >>> classify_image_source('./frame1.jpg')
@@ -78,6 +85,8 @@ def classify_image_source(source: str) -> tuple[str, str]:
     """
     if source.startswith("post:"):
         return ("post", source[5:])
+    if source.startswith("video:"):
+        return ("video", source[6:])
     if source.startswith("file:"):
         return ("upload", source[5:])
     return ("file", source)

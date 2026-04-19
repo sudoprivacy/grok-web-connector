@@ -341,6 +341,59 @@ class PostDetails(BaseModel):
             cur = self.parent_of(cur.id)
         return chain
 
+    def is_extension(self, post_id: str) -> bool:
+        """True if ``post_id`` is a video-extend — i.e. a video whose
+        parent is another video (rather than an image).
+
+        False for images, for videos generated directly from images
+        (regular img2vid / upload2vid), and for posts not in this tree.
+        """
+        node = self.find(post_id)
+        if node is None or not node.is_video:
+            return False
+        parent = self.parent_of(post_id)
+        return parent is not None and parent.is_video
+
+    def extensions_of(self, post_id: str) -> list["ChildPost"]:
+        """Return videos generated as extensions of ``post_id``.
+
+        Equivalent to ``[c for c in children_of(post_id) if c.is_video]``
+        when ``post_id`` itself is a video. For an image post this
+        returns [] (images can't be directly extended — you'd extend a
+        video derived from the image).
+        """
+        node = self.find(post_id)
+        if node is None or not node.is_video:
+            return []
+        return [c for c in self.children_of(post_id) if c.is_video]
+
+    def extension_chain(self, post_id: str) -> list["ChildPost"]:
+        """Walk the video-extend chain starting at ``post_id``.
+
+        Returns ``[post_id_as_ChildPost, first_extension, second_extension, ...]``
+        following the earliest video-child at each step. Empty list if
+        ``post_id`` is not a video or not in this tree. Useful for
+        reconstructing a linear extend sequence
+        (v0 -> v0_extended -> v0_extended_again -> ...).
+        """
+        start = self.find(post_id)
+        if start is None or not start.is_video:
+            return []
+        chain: list[ChildPost] = [start]
+        seen: set[str] = {start.id}
+        cur = start
+        while True:
+            exts = self.extensions_of(cur.id)
+            if not exts:
+                break
+            nxt = exts[0]
+            if nxt.id in seen:
+                break  # cycle guard
+            chain.append(nxt)
+            seen.add(nxt.id)
+            cur = nxt
+        return chain
+
     def descendants_of(self, post_id: str) -> list["ChildPost"]:
         """Return the full subtree under ``post_id`` in BFS order.
 

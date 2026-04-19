@@ -21,9 +21,12 @@ logger = logging.getLogger(__name__)
 PARAMS: dict[str, dict[str, Any]] = {
     "images": {
         "desc": (
-            "Image sources. Local file paths (uploads), 'post:<uuid>' "
-            "(existing Grok post), or 'file:<uuid>' (previously uploaded "
-            "via client.upload_images — skips re-upload). Max 5."
+            "Source references. Local file paths (uploads), 'post:<uuid>' "
+            "(existing Grok IMAGE post, triggers img2vid), 'video:<uuid>' "
+            "(existing Grok VIDEO post, triggers video-extend), or "
+            "'file:<uuid>' (previously uploaded via client.upload_images "
+            "— skips re-upload). Max 5 for images/uploads; only first "
+            "'video:' ref is used."
         ),
         "type": "list[str]",
     },

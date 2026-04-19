@@ -3112,10 +3112,16 @@ class GrokClient(ResponseParser):
 
         Args:
             params: Dict with keys from VIDEO_KEYS (see grok_web.schema):
-                images (list[str]): Image sources. Local file paths (upload),
-                    'post:<uuid>' (existing post), or 'file:<uuid>' (previously
-                    uploaded via client.upload_images — skips re-upload). Max 5.
+                images (list[str]): Source references.
+                    * Local file paths — uploaded, then img2vid.
+                    * ``'post:<uuid>'`` — existing Grok IMAGE post (img2vid).
+                    * ``'video:<uuid>'`` — existing Grok VIDEO post
+                      (video-extend; only the first ref is used).
+                    * ``'file:<uuid>'`` — previously uploaded via
+                      ``upload_images()``; skips re-upload.
+                    Max 5 for image-shaped sources.
                 prompt (str): Text prompt. Use @1, @2... to reference images.
+                    Ignored for ``video:`` refs (UI extend flow is prompt-less).
                 mode (str, default 'video'): 'image' or 'video'.
                 resolution (str, default '720p'): '480p', '720p'.
                 duration (str, default '10s'): '6s', '10s'.
@@ -3184,6 +3190,16 @@ class GrokClient(ResponseParser):
                 "resolution": "720p",
                 "duration": "10s",
             })
+
+            # video-extend: generate a continuation of an existing video
+            ext = await client.create_video({
+                "images": ["video:<video-uuid>"],
+                "duration": "6s",
+            })
+            # ext.video_id is the new continuation; the source video's id
+            # is recoverable via
+            #   details = await client.get_post_details(post_parent_id)
+            #   details.parent_of(ext.video_id)
 
             # Retry loop that survives both moderation stages
             refs = None
@@ -3256,6 +3272,36 @@ class GrokClient(ResponseParser):
                     duration=duration,
                     resolution=resolution,
                     aspect_ratio=aspect_ratio,
+                )
+            elif kind == "video":
+                # video-extend — generate a continuation from an existing
+                # Grok video post. UI flow: navigate to the video page and
+                # click the "Extend video" menu item. Current implementation
+                # does not take a prompt (Grok's menu trigger is
+                # prompt-less); the ``prompt`` arg is accepted for API
+                # symmetry but not forwarded. If more than one video: ref
+                # is given, only the first is used.
+                if len(sources) > 1:
+                    logger.warning(
+                        "create_video({'images': ['video:...', 'video:...']}) "
+                        "only extends the first video; additional refs ignored."
+                    )
+                src_vid = sources[0][1]
+                extend_res = await self.extend_video(
+                    video_id=src_vid,
+                    timeout=timeout,
+                )
+                # extend_video returns VideoExtendResult; adapt its fields
+                # so callers receive a normal VideoGenerationResult.
+                result = VideoGenerationResult(
+                    video_id=extend_res.video_id,
+                    parent_post_id=extend_res.parent_post_id,
+                    moderated=extend_res.moderated,
+                    progress=extend_res.progress,
+                    mode=extend_res.mode,
+                    model_name=extend_res.model_name,
+                    conversation_id=extend_res.conversation_id,
+                    statsig_id=extend_res.statsig_id,
                 )
             elif kind == "upload":
                 # Previously uploaded file IDs — direct REST path.
