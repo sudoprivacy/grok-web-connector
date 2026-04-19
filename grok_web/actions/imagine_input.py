@@ -174,12 +174,13 @@ async def remove_moderated_images(tab, *, delay: float = 1.0) -> int:
     Returns:
         Number of moderated images removed.
     """
+    max_iterations = 30
     removed = 0
-    while True:
+    for _ in range(max_iterations):
         # Re-check each time since indices shift after removal
         moderated = await check_moderated_images(tab)
         if not moderated:
-            break
+            return removed
         # Always remove the first moderated one (index shifts after each removal)
         idx = moderated[0]
         success = await tab.evaluate(
@@ -196,9 +197,14 @@ async def remove_moderated_images(tab, *, delay: float = 1.0) -> int:
             await_promise=False,
         )
         if not success:
-            break
+            return removed
         await asyncio.sleep(0.3 * delay)
         removed += 1
+    logger.warning(
+        "remove_moderated_images: %d click attempts did not clear moderated "
+        "overlays; bailing out to avoid infinite loop.",
+        max_iterations,
+    )
     return removed
 
 
@@ -207,15 +213,34 @@ async def remove_all_images(tab, *, delay: float = 1.0) -> int:
 
     Returns:
         Number of images removed.
+
+    Recovery: if clicks stop working (Grok disables the Remove buttons
+    after anti-abuse triggers, say, or the tab is in a stale state
+    after a raised exception in the previous call), the loop would
+    spin forever on the same button. Bail out after ``max_iterations``
+    clicks and force a full ``/imagine`` reload — that clears the
+    upload tray deterministically.
     """
+    max_iterations = 30
     removed = 0
-    while True:
+    for _ in range(max_iterations):
         btn = await tab.query_selector('button[aria-label="Remove image"]')
         if not btn:
-            break
+            return removed
         await btn.click()
         await asyncio.sleep(0.3 * delay)
         removed += 1
+
+    # Fell through the cap — the click loop is not making progress.
+    # Force a page reload to clear the tray rather than hang the caller.
+    logger.warning(
+        "remove_all_images: %d click attempts did not clear the upload tray "
+        "(buttons still present after each click). Forcing /imagine reload "
+        "to recover tab state.",
+        max_iterations,
+    )
+    await tab.get(f"{BASE_URL}/imagine")
+    await asyncio.sleep(2 * delay)
     return removed
 
 
