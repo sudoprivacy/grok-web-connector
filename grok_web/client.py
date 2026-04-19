@@ -444,24 +444,49 @@ class GrokClient(ResponseParser):
     async def _asset_request_head(self, asset_url: str) -> int:
         """Make HEAD request to asset URL via CDP Network.loadNetworkResource.
 
-        This bypasses JavaScript fetch CORS restrictions by using Chrome
-        DevTools Protocol directly. Works reliably on both Windows and
-        macOS.
+        Uses CDP so we can bypass the CORS block that in-page fetch hits
+        on ``imagine-public.x.ai`` (the origin that serves generated
+        videos).
 
-        CRITICAL: ``Network.loadNetworkResource`` hands back an ``IO``
-        stream handle pointing at the response body. The caller is
-        expected to release it via ``IO.close`` — we don't read the body
-        (we only care about the Content-Length header), so the stream
-        sits unclosed otherwise. In a BrowserWorkerPool the leak
-        compounds: ``match_local_video`` issues dozens of these per
-        favorite scanned, and after a few hundred unreleased handles
-        Chrome starts refusing new CDP WebSocket upgrades with HTTP 500.
-        The fix is a ``finally`` that always closes the stream, even on
-        error paths.
+        Known sharp edges (v0.10.x bug reports):
+
+        1. ``Network.loadNetworkResource`` downloads the FULL response
+           body, not just headers. Video .mp4 URLs can be several MB.
+           On a slow CDN or rate-limited IP a single call can take 30+
+           seconds, which exceeds ai-dev-browser's default per-command
+           timeout. That command gets cancelled on the Python side but
+           **Chrome keeps downloading** — the network slot stays pinned.
+           Accumulated across a favorites-scan pass (50+ such calls),
+           Chrome eventually refuses new CDP WebSocket upgrades with
+           HTTP 500. There is no CDP command to cancel an in-flight
+           loadNetworkResource cleanly.
+        2. The stream handle in the success path is leaked unless we
+           explicitly ``IO.close`` it. ``finally`` below handles that.
+
+        Mitigations here:
+          * Cap the whole call at a short timeout (below) so we raise
+            a clear Python error instead of letting one slow URL eat
+            the per-CDP-command budget.
+          * Always close the stream handle on both success and error.
+          * Log the URL + elapsed time on failure so caller can see
+            which assets are the slow ones.
+
+        If you're hitting a wall calling this many times in a long-
+        lived client, consider: re-entering get_client() between
+        batches (old state is reset), or relying on ``_match_by_video_id``
+        (O(1) REST lookup, no body download).
         """
+        import asyncio
+
         from ai_dev_browser import cdp
 
+        # Cap well below ai-dev-browser's default 30s COMMAND_TIMEOUT
+        # so our caller gets a clean GrokAPIError and Chrome's
+        # underlying download can be observed (even if not cancelled).
+        PER_CALL_TIMEOUT = 15.0
+
         stream_handle = None
+        t0 = asyncio.get_event_loop().time()
         try:
             # Get the main frame ID for the current page
             frame_tree = await self._tab.send(cdp.page.get_frame_tree())
@@ -471,14 +496,17 @@ class GrokClient(ResponseParser):
 
             # Use CDP Network.loadNetworkResource to fetch headers
             # This bypasses CORS and is more reliable than fetch()
-            response = await self._tab.send(
-                cdp.network.load_network_resource(
-                    frame_id=frame_id,
-                    url=asset_url,
-                    options=cdp.network.LoadNetworkResourceOptions(
-                        disable_cache=False, include_credentials=True
-                    ),
-                )
+            response = await asyncio.wait_for(
+                self._tab.send(
+                    cdp.network.load_network_resource(
+                        frame_id=frame_id,
+                        url=asset_url,
+                        options=cdp.network.LoadNetworkResourceOptions(
+                            disable_cache=False, include_credentials=True
+                        ),
+                    )
+                ),
+                timeout=PER_CALL_TIMEOUT,
             )
 
             # Check if request succeeded
@@ -514,9 +542,20 @@ class GrokClient(ResponseParser):
 
         except (GrokAPIError, GrokAuthError):
             raise
-        except Exception as e:
+        except asyncio.TimeoutError as e:
+            elapsed = asyncio.get_event_loop().time() - t0
             raise GrokAPIError(
-                f"CDP network request failed for asset. URL: {asset_url}, Error: {e}"
+                f"CDP asset HEAD timed out after {elapsed:.1f}s "
+                f"(cap {PER_CALL_TIMEOUT}s). URL: {asset_url}. Chrome may "
+                f"still be downloading this body in the background, which "
+                f"can tie up its network slots — if you hit this repeatedly "
+                f"in a long-lived client, re-enter get_client() to reset "
+                f"Chrome state."
+            ) from e
+        except Exception as e:
+            elapsed = asyncio.get_event_loop().time() - t0
+            raise GrokAPIError(
+                f"CDP asset HEAD failed after {elapsed:.1f}s. " f"URL: {asset_url}, Error: {e}"
             ) from e
         finally:
             # Release the stream handle even if we bailed early — we
@@ -835,8 +874,21 @@ class GrokClient(ResponseParser):
         hint_uuid: str | None = None,
         max_posts: int | None = None,
     ) -> VideoMatchResult:
-        """Search all liked posts to find video by file size."""
+        """Search all liked posts to find video by file size.
+
+        Bail-fast: if HEAD timeouts pile up (Chrome's network slots are
+        saturated from prior slow downloads), we stop the scan and
+        surface a clear error rather than grinding through 50+ more
+        URLs that will all time out.
+        """
         posts = await self.list_posts(limit=max_posts, source="MEDIA_POST_SOURCE_LIKED")
+
+        MAX_CONSECUTIVE_TIMEOUTS = 3  # scan-wide — videos + posts combined
+        consecutive_timeouts = 0
+
+        def _is_timeout_err(err: BaseException) -> bool:
+            text = str(err).lower()
+            return "timed out" in text or "timeout" in text
 
         for post_summary in posts:
             try:
@@ -846,6 +898,7 @@ class GrokClient(ResponseParser):
                 if details.mode == MODE_TXT2VID and details.hd_media_url:
                     try:
                         web_size = await self.get_asset_file_size(details.hd_media_url)
+                        consecutive_timeouts = 0
                         if web_size == local_size:
                             return VideoMatchResult(
                                 parent_id=details.id,
@@ -856,6 +909,9 @@ class GrokClient(ResponseParser):
                                 file_size=local_size,
                                 new_filename=f"grok-video_{details.id}_{details.id}.mp4",
                             )
+                    except GrokAPIError as e:
+                        if _is_timeout_err(e):
+                            consecutive_timeouts += 1
                     except Exception:
                         pass
 
@@ -867,6 +923,7 @@ class GrokClient(ResponseParser):
 
                     try:
                         web_size = await self.get_asset_file_size(url)
+                        consecutive_timeouts = 0
                         if web_size == local_size:
                             return VideoMatchResult(
                                 parent_id=post_summary.id,
@@ -877,9 +934,25 @@ class GrokClient(ResponseParser):
                                 file_size=local_size,
                                 new_filename=f"grok-video_{post_summary.id}_{child.id}.mp4",
                             )
+                    except GrokAPIError as e:
+                        if _is_timeout_err(e):
+                            consecutive_timeouts += 1
+                            if consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS:
+                                raise GrokAPIError(
+                                    f"Favorites scan aborted after "
+                                    f"{consecutive_timeouts} consecutive HEAD "
+                                    f"timeouts — Chrome's network slots are "
+                                    f"saturated. Re-enter get_client() to "
+                                    f"reset state and retry. Local file: "
+                                    f"{filename}, size {local_size} bytes."
+                                ) from e
                     except Exception:
                         continue
 
+            except GrokAPIError:
+                # Already-structured errors (e.g. the bail-fast above)
+                # should propagate.
+                raise
             except Exception:
                 continue
 
