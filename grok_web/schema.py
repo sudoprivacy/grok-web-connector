@@ -100,8 +100,31 @@ PARAMS: dict[str, dict[str, Any]] = {
         "type": "int",
         "default": 5,
     },
+    "auto_favorite": {
+        "desc": (
+            "Auto-persist the first N gallery images as posts. "
+            "Populates result.selected_post_ids with the new UUIDs so "
+            "they can be reused as 'post:<uuid>' in edit_image or "
+            "create_video. Default 1 — Grok's gallery images are "
+            "ephemeral and disappear on refresh, so without auto-persist "
+            "a create_image run produces no durable output. Set to 0 "
+            "explicitly if you only need the gallery preview and want "
+            "to drop everything (e.g. a 'smoke test' or preview-only "
+            "flow). This is the JSON/CLI-friendly shortcut; equivalent "
+            "to passing thumbnail_selector=auto_favorite_first_n(N)."
+        ),
+        "type": "int",
+        "default": 1,
+    },
     "thumbnail_selector": {
-        "desc": "Callback for selecting images. Python API only.",
+        "desc": (
+            "ADVANCED / Python-only. Callable hook run after image "
+            "generation completes; use for human-in-the-loop flows "
+            "(signal_file_selector, timeout_selector) or custom "
+            "selection logic. For JSON/CLI batch use, prefer "
+            "auto_favorite. When both are set, thumbnail_selector "
+            "wins. JSON values (dict/str) are ignored with a warning."
+        ),
         "type": "callable",
     },
     "post_id": {
@@ -172,6 +195,7 @@ IMAGE_KEYS = [
     "min_success",
     "max_scroll",
     "timeout",
+    "auto_favorite",
     "thumbnail_selector",
 ]
 
@@ -286,6 +310,11 @@ def validate_params(params: dict, keys: list[str]) -> dict:
 
     - Warns on unknown keys (not in schema).
     - Applies defaults from PARAMS for missing keys.
+    - Drops ``"callable"``-typed params that aren't actually callable
+      (common JSON/CLI footgun — e.g. passing a ``thumbnail_selector``
+      string literal from ``--params`` deserializes to ``str`` and
+      would crash downstream). Warns the caller so they know to use
+      the JSON-friendly alternative instead.
     - Returns cleaned dict with defaults applied.
     """
     cleaned = {}
@@ -300,7 +329,20 @@ def validate_params(params: dict, keys: list[str]) -> dict:
     # Apply defaults and copy provided values
     for key in keys:
         if key in params:
-            cleaned[key] = params[key]
+            value = params[key]
+            expected_type = PARAMS[key].get("type")
+            if expected_type == "callable" and value is not None and not callable(value):
+                logger.warning(
+                    f"Parameter '{key}' expects a Python callable but got "
+                    f"{type(value).__name__} — dropping. If you're using "
+                    f"the JSON/CLI API, look for a non-callable equivalent "
+                    f"in the schema (e.g. auto_favorite instead of "
+                    f"thumbnail_selector)."
+                )
+                if "default" in PARAMS[key]:
+                    cleaned[key] = PARAMS[key]["default"]
+                continue
+            cleaned[key] = value
         elif "default" in PARAMS[key]:
             cleaned[key] = PARAMS[key]["default"]
 

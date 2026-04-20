@@ -2795,6 +2795,16 @@ class GrokClient(ResponseParser):
         max_scroll = p.get("max_scroll", 5)
         timeout = p.get("timeout", 300)
         thumbnail_selector = p.get("thumbnail_selector")
+        auto_favorite = p.get("auto_favorite", 1)
+        # JSON/CLI-friendly shortcut — wrap the int into the equivalent
+        # auto_favorite_first_n callable. Skip when caller already passed
+        # a thumbnail_selector explicitly (power-user callable wins, per
+        # the schema docstring). Also skip when auto_favorite is 0/None
+        # — that's the opt-out for ephemeral preview-only runs.
+        if thumbnail_selector is None and auto_favorite:
+            from .selectors import auto_favorite_first_n as _auto_fav
+
+            thumbnail_selector = _auto_fav(int(auto_favorite))
         quality = p.get("quality", "speed")
         if quality not in {"speed", "quality"}:
             logger.warning(
