@@ -2787,7 +2787,7 @@ class GrokClient(ResponseParser):
         if "grok.com/imagine" in str(current_url):
             # Already on imagine page (reused Chrome) - force full reload
             logger.debug("[create_image] Reused Chrome on imagine page, forcing reload")
-            await self._tab.reload()
+            await self._tab.page_reload()
             await asyncio.sleep(2 * d)
         await self._tab.get(f"{self.BASE_URL}/imagine")
         await asyncio.sleep(3 * d)
