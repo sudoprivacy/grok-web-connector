@@ -17,6 +17,7 @@ from typing import Any
 from ai_dev_browser.core.config import DEFAULT_DEBUG_HOST
 
 from ._internal import (
+    MEDIA_POST_CREATE_ENDPOINT,
     MEDIA_POST_GET_ENDPOINT,
     MEDIA_POST_LIKE_ENDPOINT,
     MEDIA_POST_LIST_ENDPOINT,
@@ -264,12 +265,57 @@ class GrokClient(ResponseParser):
         await self._tab.get(f"{self.BASE_URL}/imagine")
         await asyncio.sleep(2)
 
-        # Handle Cloudflare challenge if present
-        from ai_dev_browser.core.cloudflare import cloudflare_verify
+        # Handle Cloudflare challenge if present.
+        #
+        # ai-dev-browser removed its built-in cloudflare_verify helper in
+        # v0.8.0 (philosophy shift: "multimodal LLM + click primitive"
+        # instead of heuristic wrappers). If the helper still exists
+        # (<= 0.7.x), use it — most callers never see a CF challenge so
+        # this is the smooth path. If the helper is gone, don't crash:
+        # check for the challenge frame ourselves and surface it to the
+        # caller so they can pass it manually and retry. Hard-failing the
+        # entire get_client() on missing helper would break every caller
+        # just because they upgraded ai-dev-browser.
+        try:
+            from ai_dev_browser.core.cloudflare import cloudflare_verify
+        except ImportError:
+            cloudflare_verify = None  # type: ignore[assignment]
 
-        result = await cloudflare_verify(self._tab, max_retries=15)
-        if not result.get("verified"):
-            raise GrokAuthError("Failed to bypass Cloudflare challenge")
+        if cloudflare_verify is not None:
+            result = await cloudflare_verify(self._tab, max_retries=15)
+            if not result.get("verified"):
+                raise GrokAuthError("Failed to bypass Cloudflare challenge")
+        else:
+            # Minimal detection: CF's Turnstile widget lives in an
+            # iframe whose src contains "challenges.cloudflare.com".
+            # If we find one, tell the caller — don't silently proceed,
+            # downstream requests would just hang.
+            cf_present = await self._tab.evaluate(
+                r"""
+                (() => {
+                    const frames = document.querySelectorAll('iframe');
+                    for (const f of frames) {
+                        const src = f.getAttribute('src') || '';
+                        if (src.includes('challenges.cloudflare.com')
+                            || src.includes('/cdn-cgi/challenge-platform/')) {
+                            return true;
+                        }
+                    }
+                    // Heuristic text match for the full-page block page
+                    const t = document.body ? document.body.innerText : '';
+                    return /Verifying you are human|Cloudflare/i.test(t)
+                        && /Checking your browser|需要验证|正在验证/.test(t);
+                })()
+                """
+            )
+            if cf_present:
+                raise GrokAuthError(
+                    "Cloudflare challenge detected but this installation of "
+                    "ai-dev-browser (v0.8.0+) no longer ships cloudflare_verify. "
+                    "Pass the challenge manually in the Chrome window, then "
+                    "retry get_client(). If you have the option, downgrade "
+                    "ai-dev-browser to <0.8 for automatic handling."
+                )
 
         # Install passive x-statsig-id snitch. The frontend rotates this
         # header on every outbound API call; we cache the latest for
@@ -2775,6 +2821,12 @@ class GrokClient(ResponseParser):
         max_scroll = p.get("max_scroll", 5)
         timeout = p.get("timeout", 300)
         thumbnail_selector = p.get("thumbnail_selector")
+        quality = p.get("quality", "speed")
+        if quality not in {"speed", "quality"}:
+            logger.warning(
+                f"Unknown quality {quality!r} (known: 'speed', 'quality'); "
+                "passing through — Grok UI may reject."
+            )
         import asyncio
         import json as json_mod
 
@@ -2858,91 +2910,184 @@ class GrokClient(ResponseParser):
 
         self._tab.add_handler(cdp.network.WebSocketFrameReceived, handle_ws_frame)
 
-        # Step 1: Click the mode dropdown button (aria-label="模型选择")
-        model_btn = await self._tab.select('button[aria-label="模型选择"]')
-        if model_btn:
-            await model_btn.click()
-            await asyncio.sleep(1 * d)
+        # 2026-04 Grok Imagine UI: the old 模型选择 Radix dropdown is
+        # gone. Mode + aspect ratio live inline on the prompt panel as
+        # text-toggle buttons (图片 / 视频) and an aria-labelled
+        # aspect-ratio dropdown. Submit is still aria-label="提交" but
+        # only responds to real CDP mouse input, not JS pointer-event
+        # dispatch — the panel runs its own onPointerDown handler that
+        # checks Chrome's native pointer state.
+        from .actions.extend_seed import enable_focus_emulation
 
-        # Step 2: Select "Image/图片" mode from the Radix dropdown menu
-        await self._tab.evaluate("""
-            (function() {
-                const popper = document.querySelector('[data-radix-popper-content-wrapper]');
-                if (!popper) return 'no menu';
+        await enable_focus_emulation(self._tab)
 
-                const menuItems = popper.querySelectorAll('[role="menuitem"]');
-                for (const item of menuItems) {
-                    if (item.innerText.includes('图片') ||
-                        item.innerText.includes('Image') ||
-                        item.innerText.includes('图像')) {
-                        item.click();
-                        return 'clicked image';
-                    }
-                }
-                return 'not found';
+        # Step 1: Make sure 图片 text-toggle is active. On fresh /imagine
+        # loads this is the default, but if the Chrome was reused from
+        # a 视频 generation the toggle may still be on 视频.
+        await self._tab.evaluate(
+            r"""
+            (() => {
+                const b = Array.from(document.querySelectorAll('button'))
+                    .find(x => (x.innerText||'').trim() === '图片' && !x.getAttribute('aria-label'));
+                if (!b) return;
+                const r = b.getBoundingClientRect();
+                const x = r.x + r.width/2, y = r.y + r.height/2;
+                const o = {bubbles:true, cancelable:true, clientX:x, clientY:y,
+                           pointerType:'mouse', button:0, pointerId:1, isPrimary:true};
+                b.dispatchEvent(new PointerEvent('pointerdown', o));
+                b.dispatchEvent(new MouseEvent('mousedown', o));
+                b.dispatchEvent(new PointerEvent('pointerup', o));
+                b.dispatchEvent(new MouseEvent('mouseup', o));
+                b.dispatchEvent(new MouseEvent('click', o));
             })()
-        """)
-        await asyncio.sleep(1 * d)
-
-        # Step 3: Select aspect ratio if needed (reopen menu)
-        aspect_map = {"portrait": 0, "square": 1, "landscape": 2}
-        aspect_index = aspect_map.get(aspect_ratio, 0)
-
-        model_btn = await self._tab.select('button[aria-label="模型选择"]')
-        if model_btn:
-            await model_btn.click()
-            await asyncio.sleep(1 * d)
-
-        await self._tab.evaluate(f"""
-            (function() {{
-                const popper = document.querySelector('[data-radix-popper-content-wrapper]');
-                if (!popper) return 'no menu';
-
-                const buttons = popper.querySelectorAll('button');
-                if (buttons.length > {aspect_index}) {{
-                    buttons[{aspect_index}].click();
-                    return 'clicked aspect ' + {aspect_index};
-                }}
-                return 'no aspect buttons';
-            }})()
-        """)
+            """
+        )
         await asyncio.sleep(0.5 * d)
 
-        # Close menu
-        await self._tab.evaluate("document.body.click()")
+        # Step 1b: Select speed/quality (new in 2026-04). Default is
+        # 'speed'; Grok's UI persists the last choice, so we always
+        # explicitly click to avoid inheriting a prior 'quality'
+        # selection from a previous session in the same Chrome.
+        quality_label = (
+            "速度" if quality == "speed" else ("质量" if quality == "quality" else quality)
+        )
+        await self._tab.evaluate(
+            r"""
+            (() => {
+                const want = "__LABEL__";
+                const b = Array.from(document.querySelectorAll('button'))
+                    .find(x => (x.innerText||'').trim() === want);
+                if (!b) return 'not-found';
+                const r = b.getBoundingClientRect();
+                const x = r.x + r.width/2, y = r.y + r.height/2;
+                const o = {bubbles:true, cancelable:true, clientX:x, clientY:y,
+                           pointerType:'mouse', button:0, pointerId:1, isPrimary:true};
+                b.dispatchEvent(new PointerEvent('pointerdown', o));
+                b.dispatchEvent(new MouseEvent('mousedown', o));
+                b.dispatchEvent(new PointerEvent('pointerup', o));
+                b.dispatchEvent(new MouseEvent('mouseup', o));
+                b.dispatchEvent(new MouseEvent('click', o));
+                return 'ok';
+            })()
+            """.replace("__LABEL__", quality_label)
+        )
+        await asyncio.sleep(0.3 * d)
+
+        # Step 2: Set aspect ratio. The 宽高比 button opens a popup of
+        # aspect-ratio options. Each has text like '2:3', '3:2', '1:1',
+        # '9:16', '16:9'. Users can also pass 'portrait' / 'landscape'
+        # / 'square' — translate to the concrete ratio labels.
+        _aspect_aliases = {
+            "portrait": "2:3",
+            "landscape": "3:2",
+            "square": "1:1",
+        }
+        aspect_label = _aspect_aliases.get(aspect_ratio, aspect_ratio)
+        await self._tab.evaluate(
+            r"""
+            (() => {
+                const b = Array.from(document.querySelectorAll('button'))
+                    .find(x => (x.getAttribute('aria-label')||'') === '宽高比');
+                if (!b) return 'no-btn';
+                const r = b.getBoundingClientRect();
+                const x = r.x + r.width/2, y = r.y + r.height/2;
+                const o = {bubbles:true, cancelable:true, clientX:x, clientY:y,
+                           pointerType:'mouse', button:0, pointerId:1, isPrimary:true};
+                b.dispatchEvent(new PointerEvent('pointerdown', o));
+                b.dispatchEvent(new MouseEvent('mousedown', o));
+                b.dispatchEvent(new PointerEvent('pointerup', o));
+                b.dispatchEvent(new MouseEvent('mouseup', o));
+                b.dispatchEvent(new MouseEvent('click', o));
+                return 'ok';
+            })()
+            """
+        )
+        await asyncio.sleep(0.5 * d)
+        # Click the matching menuitem — best-effort; if the label isn't
+        # found, leave the default aspect ratio (Grok's UI persists the
+        # last choice).
+        await self._tab.evaluate(
+            r"""
+            (() => {
+                const want = "__LABEL__";
+                const mi = Array.from(document.querySelectorAll('[role="menuitem"]'))
+                    .find(x => (x.innerText||'').trim() === want);
+                if (!mi) {
+                    // close menu by clicking body
+                    document.body.click();
+                    return 'aspect-not-found';
+                }
+                const r = mi.getBoundingClientRect();
+                const x = r.x + r.width/2, y = r.y + r.height/2;
+                const o = {bubbles:true, cancelable:true, clientX:x, clientY:y,
+                           pointerType:'mouse', button:0, pointerId:1, isPrimary:true};
+                mi.dispatchEvent(new PointerEvent('pointerdown', o));
+                mi.dispatchEvent(new MouseEvent('mousedown', o));
+                mi.dispatchEvent(new PointerEvent('pointerup', o));
+                mi.dispatchEvent(new MouseEvent('mouseup', o));
+                mi.dispatchEvent(new MouseEvent('click', o));
+                return 'ok';
+            })()
+            """.replace("__LABEL__", aspect_label)
+        )
         await asyncio.sleep(0.5 * d)
 
-        # Step 4: Fill the prompt input (TipTap/ProseMirror contenteditable div)
-        escaped_prompt = prompt.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
-        logger.debug(f"[create_image] Filling prompt ({len(prompt)} chars)")
-        fill_result = await self._tab.evaluate(f"""
-            (function() {{
-                const editor = document.querySelector('.tiptap.ProseMirror') ||
-                               document.querySelector('[contenteditable="true"]') ||
-                               document.querySelector('.ProseMirror');
-                if (!editor) return 'not found';
-
-                editor.focus();
-                editor.innerHTML = '<p>{escaped_prompt}</p>';
-                editor.dispatchEvent(new Event('input', {{ bubbles: true }}));
+        # Step 3: Fill the prompt into the tiptap editor. execCommand is
+        # the tiptap-safe path — direct innerHTML/value writes bypass
+        # ProseMirror's schema and get stripped.
+        escaped_prompt = prompt.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
+        fill_result = await self._tab.evaluate(
+            f"""
+            (() => {{
+                const ed = document.querySelector('.tiptap.ProseMirror');
+                if (!ed) return 'not-found';
+                ed.focus();
+                document.execCommand('selectAll');
+                document.execCommand('delete');
+                document.execCommand('insertText', false, `{escaped_prompt}`);
                 return 'ok';
             }})()
-        """)
-        if fill_result == "not found":
-            raise GrokAPIError("Could not find prompt editor on imagine page")
-        logger.debug(f"[create_image] Prompt filled: {fill_result}")
-
+            """
+        )
+        if fill_result == "not-found":
+            raise GrokAPIError("Could not find prompt editor (ProseMirror)")
         await asyncio.sleep(1 * d)
 
-        # Step 5: Click the submit button
-        logger.debug("[create_image] Looking for submit button...")
-        submit_btn = await self._tab.select('button[aria-label="提交"]')
-        if submit_btn:
-            logger.debug("[create_image] Found submit button, clicking...")
-            await submit_btn.click()
-            logger.debug("[create_image] Submit button clicked")
-        else:
-            raise GrokAPIError("Could not find submit button")
+        # Step 4: Click the 提交 submit via real CDP mouse. The button's
+        # handler rejects JS-synthesised PointerEvents (checks
+        # isTrusted / tracks native pointer state) but responds to
+        # Input.dispatchMouseEvent immediately.
+        submit_rect = await self._tab.evaluate(
+            r"""
+            JSON.stringify((() => {
+                const b = document.querySelector('button[aria-label="提交"]');
+                if (!b) return null;
+                const r = b.getBoundingClientRect();
+                return {x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2)};
+            })())
+            """
+        )
+        import json as _json
+
+        sr = _json.loads(submit_rect) if isinstance(submit_rect, str) else submit_rect
+        if not sr:
+            raise GrokAPIError("Could not find 提交 submit button")
+        for _ev, _btn, _cc in [
+            ("mouseMoved", cdp.input_.MouseButton.NONE, 0),
+            ("mousePressed", cdp.input_.MouseButton.LEFT, 1),
+            ("mouseReleased", cdp.input_.MouseButton.LEFT, 1),
+        ]:
+            await self._tab.send(
+                cdp.input_.dispatch_mouse_event(
+                    type_=_ev,
+                    x=float(sr["x"]),
+                    y=float(sr["y"]),
+                    button=_btn,
+                    click_count=_cc,
+                    pointer_type="mouse",
+                )
+            )
+            await asyncio.sleep(0.05)
 
         # Step 6: Wait for initial batch of images via WebSocket
         start_time = asyncio.get_event_loop().time()
@@ -3073,60 +3218,99 @@ class GrokClient(ResponseParser):
         # When user clicks "Create Video" on a gallery image, Grok auto-favorites it
         # by sending POST /rest/media/post/like with {"id": "post_id"}
         # We capture these requests to get post_ids without navigation
+        logger.info(
+            f"[create_image] thumbnail_selector={thumbnail_selector is not None}, "
+            f"images={len(images)} → will {'enter' if thumbnail_selector and images else 'skip'} capture block"
+        )
         if thumbnail_selector and images:
             await asyncio.sleep(2 * d)  # Wait for DOM to settle
 
             # Set up request capture for /rest/media/post/like
             captured_like_ids: list[str] = []
 
-            async def capture_like_request(event: cdp.network.RequestWillBeSent):
-                """Capture POST /rest/media/post/like to get post_ids."""
+            # Expose the running count to the selector so it can verify
+            # its clicks actually fire persist requests, and retry.
+            self._captured_persist_count = lambda: len(captured_like_ids)  # noqa: E731
+
+            # 2026-04 UI POSTs /rest/media/post/create with body carrying
+            # the gallery image's public URL; the RESPONSE is the new
+            # post_id. Legacy UI POSTed /rest/media/post/like with id in
+            # the request body. Support both: track req_ids on
+            # RequestWillBeSent, extract id from whichever side carries
+            # it on LoadingFinished.
+            _pending_req_ids: set[str] = set()
+            _request_bodies: dict[str, str] = {}
+
+            async def on_persist_request(event: cdp.network.RequestWillBeSent):
                 url = event.request.url
-                if MEDIA_POST_LIKE_ENDPOINT in url:
-                    logger.info(f"[post_id_capture] Detected like request: {url}")
-                    post_data = getattr(event.request, "post_data", None)
-                    has_post_data = getattr(event.request, "has_post_data", False)
-                    logger.debug(
-                        f"[post_id_capture] has_post_data={has_post_data}, "
-                        f"post_data={'present' if post_data else 'None'}"
+                if "/rest/media" in url:
+                    logger.info(f"[post_id_capture] req seen: {url}")
+                if MEDIA_POST_CREATE_ENDPOINT not in url and MEDIA_POST_LIKE_ENDPOINT not in url:
+                    return
+                _pending_req_ids.add(event.request_id)
+                post_data = getattr(event.request, "post_data", None)
+                if not post_data:
+                    try:
+                        r = await self._tab.send(
+                            cdp.network.get_request_post_data(event.request_id)
+                        )
+                        post_data = r
+                    except Exception:
+                        pass
+                if post_data:
+                    _request_bodies[event.request_id] = post_data
+                logger.info(
+                    f"[post_id_capture] tracking {url} req_id={event.request_id} "
+                    f"req_body={(post_data or '')[:150]!r}"
+                )
+
+            async def on_persist_finished(event: cdp.network.LoadingFinished):
+                if event.request_id not in _pending_req_ids:
+                    return
+                logger.info(f"[post_id_capture] finished req_id={event.request_id}")
+                _pending_req_ids.discard(event.request_id)
+                # Try response body first (2026-04 /create path)
+                body = ""
+                try:
+                    body_result = await self._tab.send(
+                        cdp.network.get_response_body(request_id=event.request_id)
                     )
+                    body = body_result[0] if isinstance(body_result, tuple) else str(body_result)
+                except Exception as e:
+                    logger.warning(f"[post_id_capture] response body fetch failed: {e}")
+                logger.info(f"[post_id_capture] response body preview: {body[:300]!r}")
+                # Fall back to request body (legacy /like path)
+                req_body = _request_bodies.pop(event.request_id, "")
 
-                    # Try to get post_data from request body
-                    if not post_data and has_post_data:
-                        # post_data may be empty in RequestWillBeSent, try to fetch it
-                        try:
-                            result = await self._tab.send(
-                                cdp.network.get_request_post_data(event.request_id)
-                            )
-                            post_data = result
-                            logger.debug(
-                                f"[post_id_capture] Fetched post_data: {post_data[:100] if post_data else 'None'}..."
-                            )
-                        except Exception as e:
-                            logger.warning(f"[post_id_capture] Failed to get post data: {e}")
+                import re
 
-                    if post_data:
-                        try:
-                            import re
+                post_id = None
+                for src in (body, req_body):
+                    if not src:
+                        continue
+                    try:
+                        data = json_mod.loads(src)
+                    except Exception:
+                        data = None
+                    if isinstance(data, dict):
+                        post_id = (
+                            data.get("id")
+                            or data.get("postId")
+                            or (data.get("post") or {}).get("id")
+                        )
+                    if not post_id:
+                        m = re.search(r'"(?:postId|id)"\s*:\s*"([0-9a-f-]{36})"', src)
+                        if m:
+                            post_id = m.group(1)
+                    if post_id:
+                        break
 
-                            # Try JSON parse first
-                            data = json_mod.loads(post_data)
-                            post_id = data.get("id")
-                            if post_id and post_id not in captured_like_ids:
-                                captured_like_ids.append(post_id)
-                                logger.info(f"[post_id_capture] Captured post_id: {post_id}")
-                        except json_mod.JSONDecodeError:
-                            # Fallback: regex extraction
-                            match = re.search(r'"id"\s*:\s*"([^"]+)"', post_data)
-                            if match:
-                                post_id = match.group(1)
-                                if post_id not in captured_like_ids:
-                                    captured_like_ids.append(post_id)
-                                    logger.info(
-                                        f"[post_id_capture] Captured post_id (regex): {post_id}"
-                                    )
+                if post_id and post_id not in captured_like_ids:
+                    captured_like_ids.append(post_id)
+                    logger.info(f"[post_id_capture] Captured post_id: {post_id}")
 
-            self._tab.add_handler(cdp.network.RequestWillBeSent, capture_like_request)
+            self._tab.add_handler(cdp.network.RequestWillBeSent, on_persist_request)
+            self._tab.add_handler(cdp.network.LoadingFinished, on_persist_finished)
 
             # Get count of gallery items
             item_count_result = await self._tab.evaluate(

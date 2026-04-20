@@ -84,6 +84,17 @@ PARAMS: dict[str, dict[str, Any]] = {
         "type": "int",
         "default": 1,
     },
+    "quality": {
+        "desc": (
+            "Generation quality preset: 'speed' (faster, lower quality, "
+            "default — matches Grok Imagine's default) or 'quality' "
+            "(slower, higher fidelity). Grok added this toggle in 2026-04; "
+            "unknown values are passed through with a warning so future "
+            "additions like 'ultra' don't hard-break."
+        ),
+        "type": "str",
+        "default": "speed",
+    },
     "max_scroll": {
         "desc": "Max scroll attempts for more images.",
         "type": "int",
@@ -157,6 +168,7 @@ IMAGE_KEYS = [
     "images",
     "prompt",
     "aspect_ratio",
+    "quality",
     "min_success",
     "max_scroll",
     "timeout",

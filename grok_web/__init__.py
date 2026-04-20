@@ -54,7 +54,7 @@ from .schema import (
     splice_schema_into_docstring,
     validate_params,
 )
-from .selectors import select_all, signal_file_selector, timeout_selector
+from .selectors import auto_favorite_first_n, select_all, signal_file_selector, timeout_selector
 
 try:
     from importlib.metadata import version
@@ -156,4 +156,5 @@ __all__ = [
     "select_all",
     "timeout_selector",
     "signal_file_selector",
+    "auto_favorite_first_n",
 ]

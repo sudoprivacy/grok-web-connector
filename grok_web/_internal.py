@@ -34,6 +34,10 @@ MEDIA_POST_LIKE_ENDPOINT = "/rest/media/post/like"
 MEDIA_POST_UNLIKE_ENDPOINT = "/rest/media/post/unlike"
 MEDIA_POST_LIST_ENDPOINT = "/rest/media/post/list"
 MEDIA_POST_GET_ENDPOINT = "/rest/media/post/get"
+# 2026-04: clicking 生成视频 on a gallery image POSTs here to persist
+# the temporary image as a real post under the user's account. Body
+# is {"id": "<image_id>"}.
+MEDIA_POST_CREATE_ENDPOINT = "/rest/media/post/create"
 
 # =============================================================================
 # Shared Utilities

@@ -16,7 +16,10 @@ authors = [
 ]
 dependencies = [
     "pydantic>=2.0.0",
-    "ai-dev-browser>=0.5.3,<0.6",
+    # ai-dev-browser 0.8.0 removed the built-in cloudflare_verify; we handle
+    # its absence gracefully in client.py, so the range covers both pre-0.8
+    # (automatic CF) and 0.8+ (caller-handled CF).
+    "ai-dev-browser>=0.5.3,<0.9",
 ]
 
 [project.scripts]
