@@ -488,136 +488,110 @@ class GrokClient(ResponseParser):
             return {}
 
     async def _asset_request_head(self, asset_url: str) -> int:
-        """Make HEAD request to asset URL via CDP Network.loadNetworkResource.
+        """Return Content-Length for an asset URL via a page-initiated
+        HEAD request.
 
-        Uses CDP so we can bypass the CORS block that in-page fetch hits
-        on ``imagine-public.x.ai`` (the origin that serves generated
-        videos).
+        Implementation: ``tab.evaluate("fetch(url, {method: 'HEAD'})")``
+        inside the active grok.com tab. Although the asset lives on
+        ``imagine-public.x.ai`` / ``assets.grok.com`` (different
+        origin from the grok.com tab), those CDNs return
+        ``Access-Control-Allow-Origin: *`` so a HEAD fetch from the
+        grok.com context reads headers without issue. Empirically
+        verified 2026-04-21 — this was a fear that didn't pan out.
 
-        Known sharp edges (v0.10.x bug reports):
+        Why this matters vs. the old CDP ``Network.loadNetworkResource``
+        implementation:
 
-        1. ``Network.loadNetworkResource`` downloads the FULL response
-           body, not just headers. Video .mp4 URLs can be several MB.
-           On a slow CDN or rate-limited IP a single call can take 30+
-           seconds, which exceeds ai-dev-browser's default per-command
-           timeout. That command gets cancelled on the Python side but
-           **Chrome keeps downloading** — the network slot stays pinned.
-           Accumulated across a favorites-scan pass (50+ such calls),
-           Chrome eventually refuses new CDP WebSocket upgrades with
-           HTTP 500. There is no CDP command to cancel an in-flight
-           loadNetworkResource cleanly.
-        2. The stream handle in the success path is leaked unless we
-           explicitly ``IO.close`` it. ``finally`` below handles that.
+        1. **No resource leak under batch load.**
+           ``loadNetworkResource`` downloads the *full body* (several
+           MB for a .mp4), holds a CDP network slot for the duration,
+           and — critically — cannot be cancelled if the Python side
+           times out. Accumulate ~200 such calls in a long-lived client
+           and Chrome refuses new CDP WebSocket upgrades with HTTP 500.
+           Page-context HEAD returns headers only and cleans up
+           trivially via standard browser fetch lifecycle.
+        2. **No Cloudflare fingerprint escalation.**
+           CDP-injected fetches don't share the page's TLS fingerprint;
+           repeated calls look bot-like and CF ramps challenge severity
+           to the point that fresh-Chrome launches start failing. A
+           page-initiated fetch on the real user origin is
+           indistinguishable from a ``<video>`` tag's natural prefetch.
+        3. **Works with ai-dev-browser >= 0.8.**
+           The old path uses ``cdp.network.load_network_resource``;
+           the new path uses only ``tab.evaluate``, so it has no
+           dependency on CDP command surface stability.
 
-        Mitigations here:
-          * Cap the whole call at a short timeout (below) so we raise
-            a clear Python error instead of letting one slow URL eat
-            the per-CDP-command budget.
-          * Always close the stream handle on both success and error.
-          * Log the URL + elapsed time on failure so caller can see
-            which assets are the slow ones.
-
-        If you're hitting a wall calling this many times in a long-
-        lived client, consider: re-entering get_client() between
-        batches (old state is reset), or relying on ``_match_by_video_id``
-        (O(1) REST lookup, no body download).
+        Callers that hit rate limits / slow CDN edges should see a
+        clean ``GrokAPIError`` with elapsed time; HEAD requests don't
+        hang Chrome even on a dead URL because fetch respects the
+        ``AbortSignal.timeout`` we pass in.
         """
         import asyncio
+        import json as _json
 
-        from ai_dev_browser import cdp
+        PER_CALL_TIMEOUT_MS = 15000  # 15s per call; fetch aborts cleanly
 
-        # Cap well below ai-dev-browser's default 30s COMMAND_TIMEOUT
-        # so our caller gets a clean GrokAPIError and Chrome's
-        # underlying download can be observed (even if not cancelled).
-        PER_CALL_TIMEOUT = 15.0
-
-        stream_handle = None
         t0 = asyncio.get_event_loop().time()
         try:
-            # Get the main frame ID for the current page
-            frame_tree = await self._tab.send(cdp.page.get_frame_tree())
-            frame_id = (
-                frame_tree.frame.id_
-            )  # Note: id_ (with underscore) because 'id' is a Python keyword
-
-            # Use CDP Network.loadNetworkResource to fetch headers
-            # This bypasses CORS and is more reliable than fetch()
-            response = await asyncio.wait_for(
-                self._tab.send(
-                    cdp.network.load_network_resource(
-                        frame_id=frame_id,
-                        url=asset_url,
-                        options=cdp.network.LoadNetworkResourceOptions(
-                            disable_cache=False, include_credentials=True
-                        ),
-                    )
+            # Page-context fetch. Use AbortSignal.timeout so if the CDN
+            # hangs we get a DOMException AbortError rather than a
+            # tab.evaluate timeout that would leave the fetch running.
+            raw = await self._tab.evaluate(
+                r"""
+                (async () => {
+                    try {
+                        const r = await fetch(__URL__, {
+                            method: 'HEAD',
+                            signal: AbortSignal.timeout(__TIMEOUT__),
+                        });
+                        return JSON.stringify({
+                            ok: true,
+                            status: r.status,
+                            length: r.headers.get('content-length'),
+                            type: r.headers.get('content-type'),
+                        });
+                    } catch (e) {
+                        return JSON.stringify({
+                            ok: false,
+                            error: (e && e.name) ? e.name + ': ' + e.message : String(e),
+                        });
+                    }
+                })()
+                """.replace("__URL__", _json.dumps(asset_url)).replace(
+                    "__TIMEOUT__", str(PER_CALL_TIMEOUT_MS)
                 ),
-                timeout=PER_CALL_TIMEOUT,
+                await_promise=True,
             )
+            data = _json.loads(raw) if isinstance(raw, str) else raw
 
-            # Check if request succeeded
-            if not response:
-                raise GrokAPIError(f"Failed to load network resource: {asset_url}")
+            if not data or not data.get("ok"):
+                err = (data or {}).get("error", "unknown") if isinstance(data, dict) else "unknown"
+                elapsed = asyncio.get_event_loop().time() - t0
+                raise GrokAPIError(
+                    f"Page-context HEAD failed after {elapsed:.1f}s. "
+                    f"URL: {asset_url}, Error: {err}"
+                )
 
-            # Remember the stream handle (if Chrome gave one) so we can
-            # release it in `finally` regardless of which branch returns
-            # or raises below.
-            stream_handle = getattr(response, "stream", None)
-
-            # Response is directly LoadNetworkResourcePageResult (not wrapped)
-            # Check if there was a network error
-            if not response.success:
-                error_msg = f"Network request failed for {asset_url}"
-                if response.net_error_name:
-                    error_msg += f": {response.net_error_name}"
-                raise GrokAPIError(error_msg)
-
-            # Check HTTP status
-            if response.http_status_code == 403:
+            status = data.get("status")
+            if status == 403:
                 raise GrokAuthError("Asset access denied (403)")
-            if response.http_status_code and response.http_status_code >= 400:
-                raise GrokAPIError(f"Asset request failed: HTTP {response.http_status_code}")
+            if status and status >= 400:
+                raise GrokAPIError(f"Asset request failed: HTTP {status}")
 
-            # Get Content-Length from headers
-            if response.headers:
-                for header_name, header_value in response.headers.items():
-                    if header_name.lower() == "content-length":
-                        return int(header_value)
-
-            raise GrokAPIError("No Content-Length header in response")
-
+            length = data.get("length")
+            if length is None:
+                raise GrokAPIError(f"No Content-Length header in HEAD response for {asset_url}")
+            try:
+                return int(length)
+            except (TypeError, ValueError) as e:
+                raise GrokAPIError(f"Non-integer Content-Length {length!r} for {asset_url}") from e
         except (GrokAPIError, GrokAuthError):
             raise
-        except asyncio.TimeoutError as e:
+        except Exception as e:  # noqa: BLE001
             elapsed = asyncio.get_event_loop().time() - t0
             raise GrokAPIError(
-                f"CDP asset HEAD timed out after {elapsed:.1f}s "
-                f"(cap {PER_CALL_TIMEOUT}s). URL: {asset_url}. Chrome may "
-                f"still be downloading this body in the background, which "
-                f"can tie up its network slots — if you hit this repeatedly "
-                f"in a long-lived client, re-enter get_client() to reset "
-                f"Chrome state."
+                f"Page-context HEAD failed after {elapsed:.1f}s. " f"URL: {asset_url}, Error: {e}"
             ) from e
-        except Exception as e:
-            elapsed = asyncio.get_event_loop().time() - t0
-            raise GrokAPIError(
-                f"CDP asset HEAD failed after {elapsed:.1f}s. " f"URL: {asset_url}, Error: {e}"
-            ) from e
-        finally:
-            # Release the stream handle even if we bailed early — we
-            # never read the body, Chrome has nothing to wait for.
-            if stream_handle is not None:
-                try:
-                    await self._tab.send(cdp.io.close(handle=stream_handle))
-                except Exception as close_err:  # noqa: BLE001
-                    # Closing is best-effort. Log quietly — the main
-                    # work already succeeded or failed with its own
-                    # error.
-                    logger.debug(
-                        "Failed to close CDP stream handle for %s: %s",
-                        asset_url,
-                        close_err,
-                    )
 
     # =========================================================================
     # API Methods (business logic using the I/O primitives above)
