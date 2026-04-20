@@ -20,7 +20,7 @@ async def get_thumbnails(tab) -> list[dict]:
         [{"index": 1, "name": "Thumbnail 1", "ref": "35#6303"}, ...]
         Empty list if no thumbnails (single-image post).
     """
-    from ai_dev_browser.core.snapshot import page_find
+    from ai_dev_browser.core.snapshot import page_discover as page_find
 
     result = await page_find(tab, text="Thumbnail", interactable_only=True)
     thumbnails = []
@@ -53,7 +53,7 @@ async def select_thumbnail(tab, index: int, *, delay: float = 1.0) -> bool:
         GrokAPIError: If thumbnail not found
     """
     from ai_dev_browser.core.ax import click_by_ref
-    from ai_dev_browser.core.snapshot import page_find
+    from ai_dev_browser.core.snapshot import page_discover as page_find
 
     target_name = f"Thumbnail {index}"
 

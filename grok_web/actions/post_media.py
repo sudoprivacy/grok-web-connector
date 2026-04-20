@@ -20,7 +20,7 @@ async def get_media_view(tab) -> str | None:
         'video' if video view is active, 'image' if image view is active,
         None if neither toggle is found (e.g., image-only post with no videos).
     """
-    from ai_dev_browser.core.snapshot import page_find
+    from ai_dev_browser.core.snapshot import page_discover as page_find
 
     # If play/pause button exists, video is showing.
     result = await page_find(tab, interactable_only=True)
@@ -51,7 +51,7 @@ async def switch_to_image_view(tab, *, delay: float = 1.0) -> bool:
         True if switched (or already on image view)
     """
     from ai_dev_browser.core.ax import click_by_ref
-    from ai_dev_browser.core.snapshot import page_find
+    from ai_dev_browser.core.snapshot import page_discover as page_find
 
     current = await get_media_view(tab)
     if current == "image" or current is None:
@@ -74,7 +74,7 @@ async def switch_to_video_view(tab, *, delay: float = 1.0) -> bool:
         True if switched (or already on video view)
     """
     from ai_dev_browser.core.ax import click_by_ref
-    from ai_dev_browser.core.snapshot import page_find
+    from ai_dev_browser.core.snapshot import page_discover as page_find
 
     current = await get_media_view(tab)
     if current == "video":

@@ -1973,118 +1973,183 @@ class GrokClient(ResponseParser):
         # Wait for page to load
         await asyncio.sleep(3 * d)
 
-        # New UI: "编辑图像" is inside the settings gear menu.
-        # Must switch to image view first if video is showing, then open gear → click menuitem.
-        from ai_dev_browser.core.ax import click_by_ref
-        from ai_dev_browser.core.snapshot import page_find
+        # Grok 2026-04 UI: image-edit trigger moved. Old path was
+        # "图片 → 设置 → 编辑图像"; that menu is gone. New path is
+        # "click image thumbnail → 更多选项 → Custom → 图片 mode →
+        # type prompt → click 编辑 submit". Side effects:
+        #   - we need focus emulation so CDP press/release fire properly
+        #     on a possibly-backgrounded Chrome (same fix used by
+        #     extend_video)
+        #   - Radix triggers (menu button + menuitems) need JS pointer-
+        #     event dispatch; plain click() / mouse_click silently no-ops
+        from .actions.extend_seed import enable_focus_emulation
 
-        # Switch to image view (if video is active, "图片" button is visible)
-        ax_result = await page_find(self._tab, text="图片", interactable_only=True)
-        for el in ax_result.get("elements", []):
-            if el.get("role") == "button" and el.get("name") == "图片":
-                await click_by_ref(self._tab, el["ref"])
-                await asyncio.sleep(2 * d)
-                break
+        await enable_focus_emulation(self._tab)
 
-        # Open settings gear dropdown
-        clicked = False
-        ax_result = await page_find(self._tab, text="设置", interactable_only=True)
-        for el in ax_result.get("elements", []):
-            if el.get("role") == "button" and el.get("name") == "设置":
-                await click_by_ref(self._tab, el["ref"])
-                await asyncio.sleep(1 * d)
-                clicked = True
-                break
-        if not clicked:
-            # CSS fallback
-            btn = await self._tab.query_selector('button[aria-label="设置"]')
-            if not btn:
-                btn = await self._tab.query_selector('button[aria-label="Settings"]')
-            if btn:
-                await btn.click()
-                await asyncio.sleep(1 * d)
-                clicked = True
-        if not clicked:
-            raise GrokAPIError("Could not find settings gear button")
+        # 1. Switch to image view by clicking the root-image thumbnail
+        # in the left column. The post page auto-defaults to the tail
+        # video of the chain; edit is only available when the image
+        # itself is shown as the main subject.
+        thumb_clicked = await self._tab.evaluate(
+            r"""
+            (() => {
+                const imgs = Array.from(document.querySelectorAll('img'))
+                    .filter(i => {
+                        const r = i.getBoundingClientRect();
+                        const src = (i.currentSrc || i.src || '');
+                        return r.width > 30 && r.width < 120
+                               && src.includes('imagine-public/images');
+                    });
+                if (imgs.length === 0) return false;
+                let el = imgs[0];
+                while (el && el.tagName !== 'BUTTON' && el.parentElement) {
+                    el = el.parentElement;
+                }
+                if (!el) return false;
+                const r = el.getBoundingClientRect();
+                const x = r.x + r.width/2, y = r.y + r.height/2;
+                const o = {bubbles: true, cancelable: true, clientX: x, clientY: y,
+                           pointerType: 'mouse', button: 0, pointerId: 1, isPrimary: true};
+                el.dispatchEvent(new PointerEvent('pointerdown', o));
+                el.dispatchEvent(new MouseEvent('mousedown', o));
+                el.dispatchEvent(new PointerEvent('pointerup', o));
+                el.dispatchEvent(new MouseEvent('mouseup', o));
+                el.dispatchEvent(new MouseEvent('click', o));
+                return true;
+            })()
+            """
+        )
+        if thumb_clicked:
+            await asyncio.sleep(1.5 * d)
 
-        # Click "编辑图像" menuitem
-        edit_clicked = False
-        ax_result = await page_find(self._tab, text="编辑图像", interactable_only=True)
-        for el in ax_result.get("elements", []):
-            if el.get("role") == "menuitem":
-                await click_by_ref(self._tab, el["ref"])
-                await asyncio.sleep(2 * d)
-                edit_clicked = True
-                break
-        if not edit_clicked:
-            # CSS fallback
-            items = await self._tab.query_selector_all('[role="menuitem"]')
-            for item in items:
-                item_text = item.text.strip() if item.text else ""
-                if "编辑图像" in item_text or "Edit image" in item_text:
-                    await item.click()
-                    await asyncio.sleep(2 * d)
-                    edit_clicked = True
-                    break
-        if not edit_clicked:
-            raise GrokAPIError("Could not find '编辑图像' menuitem in settings menu")
+        # 2. Open 更多选项 menu (Radix — pointer dispatch required)
+        menu_opened = await self._tab.evaluate(
+            r"""
+            (() => {
+                const b = Array.from(document.querySelectorAll('button'))
+                    .find(x => (x.getAttribute('aria-label')||'')==='更多选项');
+                if (!b) return false;
+                const r = b.getBoundingClientRect();
+                const x = r.x + r.width/2, y = r.y + r.height/2;
+                const o = {bubbles:true, cancelable:true, clientX:x, clientY:y,
+                           pointerType:'mouse', button:0, pointerId:1, isPrimary:true};
+                b.dispatchEvent(new PointerEvent('pointerdown', o));
+                b.dispatchEvent(new MouseEvent('mousedown', o));
+                b.dispatchEvent(new PointerEvent('pointerup', o));
+                b.dispatchEvent(new MouseEvent('mouseup', o));
+                b.dispatchEvent(new MouseEvent('click', o));
+                return true;
+            })()
+            """
+        )
+        if not menu_opened:
+            raise GrokAPIError("Could not find 更多选项 button on image post")
+        await asyncio.sleep(1.2 * d)
 
-        # Fill the edit prompt into ProseMirror/tiptap contenteditable editor
-        escaped_prompt = edit_prompt.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
-        fill_result = await self._tab.evaluate(f"""
+        # 3. Click the Custom menuitem — this brings up a generation
+        # panel pre-populated with the current image as a reference.
+        # (Grok renamed the old "编辑图像" menuitem to "Custom" as part
+        # of unifying image edit and img2vid into one prompt flow.)
+        custom_fired = await self._tab.evaluate(
+            r"""
+            (() => {
+                const mi = Array.from(document.querySelectorAll('[role=menuitem]'))
+                    .find(m => {
+                        const t = (m.innerText||'').trim();
+                        return t === 'Custom' || t === '编辑图像' || t === 'Edit image';
+                    });
+                if (!mi) return false;
+                const r = mi.getBoundingClientRect();
+                const x = r.x + r.width/2, y = r.y + r.height/2;
+                const o = {bubbles:true, cancelable:true, clientX:x, clientY:y,
+                           pointerType:'mouse', button:0, pointerId:1, isPrimary:true};
+                mi.dispatchEvent(new PointerEvent('pointerdown', o));
+                mi.dispatchEvent(new MouseEvent('mousedown', o));
+                mi.dispatchEvent(new PointerEvent('pointerup', o));
+                mi.dispatchEvent(new MouseEvent('mouseup', o));
+                mi.dispatchEvent(new MouseEvent('click', o));
+                return true;
+            })()
+            """
+        )
+        if not custom_fired:
+            raise GrokAPIError(
+                "Could not find 'Custom' menuitem. Grok may have renamed it "
+                "again — adjust edit_image to match."
+            )
+        await asyncio.sleep(2.5 * d)
+
+        # 4. Switch to 图片 (Image) mode. The panel defaults to 视频
+        # (Video) mode where the submit button is 生成视频; in 图片
+        # mode the submit button is 编辑.
+        await self._tab.evaluate(
+            r"""
+            (() => {
+                const b = Array.from(document.querySelectorAll('button'))
+                    .find(x => (x.getAttribute('aria-label')||'')==='图片');
+                if (!b) return;
+                const r = b.getBoundingClientRect();
+                const x = r.x + r.width/2, y = r.y + r.height/2;
+                const o = {bubbles:true, cancelable:true, clientX:x, clientY:y,
+                           pointerType:'mouse', button:0, pointerId:1, isPrimary:true};
+                b.dispatchEvent(new PointerEvent('pointerdown', o));
+                b.dispatchEvent(new MouseEvent('mousedown', o));
+                b.dispatchEvent(new PointerEvent('pointerup', o));
+                b.dispatchEvent(new MouseEvent('mouseup', o));
+                b.dispatchEvent(new MouseEvent('click', o));
+            })()
+            """
+        )
+        await asyncio.sleep(1.0 * d)
+
+        # 5. Fill the prompt via execCommand (tiptap-safe; direct
+        # innerHTML writes get rejected by ProseMirror).
+        escaped_prompt = edit_prompt.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
+        fill_result = await self._tab.evaluate(
+            f"""
             (() => {{
-                // Try ProseMirror/tiptap contenteditable first (new UI)
-                const editor = document.querySelector('.tiptap.ProseMirror') ||
-                               document.querySelector('[contenteditable="true"]') ||
-                               document.querySelector('.ProseMirror');
-                if (editor) {{
-                    editor.focus();
-                    editor.innerHTML = '<p>{escaped_prompt}</p>';
-                    editor.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                    return 'editor';
-                }}
-                // Fallback: textarea
-                const textarea = document.querySelector('textarea');
-                if (textarea && textarea.offsetParent !== null) {{
-                    textarea.focus();
-                    const setter = Object.getOwnPropertyDescriptor(
-                        window.HTMLTextAreaElement.prototype, 'value'
-                    ).set;
-                    setter.call(textarea, "{escaped_prompt}");
-                    textarea.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                    textarea.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                    return 'textarea';
-                }}
-                return 'not_found';
+                const ed = document.querySelector('.tiptap.ProseMirror')
+                       || document.querySelector('[contenteditable="true"]');
+                if (!ed) return 'no-editor';
+                ed.focus();
+                document.execCommand('selectAll');
+                document.execCommand('delete');
+                document.execCommand('insertText', false, `{escaped_prompt}`);
+                return 'ok';
             }})()
-        """)
-        if fill_result == "not_found":
-            raise GrokAPIError("Could not find edit input (ProseMirror or textarea)")
-
+            """
+        )
+        if fill_result == "no-editor":
+            raise GrokAPIError("Could not find prompt editor (ProseMirror)")
         await asyncio.sleep(1 * d)
 
-        # Click the submit button: ax_tree name="编辑" or fallback to CSS
-        submit_clicked = False
-        ax_result = await page_find(self._tab, text="编辑", interactable_only=True)
-        for el in ax_result.get("elements", []):
-            if el.get("role") == "button" and el.get("name") == "编辑":
-                await click_by_ref(self._tab, el["ref"])
-                submit_clicked = True
-                break
+        # 6. Click the 编辑 submit button (pointer dispatch). Keep
+        # 生成视频 as a fallback in case mode toggle didn't take.
+        submit_clicked = await self._tab.evaluate(
+            r"""
+            (() => {
+                let b = Array.from(document.querySelectorAll('button'))
+                    .find(x => (x.getAttribute('aria-label')||'')==='编辑');
+                if (!b) {
+                    b = Array.from(document.querySelectorAll('button'))
+                        .find(x => (x.getAttribute('aria-label')||'')==='生成视频');
+                }
+                if (!b) return false;
+                const r = b.getBoundingClientRect();
+                const x = r.x + r.width/2, y = r.y + r.height/2;
+                const o = {bubbles:true, cancelable:true, clientX:x, clientY:y,
+                           pointerType:'mouse', button:0, pointerId:1, isPrimary:true};
+                b.dispatchEvent(new PointerEvent('pointerdown', o));
+                b.dispatchEvent(new MouseEvent('mousedown', o));
+                b.dispatchEvent(new PointerEvent('pointerup', o));
+                b.dispatchEvent(new MouseEvent('mouseup', o));
+                b.dispatchEvent(new MouseEvent('click', o));
+                return true;
+            })()
+            """
+        )
         if not submit_clicked:
-            # CSS fallback
-            submit_clicked = await self._tab.evaluate("""
-                (() => {
-                    // Try aria-label
-                    let btn = document.querySelector('button[aria-label="编辑"]');
-                    if (!btn) btn = document.querySelector('button[aria-label="Edit"]');
-                    if (!btn) btn = document.querySelector('button[aria-label="生成视频"]');
-                    if (btn) { btn.click(); return true; }
-                    return false;
-                })()
-            """)
-        if not submit_clicked:
-            raise GrokAPIError("Could not find submit button")
+            raise GrokAPIError("Could not find 编辑 submit button")
 
         # Wait for response with timeout
         start_time = asyncio.get_event_loop().time()
