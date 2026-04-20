@@ -2887,12 +2887,18 @@ class GrokClient(ResponseParser):
                         if data.get("r_rated"):
                             captured_data["jobs"][job_id]["r_rated"] = True
 
-                        # When completed, construct the image URL
+                        # When completed, construct the image URL.
+                        # The WS payload doesn't include a direct URL field
+                        # (only image_id), so we template it. Empirically
+                        # verified 2026-04-21: the CDN serves
+                        # .../images/<id>.jpg (image/jpeg) and returns 404
+                        # NoSuchKey for .png / .png?cache=1 (what older
+                        # versions of this code generated). Keep the path
+                        # exact — no query-string suffix.
                         if data.get("current_status") == "completed":
                             image_id = data.get("image_id", job_id)
-                            # Grok uses this URL format for generated images
                             captured_data["jobs"][job_id]["image_url"] = (
-                                f"https://imagine-public.x.ai/imagine-public/images/{image_id}.png?cache=1"
+                                f"https://imagine-public.x.ai/imagine-public/images/{image_id}.jpg"
                             )
                             captured_data["jobs"][job_id]["model_name"] = data.get("model_name", "")
                             captured_data["jobs"][job_id]["full_prompt"] = data.get(
