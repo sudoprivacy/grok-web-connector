@@ -139,6 +139,10 @@ class GrokClient(ResponseParser):
         self._initialized = False
         self._chrome_process = None  # Track Chrome process we launched
         self._ui_delay = ui_delay
+        # One-shot flag so create_image's "you're not persisting" nudge
+        # fires at most once per client — avoids log spam on batch runs
+        # where the caller has made an informed opt-out choice.
+        self._persistence_hinted = False
 
         # Snitch for x-statsig-id (populated passively from any grok.com request
         # seen on this tab). Used by direct REST submit to pass anti-bot check.
@@ -2795,16 +2799,28 @@ class GrokClient(ResponseParser):
         max_scroll = p.get("max_scroll", 5)
         timeout = p.get("timeout", 300)
         thumbnail_selector = p.get("thumbnail_selector")
-        auto_favorite = p.get("auto_favorite", 1)
+        auto_favorite = p.get("auto_favorite", 0)
         # JSON/CLI-friendly shortcut — wrap the int into the equivalent
         # auto_favorite_first_n callable. Skip when caller already passed
         # a thumbnail_selector explicitly (power-user callable wins, per
-        # the schema docstring). Also skip when auto_favorite is 0/None
-        # — that's the opt-out for ephemeral preview-only runs.
+        # the schema docstring). Default is 0 (opt-in): persistence
+        # mutates the user's grok.com account state and should never
+        # happen silently — callers who want a durable post_id must ask.
         if thumbnail_selector is None and auto_favorite:
             from .selectors import auto_favorite_first_n as _auto_fav
 
             thumbnail_selector = _auto_fav(int(auto_favorite))
+        elif thumbnail_selector is None and not auto_favorite and not self._persistence_hinted:
+            # One-shot nudge per client instance — tell the caller how
+            # to persist if they want to, without spamming every call.
+            logger.info(
+                "[create_image] auto_favorite=0 (default). Generated "
+                "images will be ephemeral on the account — URLs work but "
+                "there's no post_id for edit_image / img2vid. Pass "
+                "auto_favorite=N to also favorite N as persistent posts "
+                "(modifies your grok.com favorites list)."
+            )
+            self._persistence_hinted = True
         quality = p.get("quality", "speed")
         if quality not in {"speed", "quality"}:
             logger.warning(

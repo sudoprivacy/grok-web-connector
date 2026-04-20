@@ -102,19 +102,23 @@ PARAMS: dict[str, dict[str, Any]] = {
     },
     "auto_favorite": {
         "desc": (
-            "Auto-persist the first N gallery images as posts. "
-            "Populates result.selected_post_ids with the new UUIDs so "
-            "they can be reused as 'post:<uuid>' in edit_image or "
-            "create_video. Default 1 — Grok's gallery images are "
-            "ephemeral and disappear on refresh, so without auto-persist "
-            "a create_image run produces no durable output. Set to 0 "
-            "explicitly if you only need the gallery preview and want "
-            "to drop everything (e.g. a 'smoke test' or preview-only "
-            "flow). This is the JSON/CLI-friendly shortcut; equivalent "
-            "to passing thumbnail_selector=auto_favorite_first_n(N)."
+            "Auto-favorite the first N gallery images as persistent "
+            "posts on the user's grok.com account. Default 0 — "
+            "generated images already come back as ephemeral CDN URLs "
+            "(result.images[].image_url, durable) without any account "
+            "modification; setting N>=1 ALSO persists the first N as "
+            "real favorites so they get a post_id usable in "
+            "edit_image / create_video({'images': ['post:<uuid>']}). "
+            "WARNING: this mutates grok.com account state — every "
+            "favorite is visible in the user's favorites list and "
+            "counts toward moderation history. Prefer keeping the "
+            "default 0 for batch generation / smoke tests / CI / "
+            "NSFW-adjacent exploration; opt in only when you need a "
+            "post_id downstream. JSON/CLI equivalent of "
+            "thumbnail_selector=auto_favorite_first_n(N)."
         ),
         "type": "int",
-        "default": 1,
+        "default": 0,
     },
     "thumbnail_selector": {
         "desc": (
