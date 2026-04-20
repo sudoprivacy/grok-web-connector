@@ -18,8 +18,14 @@ _MENU_BUTTON_NAMES = {"更多选项", "More options", "Options"}
 async def open_post_menu(tab, *, delay: float = 1.0) -> bool:
     """Open the "..." post menu on the current page.
 
-    Finds the menu button via ax_tree (role=button, name in known set)
-    and clicks it. Assumes already navigated to a post page.
+    Grok's menu is a Radix DropdownMenu — its Trigger listens to
+    ``pointerdown`` events, not plain ``click``. Neither ``click_by_ref``
+    (ax_tree) nor element.mouse_click() (CDP Input.dispatchMouseEvent
+    without pointerType) produces a synthetic pointerdown that React
+    sees, so the menu appears to click but never expands. We dispatch
+    the pointer sequence via JS — that is what reliably opens the menu.
+
+    Assumes already navigated to a post page.
 
     Args:
         tab: browser Tab instance
@@ -31,49 +37,94 @@ async def open_post_menu(tab, *, delay: float = 1.0) -> bool:
     Raises:
         GrokAPIError: If menu button not found after retries
     """
-    from ai_dev_browser.core.ax import click_by_ref
-    from ai_dev_browser.core.snapshot import page_discover as page_find
-
     for attempt in range(3):
-        result = await page_find(tab, interactable_only=True)
-        for el in result.get("elements", []):
-            if el.get("role") == "button" and el.get("name") in _MENU_BUTTON_NAMES:
-                await click_by_ref(tab, el["ref"])
+        # Confirm the button is present before trying to click it.
+        present = await tab.evaluate(
+            """
+            (() => {
+                const sels = [
+                    'button[aria-label="更多选项"][aria-haspopup="menu"]',
+                    'button[aria-label="More options"][aria-haspopup="menu"]',
+                    'button[aria-label="Options"][aria-haspopup="menu"]',
+                    'button[aria-label="更多选项"]',
+                    'button[aria-label="More options"]',
+                    'button[aria-label="Options"]',
+                ];
+                for (const sel of sels) {
+                    const btn = document.querySelector(sel);
+                    if (btn) return true;
+                }
+                return false;
+            })()
+            """
+        )
+        if present:
+            # Pause any playing video so its overlay doesn't eat the click
+            await tab.evaluate('document.querySelectorAll("video").forEach(v => v.pause())')
+            await asyncio.sleep(0.2 * delay)
+            # Fire a full pointer sequence — Radix opens on pointerdown
+            fired = await tab.evaluate(
+                """
+                (() => {
+                    const sels = [
+                        'button[aria-label="更多选项"]',
+                        'button[aria-label="More options"]',
+                        'button[aria-label="Options"]',
+                    ];
+                    for (const sel of sels) {
+                        const btn = document.querySelector(sel);
+                        if (!btn) continue;
+                        const r = btn.getBoundingClientRect();
+                        const x = r.x + r.width/2, y = r.y + r.height/2;
+                        const o = {bubbles: true, cancelable: true,
+                                   clientX: x, clientY: y,
+                                   pointerType: 'mouse', button: 0,
+                                   pointerId: 1, isPrimary: true};
+                        btn.dispatchEvent(new PointerEvent('pointerover', o));
+                        btn.dispatchEvent(new PointerEvent('pointerenter', o));
+                        btn.dispatchEvent(new PointerEvent('pointermove', o));
+                        btn.dispatchEvent(new PointerEvent('pointerdown', o));
+                        btn.dispatchEvent(new MouseEvent('mousedown', o));
+                        btn.dispatchEvent(new PointerEvent('pointerup', o));
+                        btn.dispatchEvent(new MouseEvent('mouseup', o));
+                        btn.dispatchEvent(new MouseEvent('click', o));
+                        return sel;
+                    }
+                    return null;
+                })()
+                """
+            )
+            if fired:
                 await asyncio.sleep(1 * delay)
-                return True
-
-        # Fallback: try CSS selectors (in case ax_tree doesn't expose the name)
-        for selector in [
-            'button[aria-label="更多选项"][aria-haspopup="menu"]',
-            'button[aria-label="More options"][aria-haspopup="menu"]',
-            'button[aria-label="Options"]',
-        ]:
-            try:
-                btn = await tab.query_selector(selector)
-                if btn:
-                    await btn.scroll_into_view()
-                    await asyncio.sleep(0.5 * delay)
-                    # Dropdown menus require real mouse events
-                    await btn.mouse_click()
-                    await asyncio.sleep(1 * delay)
+                # Verify menu opened by checking data-state / menuitems
+                opened = await tab.evaluate(
+                    """
+                    document.querySelectorAll('[role="menuitem"]').length > 0
+                    """
+                )
+                if opened:
                     return True
-            except Exception:
-                pass
-
         if attempt < 2:
             await asyncio.sleep(2 * delay)
 
-    raise GrokAPIError("Could not find '...' menu button (更多选项/Options)")
+    raise GrokAPIError(
+        "Could not open '...' post menu (button may be missing or Radix trigger isn't firing — check pointer-event dispatch)"
+    )
 
 
 async def click_menu_item(tab, *text_options: str, delay: float = 1.0) -> bool:
     """Click a menu item by matching its accessible name.
 
-    Uses ax_tree to find menuitems, with CSS fallback.
+    Radix menu items — like their Trigger — respond to ``pointerdown``,
+    not to ``click``. ``click_by_ref`` (ax_tree) and ``element.mouse_click``
+    (CDP Input.dispatchMouseEvent without pointerType) both appear to
+    click successfully but do NOT actually fire Radix's handler, leaving
+    the menu open. We dispatch a full pointer sequence via JS; that is
+    what reliably activates the item.
 
     Args:
         tab: browser Tab instance
-        *text_options: Text strings to match (e.g., "延长视频", "Extend video")
+        *text_options: Text strings to match (e.g., "扩展", "Extend video")
         delay: UI delay multiplier
 
     Returns:
@@ -82,35 +133,41 @@ async def click_menu_item(tab, *text_options: str, delay: float = 1.0) -> bool:
     Raises:
         GrokAPIError: If no matching menu item found
     """
-    from ai_dev_browser.core.ax import click_by_ref
-    from ai_dev_browser.core.snapshot import page_discover as page_find
+    import json as _json
 
-    text_set = set(text_options)
+    wanted_literal = _json.dumps(list(text_options))
 
     for attempt in range(3):
-        # ax_tree approach: find all elements, filter menuitems by name
-        result = await page_find(tab, interactable_only=True)
-        for el in result.get("elements", []):
-            if el.get("role") == "menuitem" and el.get("name") in text_set:
-                await click_by_ref(tab, el["ref"])
-                await asyncio.sleep(0.5 * delay)
-                return True
-
-        # CSS fallback: iterate [role="menuitem"] and match text
-        try:
-            items = await tab.query_selector_all('[role="menuitem"]')
-            for item in items:
-                item_text = item.text.strip() if item.text else ""
-                if item_text in text_set:
-                    await item.scroll_into_view()
-                    await asyncio.sleep(0.2 * delay)
-                    # Menu items in Radix UI need real mouse events
-                    await item.mouse_click()
-                    await asyncio.sleep(0.5 * delay)
-                    return True
-        except Exception:
-            pass
-
+        js = r"""
+            (() => {
+                const wanted = new Set(__WANTED__);
+                const items = Array.from(document.querySelectorAll('[role="menuitem"]'));
+                for (const mi of items) {
+                    const t = (mi.innerText || '').trim();
+                    if (!wanted.has(t)) continue;
+                    const r = mi.getBoundingClientRect();
+                    const x = r.x + r.width/2, y = r.y + r.height/2;
+                    const o = {bubbles: true, cancelable: true,
+                               clientX: x, clientY: y,
+                               pointerType: 'mouse', button: 0,
+                               pointerId: 1, isPrimary: true};
+                    mi.dispatchEvent(new PointerEvent('pointerover', o));
+                    mi.dispatchEvent(new PointerEvent('pointerenter', o));
+                    mi.dispatchEvent(new PointerEvent('pointermove', o));
+                    mi.dispatchEvent(new PointerEvent('pointerdown', o));
+                    mi.dispatchEvent(new MouseEvent('mousedown', o));
+                    mi.dispatchEvent(new PointerEvent('pointerup', o));
+                    mi.dispatchEvent(new MouseEvent('mouseup', o));
+                    mi.dispatchEvent(new MouseEvent('click', o));
+                    return t;
+                }
+                return null;
+            })()
+        """.replace("__WANTED__", wanted_literal)
+        fired = await tab.evaluate(js)
+        if fired:
+            await asyncio.sleep(0.5 * delay)
+            return True
         if attempt < 2:
             await asyncio.sleep(1 * delay)
 
