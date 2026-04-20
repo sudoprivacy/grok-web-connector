@@ -553,6 +553,30 @@ class VideoExtendResult(BaseModel):
         None,
         description="Style seed (x-statsig-id) used for this generation",
     )
+    seed_start_requested: float | None = Field(
+        None,
+        description=(
+            "Seed offset (seconds) the caller asked for. None when the "
+            "classic tail-extend path was used (no filmstrip drag)."
+        ),
+    )
+    seed_start_actual: float | None = Field(
+        None,
+        description=(
+            "Seed offset (seconds) where the filmstrip handle actually "
+            "landed, read back from the UI's inline width% after the "
+            "drag. Precision ~0.01s. Compare against seed_start_requested "
+            "to verify drift."
+        ),
+    )
+    seed_start_displayed: int | None = Field(
+        None,
+        description=(
+            "Seed offset as shown in the UI's M:SS display (integer "
+            "seconds). Useful for logs / user-facing messages; "
+            "seed_start_actual is preferred for precision."
+        ),
+    )
 
     @computed_field
     @property

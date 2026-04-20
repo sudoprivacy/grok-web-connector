@@ -44,11 +44,14 @@ from .pool import BrowserWorkerPool
 from .prompt_parser import classify_image_source, parse_prompt
 from .schema import (
     EDIT_KEYS,
+    EXTEND_KEYS,
     IMAGE_KEYS,
     PARAMS,
+    UPLOAD_KEYS,
     VIDEO_KEYS,
     schema_to_docstring,
     schema_to_help,
+    splice_schema_into_docstring,
     validate_params,
 )
 from .selectors import select_all, signal_file_selector, timeout_selector
@@ -113,8 +116,11 @@ __all__ = [
     "VIDEO_KEYS",
     "IMAGE_KEYS",
     "EDIT_KEYS",
+    "EXTEND_KEYS",
+    "UPLOAD_KEYS",
     "schema_to_docstring",
     "schema_to_help",
+    "splice_schema_into_docstring",
     "validate_params",
     # Prompt parser
     "parse_prompt",

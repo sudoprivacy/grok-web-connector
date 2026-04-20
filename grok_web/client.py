@@ -1545,60 +1545,168 @@ class GrokClient(ResponseParser):
     async def extend_video(
         self,
         video_id: str,
+        *,
+        seed_start: float | None = None,
+        duration: str | None = None,
+        prompt: str | None = None,
         timeout: int = 300,
     ) -> VideoExtendResult:
-        """
-        Extend a video by generating continuation frames via UI menu.
+        """Extend an existing video via the post's "..." menu.
 
-        Navigates to the video post, opens the "..." menu, clicks
-        "Extend video" / "延长视频", and monitors CDP for the response.
+        Flow: navigate to the video post → open "..." → click "扩展" → Grok
+        renders an extend panel with a filmstrip seed selector on top of the
+        video and a prompt editor at the bottom. If ``seed_start`` is given
+        the library drags the filmstrip's right handle to the requested
+        position (this triggers 从框架扩展 mode in the UI) and then submits;
+        otherwise the classic tail-extend path is used.
 
-        Uses the new atomic actions layer (actions.navigation, actions.post_menu,
-        actions.network_monitor) instead of inline CSS selectors.
+        Args (keyword-only, all optional except video_id). Per-key
+        descriptions below are generated from
+        ``grok_web.schema.PARAMS`` (SSOT).
 
-        Args:
-            video_id: The video UUID to extend
-            timeout: Max seconds to wait for generation (default: 300)
+            <SCHEMA_ARGS>
 
         Returns:
-            VideoExtendResult with new video_id and metadata
+            VideoExtendResult with new video_id, source linkage, moderation
+            verdict, and — when ``seed_start`` was passed —
+            ``seed_start_requested`` / ``seed_start_actual`` /
+            ``seed_start_displayed`` so callers can verify where the drag
+            landed.
 
         Raises:
-            GrokAPIError: If video not found, menu item missing, or generation fails
+            GrokAPIError: If the menu item is missing, the seed drag drifts
+                outside ``SEED_DRIFT_TOLERANCE`` (1.0s), or generation fails.
         """
         import asyncio
         import random
 
+        from .actions.extend_seed import (
+            SEED_DRIFT_TOLERANCE,
+            click_generate,
+            drag_seed_handle,
+            enable_focus_emulation,
+            fill_prompt,
+            read_actual_seed_start,
+            select_duration,
+            wait_for_filmstrip,
+        )
         from .actions.navigation import navigate_to_post
         from .actions.network_monitor import CDPMonitor
         from .actions.post_menu import click_menu_item, open_post_menu
 
+        if duration is not None and duration not in {"6s", "10s"}:
+            logger.warning(
+                f"Unknown duration {duration!r} (known: '6s', '10s'); "
+                "passing through — Grok UI may reject."
+            )
+
+        # Compute the filmstrip's total timeline duration from post
+        # metadata. For an extended chain the tail post's timeline is
+        # (videoExtensionStartTime + videoDuration) — that's how many
+        # seconds the filmstrip covers. Grok's <video> element stays at
+        # readyState 0 on the post page (HLS, no autoload), so we can't
+        # rely on v.duration.
+        video_duration_hint: float | None = None
+        if seed_start is not None:
+            try:
+                details = await self.get_post_details(video_id)
+                raw = details.raw_data or {}
+                post = raw.get("post", raw)
+                own = post.get("videoDuration")
+                start = post.get("videoExtensionStartTime") or 0
+                if own is not None:
+                    video_duration_hint = float(start) + float(own)
+                    logger.debug(f"extend_video: chain duration hint = {video_duration_hint:.2f}s")
+            except Exception as e:
+                logger.warning(f"extend_video: failed to fetch duration hint: {e}")
+
         # Navigate to the video post page
         await navigate_to_post(self._tab, video_id, delay=self._ui_delay)
+
+        # When the Chrome window lacks OS focus, CDP silently drops
+        # mousePressed / mouseReleased (only mouseMoved survives), which
+        # makes the filmstrip drag appear to fire with no effect. Force
+        # the page to behave as focused so our drag events register.
+        await enable_focus_emulation(self._tab)
+
+        actual_seed: float | None = None
+        displayed_seed: int | None = None
 
         # Start CDP monitoring before triggering the extend action
         async with CDPMonitor(self._tab, "/app-chat/conversations/new") as monitor:
             await asyncio.sleep(1 + random.uniform(0, 0.5))
 
-            # Open "..." menu and click "Extend video"
+            # 1. Open "..." menu and click 扩展. Grok's current UI (2026-04)
+            # puts the post directly into "extend mode" — filmstrip appears
+            # on top of the video, a +6s/+10s duration picker + prompt
+            # editor appear at the bottom. No separate "从框架扩展" click
+            # is needed anymore (that was the previous-gen flow).
+            # Keep legacy menu names as fallbacks for UI reverts.
             await open_post_menu(self._tab, delay=self._ui_delay)
             await click_menu_item(
                 self._tab,
+                "扩展",
                 "扩展视频",
                 "延长视频",
+                "Extend",
                 "Extend video",
                 "Extend Video",
                 delay=self._ui_delay,
             )
 
-            # Wait for the request to fire
-            if not await monitor.wait_for_request(timeout=10):
-                raise GrokAPIError(
-                    "Extend video did not trigger a generation request. "
-                    "Menu item may have different text — use get_menu_items() to debug."
+            # 2. Wait for the filmstrip to mount (proves extend mode is on)
+            fs = await wait_for_filmstrip(
+                self._tab, timeout=8.0, video_duration_hint=video_duration_hint
+            )
+            video_duration = fs["video_duration"]
+
+            # 3. Pick duration via the +6s/+10s toggle (if requested).
+            #    Do this BEFORE dragging — changing duration resets the
+            #    selection window.
+            if duration is not None:
+                await select_duration(self._tab, duration)
+                # re-read geometry (handle rect shifts with duration)
+                fs = await wait_for_filmstrip(
+                    self._tab, timeout=3.0, video_duration_hint=video_duration_hint
                 )
 
-            # Wait for response body
+            # 4. Drag the handle to the requested seed_start (if given).
+            if seed_start is not None:
+                await drag_seed_handle(
+                    self._tab,
+                    filmstrip_rect=fs["filmstrip_rect"],
+                    handle_rect=fs["handle_rect"],
+                    video_duration=video_duration,
+                    seed_start=seed_start,
+                )
+                readback = await read_actual_seed_start(self._tab, video_duration=video_duration)
+                actual_seed = readback["actual"]
+                displayed_seed = readback["displayed"]
+                if actual_seed is not None and abs(actual_seed - seed_start) > SEED_DRIFT_TOLERANCE:
+                    raise GrokAPIError(
+                        f"Seed drag drifted: requested {seed_start:.2f}s, "
+                        f"landed at {actual_seed:.2f}s (tolerance "
+                        f"{SEED_DRIFT_TOLERANCE}s). Filmstrip DOM may not "
+                        "be stable; retry."
+                    )
+
+            # 5. Fill prompt if caller passed one (else UI keeps pre-filled text)
+            if prompt is not None:
+                await fill_prompt(self._tab, prompt)
+
+            # 6. Click 生成视频 to submit
+            await click_generate(self._tab)
+
+            # 5. Wait for the request to fire
+            if not await monitor.wait_for_request(timeout=10):
+                raise GrokAPIError(
+                    "Extend did not trigger a generation request after "
+                    "clicking 生成视频. The button may still be disabled "
+                    "(missing prompt? seed not selected?) or the UI changed. "
+                    "Use get_menu_items() / screenshots to debug."
+                )
+
+            # 6. Wait for response body
             await monitor.wait_for_body(timeout=timeout)
 
         # Parse response (same NDJSON format as create_video)
@@ -1616,6 +1724,9 @@ class GrokClient(ResponseParser):
             model_name=gen_result.model_name,
             conversation_id=gen_result.conversation_id,
             statsig_id=gen_result.statsig_id,
+            seed_start_requested=seed_start,
+            seed_start_actual=actual_seed,
+            seed_start_displayed=displayed_seed,
         )
 
     async def get_menu_items(self, post_id: str) -> list[str]:
@@ -1773,10 +1884,11 @@ class GrokClient(ResponseParser):
         and captures the API response with generated images.
 
         Args:
-            params: Dict with keys from EDIT_KEYS (see grok_web.schema):
-                post_id (str): Target post UUID.
-                edit_prompt (str): Edit instruction (e.g., 'add sunglasses').
-                timeout (int, default 300): Max seconds to wait.
+            params: Dict with keys from EDIT_KEYS (see grok_web.schema).
+                Per-key descriptions below are generated from
+                ``grok_web.schema.PARAMS`` (SSOT).
+
+                <SCHEMA_ARGS>
 
         Returns:
             ImageEditResult with image URLs and moderation info.
@@ -2024,9 +2136,11 @@ class GrokClient(ResponseParser):
         images themselves passed moderation).
 
         Args:
-            params: Dict with one required key:
+            params: Dict with keys from UPLOAD_KEYS (see grok_web.schema).
+                Per-key descriptions below are generated from
+                ``grok_web.schema.PARAMS`` (SSOT).
 
-                - images (list[str]): Local image file paths to upload.
+                <SCHEMA_ARGS>
 
         Returns:
             List of ``"file:<uuid>"`` strings, one per input path, in order.
@@ -2565,15 +2679,12 @@ class GrokClient(ResponseParser):
         IMPORTANT: Generated images are temporary! The gallery disappears on refresh.
 
         Args:
-            params: Dict with keys from IMAGE_KEYS (see grok_web.schema):
-                images (list[str]): Not used for create_image currently.
-                prompt (str): Text description of the image to generate.
-                aspect_ratio (str, default '2:3'): 'portrait', 'landscape', 'square',
-                    or ratio like '2:3', '1:1', '3:2'.
-                min_success (int, default 1): Minimum non-moderated images needed.
-                max_scroll (int, default 5): Max scroll attempts for more images.
-                timeout (int, default 300): Max seconds to wait.
-                thumbnail_selector (callable): Callback for image selection. Python API only.
+            params: Dict with keys from IMAGE_KEYS (see grok_web.schema).
+                Per-key descriptions below are generated from
+                ``grok_web.schema.PARAMS`` (SSOT).
+
+                <SCHEMA_ARGS>
+
             progress_callback: Internal callback for shared target across workers.
 
         Returns:
@@ -3184,27 +3295,11 @@ class GrokClient(ResponseParser):
         - images with file paths → upload2vid (upload + generate from Imagine homepage)
 
         Args:
-            params: Dict with keys from VIDEO_KEYS (see grok_web.schema):
-                images (list[str]): Source references.
-                    * Local file paths — uploaded, then img2vid.
-                    * ``'post:<uuid>'`` — existing Grok IMAGE post (img2vid).
-                    * ``'video:<uuid>'`` — existing Grok VIDEO post
-                      (video-extend; only the first ref is used).
-                    * ``'file:<uuid>'`` — previously uploaded via
-                      ``upload_images()``; skips re-upload.
-                    Max 5 for image-shaped sources.
-                prompt (str): Text prompt. Use @1, @2... to reference images.
-                    Ignored for ``video:`` refs (UI extend flow is prompt-less).
-                mode (str, default 'video'): 'image' or 'video'.
-                resolution (str, default '720p'): '480p', '720p'.
-                duration (str, default '10s'): '6s', '10s'.
-                aspect_ratio (str, default '2:3'): '2:3', '3:2', '1:1', '9:16', '16:9', etc.
-                preset (str): 'normal', 'fun', 'spicy'.
-                timeout (int, default 300): Max seconds to wait.
-                wait_for_video (bool, default True): Wait for video to load (txt2vid only).
-                verify_final (bool, default False): Double-check post-render
-                    moderation via REST after the immediate response. See
-                    'Moderation' note below.
+            params: Dict with keys from VIDEO_KEYS (see grok_web.schema).
+                The per-key descriptions below are generated from
+                ``grok_web.schema.PARAMS`` (SSOT) — edit there.
+
+                <SCHEMA_ARGS>
 
         Returns:
             VideoGenerationResult with video_id and metadata.
@@ -3348,24 +3443,31 @@ class GrokClient(ResponseParser):
                 )
             elif kind == "video":
                 # video-extend — generate a continuation from an existing
-                # Grok video post. UI flow: navigate to the video page and
-                # click the "Extend video" menu item. Current implementation
-                # does not take a prompt (Grok's menu trigger is
-                # prompt-less); the ``prompt`` arg is accepted for API
-                # symmetry but not forwarded. If more than one video: ref
-                # is given, only the first is used.
+                # Grok video post. UI flow: navigate to the video page,
+                # click 扩展, optionally enter filmstrip mode to select a
+                # seed frame, then click 生成视频.
+                # Only the first 'video:' ref is used (Grok extends one
+                # video at a time).
                 if len(sources) > 1:
                     logger.warning(
                         "create_video({'images': ['video:...', 'video:...']}) "
                         "only extends the first video; additional refs ignored."
                     )
                 src_vid = sources[0][1]
+                # Pass through the original duration string (extend_video
+                # expects '6s'/'10s', not the int we normalized earlier).
+                orig_duration = params.get("duration")
                 extend_res = await self.extend_video(
                     video_id=src_vid,
+                    seed_start=p.get("seed_start"),
+                    duration=orig_duration,
+                    prompt=prompt if prompt else None,
                     timeout=timeout,
                 )
                 # extend_video returns VideoExtendResult; adapt its fields
-                # so callers receive a normal VideoGenerationResult.
+                # so callers receive a normal VideoGenerationResult. Seed
+                # bookkeeping stays on the VideoExtendResult — callers who
+                # need it should call client.extend_video() directly.
                 result = VideoGenerationResult(
                     video_id=extend_res.video_id,
                     parent_post_id=extend_res.parent_post_id,
@@ -3992,3 +4094,40 @@ class GrokClient(ResponseParser):
             result.append(ImageVideoMapping(post_id=source_id, media_url=media_url, videos=videos))
 
         return result
+
+
+# =============================================================================
+# Docstring SSOT splicing — replaces <SCHEMA_ARGS> markers in method
+# docstrings with the Args block generated from schema.PARAMS. Running this
+# at module load means `help(GrokClient.create_video)` and IDE tooltips show
+# the same per-parameter descriptions that live in schema.py.
+#
+# Adding a new param is a one-line edit in schema.PARAMS + the relevant
+# *_KEYS list — the docstring updates automatically.
+# =============================================================================
+
+
+def _splice_all_docstrings() -> None:
+    from .schema import (
+        EDIT_KEYS,
+        EXTEND_KEYS,
+        IMAGE_KEYS,
+        UPLOAD_KEYS,
+        VIDEO_KEYS,
+        splice_schema_into_docstring,
+    )
+
+    for method_name, keys in [
+        ("create_video", VIDEO_KEYS),
+        ("extend_video", EXTEND_KEYS),
+        ("edit_image", EDIT_KEYS),
+        ("create_image", IMAGE_KEYS),
+        ("upload_images", UPLOAD_KEYS),
+    ]:
+        method = getattr(GrokClient, method_name, None)
+        if method is None:
+            continue
+        method.__doc__ = splice_schema_into_docstring(method.__doc__, keys)
+
+
+_splice_all_docstrings()

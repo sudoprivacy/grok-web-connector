@@ -101,6 +101,28 @@ PARAMS: dict[str, dict[str, Any]] = {
         "desc": "Edit instruction (e.g., 'add sunglasses').",
         "type": "str",
     },
+    "video_id": {
+        "desc": "Target video UUID to extend (for extend_video).",
+        "type": "str",
+    },
+    "seed_start": {
+        "desc": (
+            "Seconds from the start of the source video where the extension "
+            "should seed. Video-extend only — requires 'video:<uuid>' ref in "
+            "images (dict API) or use of client.extend_video. Grok anchors a "
+            "fixed-length seed window at this position and generates "
+            "'duration' more seconds after it. If omitted, Grok extends from "
+            "the end (classic behavior). The drag is pixel-based so the "
+            "actual value may drift slightly — see "
+            "VideoExtendResult.seed_start_actual for what landed (UI shows "
+            "integer seconds; internal precision is ~0.01s). Valid range: "
+            "0 to source_video.duration. As of 2026-04 the seed-window "
+            "length is fixed at '6s' or '10s' per the 'duration' field; a "
+            "future Grok revision may extend this set — the library passes "
+            "unknown duration values through with a warning."
+        ),
+        "type": "float",
+    },
 }
 
 # =============================================================================
@@ -115,9 +137,20 @@ VIDEO_KEYS = [
     "duration",
     "aspect_ratio",
     "preset",
+    "seed_start",
     "timeout",
     "wait_for_video",
     "verify_final",
+]
+
+# Keys accepted by extend_video() — keyword args rather than a dict, but
+# the docstring is still generated from this list for SSOT consistency.
+EXTEND_KEYS = [
+    "video_id",
+    "seed_start",
+    "duration",
+    "prompt",
+    "timeout",
 ]
 
 IMAGE_KEYS = [
@@ -197,6 +230,42 @@ def schema_to_help(keys: list[str]) -> str:
         if default is not None:
             desc += f" [default: {default}]"
         lines.append(f"  {key:<20s} {desc}")
+    return "\n".join(lines)
+
+
+def splice_schema_into_docstring(doc: str | None, keys: list[str]) -> str | None:
+    """Replace ``<SCHEMA_ARGS>`` marker in a docstring with generated Args.
+
+    The marker must appear on its own line; the leading whitespace of that
+    line is used as indentation for the expanded block. Returns the modified
+    docstring, or the original if the marker is absent.
+
+    Example input::
+
+        \"\"\"Do a thing.
+
+        Args:
+            params: Dict with keys:
+                <SCHEMA_ARGS>
+
+        Returns:
+            ...
+        \"\"\"
+
+    After splicing with ``keys=VIDEO_KEYS``, the marker is replaced by the
+    output of :func:`schema_to_docstring` at the same indentation.
+    """
+    if not doc or "<SCHEMA_ARGS>" not in doc:
+        return doc
+    lines = doc.split("\n")
+    for i, line in enumerate(lines):
+        idx = line.find("<SCHEMA_ARGS>")
+        if idx == -1:
+            continue
+        indent = line[:idx]
+        block = schema_to_docstring(keys)
+        lines[i] = "\n".join(indent + ln for ln in block.split("\n"))
+        break
     return "\n".join(lines)
 
 
