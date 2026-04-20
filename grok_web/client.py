@@ -3907,6 +3907,53 @@ class GrokClient(ResponseParser):
             await switch_to_image_view(self._tab, delay=self._ui_delay)
             await select_thumbnail(self._tab, thumbnail_index, delay=self._ui_delay)
 
+        # 2026-04 UI: when an image post already has video children,
+        # navigating to /imagine/post/<image_id> silently redirects to
+        # the tail video's view (the URL mutates, 制作视频 button
+        # disappears, <video> element takes over). The left column still
+        # shows a thumbnail of the root image — click it to restore the
+        # image view with 制作视频 overlay button. This is the same
+        # pattern edit_image uses; any image post with descendants
+        # needs this nudge before we can find the generate button.
+        current_url = await self._tab.evaluate("location.href")
+        if parent_post_id not in str(current_url):
+            logger.debug(
+                "[_create_video_via_ui] URL redirected to descendant "
+                "(%s → %s); clicking image thumbnail to restore image view",
+                parent_post_id,
+                current_url,
+            )
+            # Find & click the left-column thumbnail whose src references
+            # the parent_post_id. Dispatch a full pointer-event sequence
+            # (Radix-style click semantics — .click() alone no-ops here).
+            restored = await self._tab.evaluate(
+                r"""
+                (() => {
+                    const want = "__POST_ID__";
+                    const imgs = Array.from(document.querySelectorAll('img'))
+                        .filter(i => (i.currentSrc||i.src||'').includes(want));
+                    if (imgs.length === 0) return 'no-thumb';
+                    let el = imgs[0];
+                    while (el && el.tagName !== 'BUTTON' && el.parentElement) {
+                        el = el.parentElement;
+                    }
+                    if (!el) return 'no-button';
+                    const r = el.getBoundingClientRect();
+                    const x = r.x + r.width/2, y = r.y + r.height/2;
+                    const o = {bubbles:true, cancelable:true, clientX:x, clientY:y,
+                               pointerType:'mouse', button:0, pointerId:1, isPrimary:true};
+                    el.dispatchEvent(new PointerEvent('pointerdown', o));
+                    el.dispatchEvent(new MouseEvent('mousedown', o));
+                    el.dispatchEvent(new PointerEvent('pointerup', o));
+                    el.dispatchEvent(new MouseEvent('mouseup', o));
+                    el.dispatchEvent(new MouseEvent('click', o));
+                    return 'ok';
+                })()
+                """.replace("__POST_ID__", parent_post_id)
+            )
+            if restored == "ok":
+                await asyncio.sleep(1.5)
+
         # --- New UI: Settings gear menu ---
         # The settings gear (button[aria-label="设置"]) opens a Radix dropdown containing:
         #   - Duration: button[aria-label="6s"] / button[aria-label="10s"]
