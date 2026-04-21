@@ -2010,19 +2010,29 @@ class GrokClient(ResponseParser):
 
         await enable_focus_emulation(self._tab)
 
-        # 1. Switch to image view by clicking the root-image thumbnail
-        # in the left column. The post page auto-defaults to the tail
-        # video of the chain; edit is only available when the image
-        # itself is shown as the main subject.
+        # 1. Switch to image view by clicking the thumbnail whose src
+        # references our target post_id. The post page auto-defaults
+        # to the tail video of the chain when the post has descendants
+        # — then the "..." menu shows VIDEO-context items (Spicy /
+        # Normal / 扩展 / 删除视频) with no "Custom" / edit path. Clicking
+        # the matching image thumbnail in the left column restores the
+        # image view and the IMAGE-context menu (Custom / Spicy /
+        # Normal / 删除帖子).
+        #
+        # Match thumbnails by post_id substring — DOM order varies by
+        # chain depth, and the first imagine-public/images thumbnail
+        # is NOT always our target when the chain has video children
+        # whose share-video preview_image also happens to be rendered
+        # in the same column.
         thumb_clicked = await self._tab.evaluate(
             r"""
             (() => {
+                const want = "__POST_ID__";
                 const imgs = Array.from(document.querySelectorAll('img'))
                     .filter(i => {
                         const r = i.getBoundingClientRect();
-                        const src = (i.currentSrc || i.src || '');
-                        return r.width > 30 && r.width < 120
-                               && src.includes('imagine-public/images');
+                        if (r.width < 30 || r.width > 120) return false;
+                        return (i.currentSrc || i.src || '').includes(want);
                     });
                 if (imgs.length === 0) return false;
                 let el = imgs[0];
@@ -2041,10 +2051,17 @@ class GrokClient(ResponseParser):
                 el.dispatchEvent(new MouseEvent('click', o));
                 return true;
             })()
-            """
+            """.replace("__POST_ID__", post_id)
         )
         if thumb_clicked:
             await asyncio.sleep(1.5 * d)
+        else:
+            logger.warning(
+                "[edit_image] Could not find thumbnail matching post_id %s in "
+                "the left column. If the 'Custom' menuitem is missing, the "
+                "post page is stuck on video view.",
+                post_id,
+            )
 
         # 2. Open 更多选项 menu (Radix — pointer dispatch required)
         menu_opened = await self._tab.evaluate(
