@@ -43,7 +43,16 @@ class ChildPost(BaseModel):
     # Metadata
     created_at: datetime | None = Field(None, description="Creation timestamp (UTC)")
     resolution: dict[str, int] | None = Field(None, description="Media resolution {width, height}")
-    duration: int | None = Field(None, description="Duration in ms (videos only)")
+    duration: int | None = Field(
+        None,
+        description=(
+            "Duration in seconds (videos only). Reflects the segment length "
+            "from ``videoDuration`` on the post — for videos produced by "
+            "extend_video this is the newly-added tail segment, not cumulative "
+            "chain length. To get cumulative, use VideoExtendResult."
+            "cumulative_duration_s on the extend result directly."
+        ),
+    )
     model_name: str | None = Field(None, description="Model used (e.g., imagine_h_1)")
     mode: str | None = Field(None, description="Generation mode: 'custom', 'normal', etc.")
 

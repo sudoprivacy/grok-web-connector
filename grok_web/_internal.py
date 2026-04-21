@@ -231,7 +231,12 @@ class ResponseParser:
                 thumbnail_url=entry.get("thumbnailImageUrl"),
                 created_at=self._parse_timestamp(entry.get("createTime")),
                 resolution=entry.get("resolution"),
-                duration=entry.get("duration"),
+                # Video post entries carry segment length as ``videoDuration``
+                # (seconds, integer). The legacy ``duration`` name used by the
+                # image API never appears on videos, so reading it always
+                # returned None. Prefer videoDuration; fall back to legacy
+                # in case Grok rolls back.
+                duration=entry.get("videoDuration") or entry.get("duration"),
                 model_name=entry.get("modelName"),
                 mode=entry.get("mode"),
             )

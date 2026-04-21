@@ -292,8 +292,7 @@ async def drag_seed_handle(
         return
     if not (0 <= seed_start <= video_duration):
         raise GrokAPIError(
-            f"seed_start {seed_start:.2f}s is out of range "
-            f"(source video is {video_duration:.2f}s)"
+            f"seed_start {seed_start:.2f}s is out of range (source video is {video_duration:.2f}s)"
         )
     fx, _fy, fw, _fh = filmstrip_rect
     target_x = int(fx + (seed_start / video_duration) * fw)

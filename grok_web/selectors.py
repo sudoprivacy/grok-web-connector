@@ -215,9 +215,7 @@ def auto_favorite_first_n(
                 persisted += 1
                 _log.info(f"auto_favorite_first_n: persisted {persisted}/{n}")
             else:
-                _log.warning(
-                    f"auto_favorite_first_n: item {seen - 1} unresponsive; " f"trying next"
-                )
+                _log.warning(f"auto_favorite_first_n: item {seen - 1} unresponsive; trying next")
 
         return await scan_favorites()
 

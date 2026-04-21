@@ -411,6 +411,34 @@ class GrokClient(ResponseParser):
             )
         return result
 
+    async def _wait_for_selector(
+        self,
+        selector: str,
+        timeout: float = 30.0,
+        interval: float = 0.25,
+    ) -> bool:
+        """Poll for a CSS selector to match a DOM element.
+
+        Grok's Imagine panel hydrates on a lazy path — a fixed
+        ``sleep(N)`` after navigation races the mount and intermittently
+        returns null from ``querySelector``. Poll until the element
+        appears or the timeout elapses. Returns ``True`` if found.
+        """
+        import asyncio
+
+        escaped = selector.replace("\\", "\\\\").replace("'", "\\'")
+        js = f"!!document.querySelector('{escaped}')"
+        deadline = asyncio.get_event_loop().time() + timeout
+        while asyncio.get_event_loop().time() < deadline:
+            try:
+                found = await self._tab.evaluate(js)
+            except Exception:
+                found = False
+            if found:
+                return True
+            await asyncio.sleep(interval)
+        return False
+
     async def _api_request(
         self,
         method: str,
@@ -3169,7 +3197,15 @@ class GrokClient(ResponseParser):
             await self._tab.page_reload()
             await asyncio.sleep(2 * d)
         await self._tab.get(f"{self.BASE_URL}/imagine")
-        await asyncio.sleep(3 * d)
+        # Grok's Imagine panel lazy-hydrates the ProseMirror editor; a
+        # fixed sleep races the mount on slower/churning builds. Poll up
+        # to 30s for the editor to appear so we don't hit Bug #1 flake.
+        if not await self._wait_for_selector(".tiptap.ProseMirror", timeout=30):
+            raise GrokAPIError(
+                "Prompt editor (ProseMirror) did not mount within 30s. "
+                "Grok's /imagine hydration may be abnormally slow or the "
+                "page structure changed."
+            )
 
         # Set up WebSocket monitoring (imagine page uses wss://grok.com/ws/imagine/listen)
         await self._tab.send(cdp.network.enable())
@@ -3367,7 +3403,11 @@ class GrokClient(ResponseParser):
 
         # Step 3: Fill the prompt into the tiptap editor. execCommand is
         # the tiptap-safe path — direct innerHTML/value writes bypass
-        # ProseMirror's schema and get stripped.
+        # ProseMirror's schema and get stripped. Re-check the editor is
+        # still mounted: the aspect-ratio menuitem click above can
+        # remount the panel on some builds, racing the editor out.
+        if not await self._wait_for_selector(".tiptap.ProseMirror", timeout=10):
+            raise GrokAPIError("Prompt editor (ProseMirror) disappeared after aspect selection")
         escaped_prompt = prompt.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
         fill_result = await self._tab.evaluate(
             f"""
@@ -3521,25 +3561,73 @@ class GrokClient(ResponseParser):
                 logger.info(f"[scroll] rate-limited, waiting {backoff_wait}s before next scroll")
                 await asyncio.sleep(backoff_wait)
 
-            # Scroll down to trigger more generation
-            # The imagine page uses a specific scrollable container, not window
-            scroll_result = await self._tab.evaluate("""
-                (function() {
-                    // Find the scrollable container (has overflow-scroll class)
-                    const container = document.querySelector('.overflow-scroll') ||
-                                     document.querySelector('[class*="overflow-scroll"]') ||
-                                     document.querySelector('main');
-                    if (container) {
-                        const beforeScroll = container.scrollTop;
-                        container.scrollTop = container.scrollHeight;
-                        return 'scrolled container from ' + beforeScroll + ' to ' + container.scrollTop + ' (max: ' + container.scrollHeight + ')';
-                    }
-                    // Fallback to window scroll
-                    window.scrollTo(0, document.body.scrollHeight);
-                    return 'scrolled window (fallback)';
-                })()
-            """)
-            logger.debug(f"[scroll {scroll_count}] {scroll_result}")
+            # Scroll down to trigger more generation.
+            #
+            # Grok's infinite-scroll loader listens for TRUSTED wheel
+            # events on the gallery container. ``container.scrollTop =
+            # scrollHeight`` from JS moves the scrollbar but does not
+            # fire a wheel event, so the sentinel/IntersectionObserver
+            # that mounts more jobs never triggers — the loader stays
+            # silent and new gens never start. Use CDP
+            # Input.dispatchMouseEvent with type=mouseWheel for
+            # isTrusted=true events.
+            scroll_anchor_raw = await self._tab.evaluate(
+                r"""
+                JSON.stringify((() => {
+                    const c = document.querySelector('.overflow-scroll') ||
+                              document.querySelector('[class*="overflow-scroll"]') ||
+                              document.querySelector('main');
+                    if (!c) return null;
+                    const r = c.getBoundingClientRect();
+                    const vx = Math.max(0, r.x);
+                    const vy = Math.max(0, r.y);
+                    const vw = Math.min(window.innerWidth, r.x + r.width) - vx;
+                    const vh = Math.min(window.innerHeight, r.y + r.height) - vy;
+                    if (vw <= 0 || vh <= 0) return null;
+                    return {
+                        x: Math.round(vx + vw / 2),
+                        y: Math.round(vy + vh / 2),
+                    };
+                })())
+                """
+            )
+            import json as _json_scroll
+
+            anchor = (
+                _json_scroll.loads(scroll_anchor_raw)
+                if isinstance(scroll_anchor_raw, str)
+                else scroll_anchor_raw
+            )
+            if not anchor:
+                # Fallback: viewport centre.
+                anchor = {"x": 640, "y": 400}
+            # Fire wheel events until we reach the bottom (or give up
+            # after N). Each wheel ~800px; modern galleries need several.
+            for _ in range(12):
+                await self._tab.send(
+                    cdp.input_.dispatch_mouse_event(
+                        type_="mouseWheel",
+                        x=float(anchor["x"]),
+                        y=float(anchor["y"]),
+                        delta_x=0.0,
+                        delta_y=800.0,
+                        pointer_type="mouse",
+                    )
+                )
+                await asyncio.sleep(0.15)
+                at_bottom = await self._tab.evaluate(
+                    r"""
+                    (() => {
+                        const c = document.querySelector('.overflow-scroll') ||
+                                  document.querySelector('[class*="overflow-scroll"]') ||
+                                  document.querySelector('main');
+                        if (!c) return true;
+                        return (c.scrollTop + c.clientHeight) >= (c.scrollHeight - 150);
+                    })()
+                    """
+                )
+                if at_bottom:
+                    break
             await asyncio.sleep(3 * d)  # Brief wait for scroll to trigger new jobs
             scroll_count += 1
 
