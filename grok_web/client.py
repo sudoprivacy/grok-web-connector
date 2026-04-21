@@ -491,17 +491,54 @@ class GrokClient(ResponseParser):
         except ValueError:
             return {}
 
+    async def _fetch_video_duration(self, video_id: str) -> tuple[int | None, float | None]:
+        """Look up (duration_s, cumulative_duration_s) from Grok REST.
+
+        Runs after create_video / extend_video returns so callers see
+        authoritative length fields on the result objects without doing
+        an extra GET themselves. Non-fatal on any lookup error —
+        returns (None, None), caller treats that as "unknown".
+
+        Cumulative = ``videoExtensionStartTime + videoDuration`` on the
+        new video's post metadata. For a fresh create_video (no parent
+        chain), videoExtensionStartTime is null and cumulative == duration.
+        """
+        try:
+            d = await self.get_post_details(video_id)
+        except Exception:
+            return None, None
+        rd = (d.raw_data or {}).get("post", d.raw_data or {})
+        dur = rd.get("videoDuration")
+        if dur is None:
+            return None, None
+        try:
+            dur_int = int(dur)
+        except (TypeError, ValueError):
+            return None, None
+        start = rd.get("videoExtensionStartTime")
+        cumulative: float = float(start) + dur_int if start is not None else float(dur_int)
+        return dur_int, cumulative
+
     async def _asset_request_head(self, asset_url: str) -> int:
         """Return Content-Length for an asset URL via a page-initiated
         HEAD request.
 
         Implementation: ``tab.evaluate("fetch(url, {method: 'HEAD'})")``
-        inside the active grok.com tab. Although the asset lives on
-        ``imagine-public.x.ai`` / ``assets.grok.com`` (different
-        origin from the grok.com tab), those CDNs return
-        ``Access-Control-Allow-Origin: *`` so a HEAD fetch from the
-        grok.com context reads headers without issue. Empirically
-        verified 2026-04-21 — this was a fear that didn't pan out.
+        inside the active grok.com tab. Grok serves video assets from
+        two different hosts with different auth policies:
+
+        * ``imagine-public.x.ai/imagine-public/share-videos/...`` —
+          public CDN, returns ``Access-Control-Allow-Origin: *``,
+          works with any credential mode.
+        * ``assets.grok.com/users/<uid>/generated/...`` — authenticated
+          signed URL, returns 403 unless the request includes the
+          grok.com session cookie. Since it's a cross-origin fetch
+          from the grok.com tab, the browser needs an explicit
+          ``credentials: 'include'`` to attach cookies.
+
+        We try the public-friendly mode first (cheap), fall back to
+        ``include`` for signed URLs. Matches the same-pattern retry
+        already used by ``_download_video_by_url`` in v0.13.7.
 
         Why this matters vs. the old CDP ``Network.loadNetworkResource``
         implementation:
@@ -535,17 +572,18 @@ class GrokClient(ResponseParser):
 
         PER_CALL_TIMEOUT_MS = 15000  # 15s per call; fetch aborts cleanly
 
-        t0 = asyncio.get_event_loop().time()
-        try:
-            # Page-context fetch. Use AbortSignal.timeout so if the CDN
-            # hangs we get a DOMException AbortError rather than a
-            # tab.evaluate timeout that would leave the fetch running.
-            raw = await self._tab.evaluate(
-                r"""
+        async def _try_head(credentials: str) -> dict:
+            """Run one HEAD with the given credentials mode. Returns
+            ``{ok, status, length, type}`` on a network-level success
+            (including 4xx/5xx) or ``{ok: False, error}`` on fetch
+            abort / DOMException.
+            """
+            js = r"""
                 (async () => {
                     try {
                         const r = await fetch(__URL__, {
                             method: 'HEAD',
+                            credentials: __CREDS__,
                             signal: AbortSignal.timeout(__TIMEOUT__),
                         });
                         return JSON.stringify({
@@ -561,12 +599,34 @@ class GrokClient(ResponseParser):
                         });
                     }
                 })()
-                """.replace("__URL__", _json.dumps(asset_url)).replace(
-                    "__TIMEOUT__", str(PER_CALL_TIMEOUT_MS)
-                ),
-                await_promise=True,
+            """
+            js = (
+                js.replace("__URL__", _json.dumps(asset_url))
+                .replace("__CREDS__", _json.dumps(credentials))
+                .replace("__TIMEOUT__", str(PER_CALL_TIMEOUT_MS))
             )
-            data = _json.loads(raw) if isinstance(raw, str) else raw
+            raw = await self._tab.evaluate(js, await_promise=True)
+            return _json.loads(raw) if isinstance(raw, str) else (raw or {})
+
+        t0 = asyncio.get_event_loop().time()
+        try:
+            # Strategy 1: default-ish credentials (omit). Fast path for
+            # imagine-public.x.ai which returns ACAO:* and doesn't
+            # care about cookies.
+            data = await _try_head("omit")
+
+            # Strategy 2: if the CDN said 403/401, retry with
+            # credentials:'include' so cookies flow cross-origin. This
+            # is the path assets.grok.com's signed URLs need.
+            if isinstance(data, dict) and data.get("ok") and data.get("status") in (401, 403):
+                logger.debug(
+                    "[asset_head] %s returned %s under omit; retrying with " "credentials=include",
+                    asset_url[:80],
+                    data.get("status"),
+                )
+                data2 = await _try_head("include")
+                if isinstance(data2, dict) and data2.get("ok"):
+                    data = data2
 
             if not data or not data.get("ok"):
                 err = (data or {}).get("error", "unknown") if isinstance(data, dict) else "unknown"
@@ -578,7 +638,13 @@ class GrokClient(ResponseParser):
 
             status = data.get("status")
             if status == 403:
-                raise GrokAuthError("Asset access denied (403)")
+                raise GrokAuthError(
+                    f"Asset access denied (403) after trying both omit + "
+                    f"include credential modes. URL: {asset_url}. If this "
+                    f"just started happening, your grok.com session cookies "
+                    f"may have expired — sign out and back in on the web UI, "
+                    f"then retry."
+                )
             if status and status >= 400:
                 raise GrokAPIError(f"Asset request failed: HTTP {status}")
 
@@ -1738,6 +1804,15 @@ class GrokClient(ResponseParser):
             monitor.body, video_id, statsig_id=monitor.statsig_id
         )
 
+        # Enrich with authoritative duration from Grok's post metadata.
+        # Skip when the result was moderated — no durable post to look up.
+        duration_s: int | None = None
+        cumulative_duration_s: float | None = None
+        if not gen_result.moderated and gen_result.video_id:
+            duration_s, cumulative_duration_s = await self._fetch_video_duration(
+                gen_result.video_id
+            )
+
         return VideoExtendResult(
             video_id=gen_result.video_id,
             source_video_id=video_id,
@@ -1751,6 +1826,8 @@ class GrokClient(ResponseParser):
             seed_start_requested=seed_start,
             seed_start_actual=actual_seed,
             seed_start_displayed=displayed_seed,
+            duration_s=duration_s,
+            cumulative_duration_s=cumulative_duration_s,
         )
 
     async def get_menu_items(self, post_id: str) -> list[str]:
@@ -2004,9 +2081,15 @@ class GrokClient(ResponseParser):
                                 img_resp = response["streamingImageGenerationResponse"]
                                 image_id = img_resp.get("imageId")
                                 if image_id:
-                                    # Update image data (later responses have final status)
+                                    # Update image data (later responses have final status).
+                                    # `post_id` is an alias for image_id — each edit output
+                                    # IS a Grok post and the UUID is the same. Exposed as
+                                    # a distinct key so callers feeding results into
+                                    # create_video({"images": ["post:<id>"]}) don't have
+                                    # to remember that image_id == post_id.
                                     captured_data["images"][image_id] = {
                                         "image_id": image_id,
+                                        "post_id": image_id,
                                         "image_url": img_resp.get("imageUrl", ""),
                                         "moderated": img_resp.get("moderated", False),
                                         "progress": img_resp.get("progress", 0),
@@ -3845,6 +3928,16 @@ class GrokClient(ResponseParser):
                 logger.warning(
                     f"verify_final check failed ({e}); leaving result.moderated unchanged"
                 )
+
+        # Enrich result with authoritative output duration from Grok's
+        # post metadata. Skip when moderated — no durable post exists
+        # to look up — or when the underlying path already populated
+        # (txt2vid pre-wait can return before the post is indexed, in
+        # which case fetch will yield None and we leave it unset).
+        if not result.moderated and result.video_id and result.duration_s is None:
+            dur_s, _ = await self._fetch_video_duration(result.video_id)
+            if dur_s is not None:
+                result.duration_s = dur_s
 
         return result
 

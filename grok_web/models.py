@@ -547,6 +547,18 @@ class VideoGenerationResult(BaseModel):
             "Format: 94-char Base64 encoding 70 random bytes."
         ),
     )
+    duration_s: int | None = Field(
+        None,
+        description=(
+            "Actual output video length in seconds, as reported by Grok's "
+            "post metadata after render. This is the authoritative value — "
+            "don't rely on the `duration` parameter you passed in, since "
+            "Grok occasionally re-segments (e.g. a 6s request can come back "
+            "as 8s). None if the post metadata wasn't available at return "
+            "time (race condition on the txt2vid pre-wait path) or if the "
+            "request was moderated."
+        ),
+    )
 
     @computed_field
     @property
@@ -619,6 +631,28 @@ class VideoExtendResult(BaseModel):
             "seed_start_actual is preferred for precision."
         ),
     )
+    duration_s: int | None = Field(
+        None,
+        description=(
+            "Actual length (seconds) of THIS extension, as reported by "
+            "Grok's post metadata after render. Grok occasionally "
+            "re-segments, so this may differ from the `duration` "
+            "parameter you passed in. None if the post metadata wasn't "
+            "ready at return time, or if the request was moderated."
+        ),
+    )
+    cumulative_duration_s: float | None = Field(
+        None,
+        description=(
+            "Total chain length from root (seconds) — equals "
+            "videoExtensionStartTime + videoDuration on the new video's "
+            "post metadata. Use this to implement chain-length checks "
+            "(e.g. Grok's ~30s cap): "
+            "``can_extend_more = result.cumulative_duration_s < 30``. "
+            "For the first extension of a chain, this equals duration_s "
+            "itself. None if post metadata wasn't ready or moderated."
+        ),
+    )
 
     @computed_field
     @property
@@ -642,7 +676,14 @@ class ImageEditResult(BaseModel):
     # Generated images (each with id, url, moderated status)
     images: list[dict[str, Any]] = Field(
         default_factory=list,
-        description="List of generated images with keys: image_id, image_url, moderated, r_rated",
+        description=(
+            "List of generated images. Each dict carries: image_id, "
+            "post_id (alias for image_id — the edit output IS a Grok "
+            "post, both UUIDs are equal), image_url, moderated, "
+            "progress. Feed post_id into "
+            "``create_video({'images': ['post:<uuid>'], ...})`` to "
+            "chain into img2vid."
+        ),
     )
 
     # Conversation info (for debugging)
