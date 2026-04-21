@@ -1834,7 +1834,23 @@ class GrokClient(ResponseParser):
         return await select_thumbnail(self._tab, index, delay=self._ui_delay)
 
     async def _download_video_by_url(self, video_url: str, output_path: Path) -> Path:
-        """Download a video file by URL using the browser's fetch API."""
+        """Download a video file by URL using the browser's fetch API.
+
+        Grok's video CDN has two slightly different auth modes depending
+        on which storage tier the asset lives in:
+
+        1. ``imagine-public.x.ai/.../share-videos/...`` — accepts
+           ``?dl=1`` + ``credentials: 'omit'``. This is the path used
+           by most create_video / extend_video outputs.
+        2. ``assets.grok.com/...`` (signed URL) — rejects
+           ``?dl=1`` with HTTP 403; needs ``credentials: 'include'``.
+           Happens when Grok routes certain extend outputs through
+           authenticated storage.
+
+        Try (1) first (common case, fastest), fall back to (2) on
+        4xx/5xx. Each attempt is a page-context fetch that returns
+        headers + body or an error code.
+        """
         import asyncio
         import base64
         import json as json_module
@@ -1845,61 +1861,70 @@ class GrokClient(ResponseParser):
             await self._tab.get(f"{self.BASE_URL}/imagine")
             await asyncio.sleep(3)
 
-        # Add dl=1 parameter if not present
-        if "?" in video_url:
-            download_url = f"{video_url}&dl=1"
-        else:
-            download_url = f"{video_url}?dl=1"
-
-        # Use browser fetch to download
-        # CDN doesn't need credentials, use 'omit' to avoid CORS issues
-        js_code = f"""
-        (async () => {{
-            try {{
-                const response = await fetch("{download_url}", {{
-                    credentials: 'omit',
-                    mode: 'cors'
-                }});
-                if (!response.ok) {{
-                    return JSON.stringify({{
-                        "status": response.status,
-                        "error": "HTTP " + response.status + " " + response.statusText
+        async def _fetch(fetch_url: str, credentials: str) -> dict:
+            js_code = f"""
+            (async () => {{
+                try {{
+                    const response = await fetch({json_module.dumps(fetch_url)}, {{
+                        credentials: '{credentials}',
+                        mode: 'cors'
                     }});
+                    if (!response.ok) {{
+                        return JSON.stringify({{
+                            "status": response.status,
+                            "error": "HTTP " + response.status + " " + response.statusText
+                        }});
+                    }}
+                    const buffer = await response.arrayBuffer();
+                    const bytes = new Uint8Array(buffer);
+                    let binary = '';
+                    const chunkSize = 8192;
+                    for (let i = 0; i < bytes.length; i += chunkSize) {{
+                        const chunk = bytes.slice(i, i + chunkSize);
+                        binary += String.fromCharCode.apply(null, chunk);
+                    }}
+                    const base64 = btoa(binary);
+                    return JSON.stringify({{"status": 200, "data": base64}});
+                }} catch (e) {{
+                    return JSON.stringify({{"status": 0, "error": e.message}});
                 }}
-                const buffer = await response.arrayBuffer();
-                const bytes = new Uint8Array(buffer);
-                let binary = '';
-                const chunkSize = 8192;
-                for (let i = 0; i < bytes.length; i += chunkSize) {{
-                    const chunk = bytes.slice(i, i + chunkSize);
-                    binary += String.fromCharCode.apply(null, chunk);
-                }}
-                const base64 = btoa(binary);
-                return JSON.stringify({{
-                    "status": 200,
-                    "data": base64
-                }});
-            }} catch (e) {{
-                return JSON.stringify({{
-                    "status": 0,
-                    "error": e.message
-                }});
-            }}
-        }})()
-        """
+            }})()
+            """
+            raw = await self._tab.evaluate(js_code, await_promise=True, return_by_value=True)
+            return json_module.loads(raw)
 
-        result_str = await self._tab.evaluate(js_code, await_promise=True, return_by_value=True)
-        result = json_module.loads(result_str)
+        # Build attempt list: (url_to_fetch, credentials_mode, description)
+        sep = "&" if "?" in video_url else "?"
+        attempts = [
+            (f"{video_url}{sep}dl=1", "omit", "dl=1 + omit (standard)"),
+            (video_url, "include", "no-dl + include-creds (signed URLs)"),
+            (video_url, "omit", "no-dl + omit (permissive CDN)"),
+        ]
 
-        if result["status"] != 200:
-            raise GrokAPIError(f"Download failed: {result.get('error', 'Unknown error')}")
+        last_error = None
+        for fetch_url, creds, desc in attempts:
+            result = await _fetch(fetch_url, creds)
+            if result.get("status") == 200:
+                video_data = base64.b64decode(result["data"])
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_bytes(video_data)
+                logger.debug(
+                    "[download_video] success via %s for %s",
+                    desc,
+                    video_url[:80],
+                )
+                return output_path
+            last_error = result.get("error", "Unknown error")
+            logger.debug(
+                "[download_video] %s failed: %s — trying next strategy",
+                desc,
+                last_error,
+            )
 
-        # Decode base64 and write to file
-        video_data = base64.b64decode(result["data"])
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_bytes(video_data)
-
-        return output_path
+        raise GrokAPIError(
+            f"Download failed after all fallback strategies. "
+            f"URL: {video_url[:100]}, Last error: {last_error}"
+        )
 
     async def edit_image(self, params: dict) -> ImageEditResult:
         """Edit an image to generate new variations.
@@ -4049,8 +4074,59 @@ class GrokClient(ResponseParser):
         # - Settings dropdown gains presets (Spicy/Fun/Normal) + "重做" in video mode
         # - "输入你的想象" input appears in video mode for adjustment prompts
 
+        async def _restore_image_view() -> bool:
+            """Click the sidebar thumbnail matching parent_post_id so the
+            page renders the image view (not a descendant video).
+
+            Grok's post page silently redirects to the tail descendant
+            when one exists; a post that was a brand-new edit_image
+            output can also land on the wrong sibling candidate
+            depending on Grok's default selection. Calling this before
+            and between 制作视频 retries makes the lookup resilient to
+            both.
+
+            Returns True if a matching thumbnail was clicked.
+            """
+            return bool(
+                await self._tab.evaluate(
+                    r"""
+                    (() => {
+                        const want = "__POST_ID__";
+                        const imgs = Array.from(document.querySelectorAll('img'))
+                            .filter(i => {
+                                const r = i.getBoundingClientRect();
+                                if (r.width < 20 || r.width > 150) return false;
+                                return (i.currentSrc || i.src || '').includes(want);
+                            });
+                        if (imgs.length === 0) return false;
+                        let el = imgs[0];
+                        while (el && el.tagName !== 'BUTTON' && el.parentElement) {
+                            el = el.parentElement;
+                        }
+                        if (!el) return false;
+                        const r = el.getBoundingClientRect();
+                        const x = r.x + r.width/2, y = r.y + r.height/2;
+                        const o = {bubbles: true, cancelable: true, clientX: x, clientY: y,
+                                   pointerType: 'mouse', button: 0, pointerId: 1, isPrimary: true};
+                        el.dispatchEvent(new PointerEvent('pointerdown', o));
+                        el.dispatchEvent(new MouseEvent('mousedown', o));
+                        el.dispatchEvent(new PointerEvent('pointerup', o));
+                        el.dispatchEvent(new MouseEvent('mouseup', o));
+                        el.dispatchEvent(new MouseEvent('click', o));
+                        return true;
+                    })()
+                    """.replace("__POST_ID__", parent_post_id)
+                )
+            )
+
         async def _click_make_video_button() -> bool:
-            """Click the '制作视频' or '生成视频' button to trigger generation."""
+            """Click the '制作视频' or '生成视频' button to trigger generation.
+
+            If the expected button isn't present, try restoring image
+            view once before giving up — the post page may have drifted
+            off the image (Grok can default to a sibling edit candidate
+            or a descendant video depending on state).
+            """
             # Try "制作视频" first (initial image post state)
             btn = await self._tab.query_selector('button[aria-label="制作视频"]')
             if not btn:
@@ -4060,6 +4136,18 @@ class GrokClient(ResponseParser):
                 btn = await self._tab.query_selector('button[aria-label="生成视频"]')
             if not btn:
                 btn = await self._tab.query_selector('button[aria-label="Generate video"]')
+            # Defensive: we may have landed on a sibling or descendant
+            # view where the button doesn't exist. Restore image view
+            # explicitly and try once more.
+            if not btn and await _restore_image_view():
+                await asyncio.sleep(1.5)
+                btn = await self._tab.query_selector('button[aria-label="制作视频"]')
+                if not btn:
+                    btn = await self._tab.query_selector('button[aria-label="Make video"]')
+                if not btn:
+                    btn = await self._tab.query_selector('button[aria-label="生成视频"]')
+                if not btn:
+                    btn = await self._tab.query_selector('button[aria-label="Generate video"]')
             if btn:
                 await btn.click()
                 return True
@@ -4268,38 +4356,86 @@ class GrokClient(ResponseParser):
         Args:
             video_id: The child video UUID to download
             output_path: Destination file path (will be created/overwritten)
-            prefer_hd: If True (default), download HD version if available
-            parent_post_id: Parent post ID (optional, for faster lookup).
-                If provided, skips searching through favorites.
+            prefer_hd: If True (default), use hdMediaUrl when available,
+                fall back to mediaUrl otherwise.
+            parent_post_id: Optional — legacy fast-path for callers that
+                know the parent. Modern code can usually leave this
+                ``None`` since the primary lookup now hits the video
+                post directly.
 
-        Returns:
-            Path to the downloaded file
+        Lookup strategy (tried in order, each stops on success):
+
+        1. Fetch the video post directly via
+           ``get_post_details(video_id)`` — returns that video's own
+           ``mediaUrl`` / ``hdMediaUrl``. This works even when the
+           video isn't listed under ``parent_post_id.children``,
+           which happens when Grok's chain parent differs from the
+           caller's expectation (e.g. videos generated from an
+           edit_image output are rooted under the edit's original
+           source image, not the edited image itself).
+        2. (Legacy) Walk ``parent_post_id.children`` if provided.
+        3. (Legacy slow path) Scan the user's favorites for a post
+           whose children include the target video.
 
         Raises:
-            GrokNotFoundError: If video not found
-            GrokAPIError: If download fails
+            GrokNotFoundError: If video not found in any path.
+            GrokAPIError: If all fetch strategies in
+                ``_download_video_by_url`` fail (e.g. 403 signed URL).
         """
         output_path = Path(output_path)
 
-        # Find the video URL
-        video_url = None
+        video_url: str | None = None
 
-        if parent_post_id:
-            # Fast path: we know the parent
-            details = await self.get_post_details(parent_post_id)
-            for child in details.children:
-                if child.id == video_id:
-                    video_url = (child.hd_media_url if prefer_hd else None) or child.media_url
-                    break
-        else:
-            # Slow path: search through favorites
-            posts = await self.list_posts(limit=100, source="favorites")
-            for post in posts:
-                details = await self.get_post_details(post.id)
+        # Strategy 1: fetch the video post directly. This is the most
+        # reliable path — get_post_details(video_id) always returns that
+        # post's own mediaUrl / hdMediaUrl when the video exists,
+        # regardless of how Grok linked it in the chain.
+        try:
+            details = await self.get_post_details(video_id)
+            candidate = None
+            if prefer_hd:
+                candidate = details.hd_media_url
+            if not candidate:
+                candidate = details.media_url
+            if candidate:
+                video_url = candidate
+                logger.debug(
+                    "[download_video] direct lookup found URL for %s via " "get_post_details",
+                    video_id,
+                )
+        except GrokNotFoundError:
+            pass
+
+        # Strategy 2: parent_post_id.children lookup (legacy fast path).
+        # Still useful when caller wants HD URL that only the parent's
+        # child listing carries, or when the video-post direct lookup
+        # is rate-limited.
+        if not video_url and parent_post_id:
+            try:
+                details = await self.get_post_details(parent_post_id)
                 for child in details.children:
                     if child.id == video_id:
-                        video_url = (child.hd_media_url if prefer_hd else None) or child.media_url
-                        break
+                        candidate = (child.hd_media_url if prefer_hd else None) or child.media_url
+                        if candidate:
+                            video_url = candidate
+                            break
+            except GrokNotFoundError:
+                pass
+
+        # Strategy 3: favorites scan (legacy slow path).
+        if not video_url and not parent_post_id:
+            posts = await self.list_posts(limit=100, source="favorites")
+            for post in posts:
+                try:
+                    details = await self.get_post_details(post.id)
+                except GrokNotFoundError:
+                    continue
+                for child in details.children:
+                    if child.id == video_id:
+                        candidate = (child.hd_media_url if prefer_hd else None) or child.media_url
+                        if candidate:
+                            video_url = candidate
+                            break
                 if video_url:
                     break
 
