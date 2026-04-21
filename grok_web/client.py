@@ -620,7 +620,7 @@ class GrokClient(ResponseParser):
             # is the path assets.grok.com's signed URLs need.
             if isinstance(data, dict) and data.get("ok") and data.get("status") in (401, 403):
                 logger.debug(
-                    "[asset_head] %s returned %s under omit; retrying with " "credentials=include",
+                    "[asset_head] %s returned %s under omit; retrying with credentials=include",
                     asset_url[:80],
                     data.get("status"),
                 )
@@ -632,8 +632,7 @@ class GrokClient(ResponseParser):
                 err = (data or {}).get("error", "unknown") if isinstance(data, dict) else "unknown"
                 elapsed = asyncio.get_event_loop().time() - t0
                 raise GrokAPIError(
-                    f"Page-context HEAD failed after {elapsed:.1f}s. "
-                    f"URL: {asset_url}, Error: {err}"
+                    f"Page-context HEAD failed after {elapsed:.1f}s. URL: {asset_url}, Error: {err}"
                 )
 
             status = data.get("status")
@@ -660,7 +659,7 @@ class GrokClient(ResponseParser):
         except Exception as e:  # noqa: BLE001
             elapsed = asyncio.get_event_loop().time() - t0
             raise GrokAPIError(
-                f"Page-context HEAD failed after {elapsed:.1f}s. " f"URL: {asset_url}, Error: {e}"
+                f"Page-context HEAD failed after {elapsed:.1f}s. URL: {asset_url}, Error: {e}"
             ) from e
 
     # =========================================================================
@@ -952,9 +951,7 @@ class GrokClient(ResponseParser):
                 continue
 
         raise GrokAPIError(
-            f"Video not found in all favorites.\n"
-            f"Video ID: {video_id}\n"
-            f"Local file: {filename}\n"
+            f"Video not found in all favorites.\nVideo ID: {video_id}\nLocal file: {filename}\n"
         )
 
     async def _match_by_file_size_via_favorites(
@@ -2039,8 +2036,44 @@ class GrokClient(ResponseParser):
 
         d = self._ui_delay
 
-        # Navigate to the post
-        await self._navigate_to_post(post_id)
+        # 2026-04 edit_image dispatch:
+        #
+        # Grok's post pages redirect /imagine/post/<image_id> to the
+        # tail video when the image has video descendants, which
+        # collapses the UI driving path on any non-trivial chain — the
+        # sidebar no longer shows the root image thumbnail, and the "…"
+        # menu's image-context items (Custom / Spicy / Normal / 删除帖子)
+        # are replaced by video-context items (扩展 / 删除视频).
+        #
+        # Primary path: POST /rest/app-chat/conversations/new directly
+        # via page-context fetch, using the payload shape Grok's own UI
+        # sends. Works on any chain depth since it doesn't touch UI
+        # state. Requires a cached x-statsig-id — populated by the
+        # snitch whenever the session has previously fired
+        # /rest/app-chat/conversations/new (any create_video /
+        # extend_video / edit_image call).
+        #
+        # Fallback path: UI driving (kept for sessions where the sid
+        # cache is cold — e.g. edit_image is the very first generation
+        # call of the session). Works for shallow chains; raises a
+        # clear error on deep chains telling the caller to run any
+        # other generation call first to warm the sid cache.
+
+        statsig_id: str | None = None
+        if self._statsig_snitch is not None:
+            statsig_id = await self._statsig_snitch.get(
+                "/rest/app-chat/conversations/new", timeout=0.1
+            )
+
+        if not statsig_id:
+            # No sid yet — fall back to UI path.
+            return await self._edit_image_via_ui(post_id, edit_prompt, timeout)
+
+        # Ensure we're on grok.com (for cookie context on the fetch).
+        current_url_raw = await self._tab.evaluate("window.location.href", await_promise=False)
+        if not current_url_raw or "grok.com" not in str(current_url_raw):
+            await self._tab.get(f"{self.BASE_URL}/imagine")
+            await asyncio.sleep(3 * d)
 
         # Set up network monitoring
         await self._tab.send(cdp.network.enable())
@@ -2105,33 +2138,206 @@ class GrokClient(ResponseParser):
         # Wait for page to load
         await asyncio.sleep(3 * d)
 
-        # Grok 2026-04 UI: image-edit trigger moved. Old path was
-        # "图片 → 设置 → 编辑图像"; that menu is gone. New path is
-        # "click image thumbnail → 更多选项 → Custom → 图片 mode →
-        # type prompt → click 编辑 submit". Side effects:
-        #   - we need focus emulation so CDP press/release fire properly
-        #     on a possibly-backgrounded Chrome (same fix used by
-        #     extend_video)
-        #   - Radix triggers (menu button + menuitems) need JS pointer-
-        #     event dispatch; plain click() / mouse_click silently no-ops
+        # Resolve the source image's public URL. The image_edit endpoint
+        # wants a resolvable https URL in imageReferences; using the
+        # mediaUrl from post metadata handles user-uploaded images
+        # (which live at a different CDN path than Grok-generated ones)
+        # as well as the share-images path we'd otherwise construct.
+        try:
+            src_details = await self.get_post_details(post_id)
+        except Exception as e:
+            raise GrokAPIError(
+                f"edit_image: could not fetch post details for {post_id}: {e}"
+            ) from e
+        src_media_url = src_details.media_url
+        if not src_media_url:
+            src_media_url = f"https://imagine-public.x.ai/imagine-public/images/{post_id}.jpg"
+
+        # statsig_id already resolved at top of edit_image — reuse.
+        # Build the exact request body Grok's own UI sends. Captured
+        # 2026-04-22 by observing a successful edit_image UI run.
+        request_body = {
+            "temporary": True,
+            "modelName": "imagine-image-edit",
+            "message": edit_prompt,
+            "enableImageGeneration": True,
+            "returnImageBytes": False,
+            "returnRawGrokInXaiRequest": False,
+            "enableImageStreaming": True,
+            "imageGenerationCount": 2,
+            "forceConcise": False,
+            "toolOverrides": {"imageGen": True},
+            "enableSideBySide": True,
+            "sendFinalMetadata": True,
+            "isReasoning": False,
+            "disableTextFollowUps": True,
+            "responseMetadata": {
+                "modelConfigOverride": {
+                    "modelMap": {
+                        "imageEditModelConfig": {
+                            "imageReferences": [src_media_url],
+                            "parentPostId": post_id,
+                        },
+                        "imageEditModel": "imagine",
+                    }
+                }
+            },
+            "disableMemory": False,
+            "forceSideBySide": False,
+        }
+
+        # POST via page-context fetch. This runs in the grok.com origin,
+        # so session cookies flow automatically. We include x-statsig-id
+        # manually — Grok's own JS adds it server-side but a page-fetch
+        # from our injected JS does not.
+        fetch_js = r"""
+            (async (body, sid) => {
+                try {
+                    const headers = {'Content-Type': 'application/json'};
+                    if (sid) headers['x-statsig-id'] = sid;
+                    const r = await fetch('/rest/app-chat/conversations/new', {
+                        method: 'POST',
+                        headers: headers,
+                        body: body,
+                        credentials: 'include',
+                    });
+                    // Always read body text — the server returns the NDJSON
+                    // stream for successes but an error object for 4xx.
+                    const text = await r.text();
+                    return JSON.stringify({
+                        status: r.status,
+                        ok: r.ok,
+                        body: text.slice(0, 500),
+                    });
+                } catch (e) {
+                    return JSON.stringify({
+                        ok: false,
+                        error: (e && e.name) ? e.name + ': ' + e.message : String(e),
+                    });
+                }
+            })(__BODY__, __SID__)
+        """.replace("__BODY__", json_mod.dumps(json_mod.dumps(request_body))).replace(
+            "__SID__", json_mod.dumps(statsig_id) if statsig_id else "null"
+        )
+        post_result_raw = await self._tab.evaluate(fetch_js, await_promise=True)
+        try:
+            post_result = (
+                json_mod.loads(post_result_raw) if isinstance(post_result_raw, str) else {}
+            )
+        except Exception:
+            post_result = {}
+        if not post_result.get("ok"):
+            status = post_result.get("status")
+            err = post_result.get("error", "unknown")
+            body_preview = post_result.get("body", "")
+            raise GrokAPIError(
+                f"edit_image REST POST failed: status={status}, "
+                f"error={err}, body={body_preview!r}, "
+                f"statsig_id={'present' if statsig_id else 'MISSING'}"
+            )
+
+        # Wait for response with timeout
+        start_time = asyncio.get_event_loop().time()
+        while asyncio.get_event_loop().time() - start_time < timeout:
+            # Check if we have completed images (progress=100)
+            completed = [
+                img for img in captured_data["images"].values() if img.get("progress") == 100
+            ]
+            if len(completed) >= 2:  # Edit generates 2 images
+                break
+            await asyncio.sleep(1)
+
+        # Build result
+        images = list(captured_data["images"].values())
+
+        return ImageEditResult(
+            post_id=post_id,
+            edit_prompt=edit_prompt,
+            images=images,
+            conversation_id=captured_data.get("conversation_id"),
+        )
+
+    async def _edit_image_via_ui(
+        self, post_id: str, edit_prompt: str, timeout: int
+    ) -> ImageEditResult:
+        """UI fallback for edit_image when no x-statsig-id is cached.
+
+        Drives the full UI path: restore image view → 更多选项 → Custom →
+        图片 mode → prompt → 编辑. Works on shallow chains; may fail on
+        deep chains where the post page auto-redirects to the tail video
+        (in which case the caller can warm the sid cache via any other
+        generation call, then retry — edit_image will use the direct
+        REST path).
+        """
+        import asyncio
+        import json as json_mod
+
+        from ai_dev_browser import cdp
+
         from .actions.extend_seed import enable_focus_emulation
 
+        d = self._ui_delay
+
+        # Navigate to the post
+        await self._navigate_to_post(post_id)
+
+        # Set up network monitoring
+        await self._tab.send(cdp.network.enable())
+
+        captured_data: dict[str, Any] = {"conversation_id": None, "images": {}}
+
+        async def handle_response(event: cdp.network.ResponseReceived):
+            url = event.response.url
+            if "/app-chat/conversations/new" in url:
+                captured_data["request_id"] = event.request_id
+
+        async def handle_loading_finished(event: cdp.network.LoadingFinished):
+            if captured_data.get("request_id") == event.request_id:
+                try:
+                    body_result = await self._tab.send(
+                        cdp.network.get_response_body(request_id=event.request_id)
+                    )
+                    body = body_result[0] if isinstance(body_result, tuple) else str(body_result)
+                    for line in body.strip().split("\n"):
+                        if not line:
+                            continue
+                        try:
+                            data = json_mod.loads(line)
+                            result = data.get("result", {})
+                            if "conversation" in result:
+                                captured_data["conversation_id"] = result["conversation"].get(
+                                    "conversationId"
+                                )
+                            response = result.get("response", {})
+                            if "streamingImageGenerationResponse" in response:
+                                img_resp = response["streamingImageGenerationResponse"]
+                                image_id = img_resp.get("imageId")
+                                if image_id:
+                                    captured_data["images"][image_id] = {
+                                        "image_id": image_id,
+                                        "post_id": image_id,
+                                        "image_url": img_resp.get("imageUrl", ""),
+                                        "moderated": img_resp.get("moderated", False),
+                                        "progress": img_resp.get("progress", 0),
+                                    }
+                        except json_mod.JSONDecodeError:
+                            continue
+                except Exception:
+                    pass
+
+        self._tab.add_handler(cdp.network.ResponseReceived, handle_response)
+        self._tab.add_handler(cdp.network.LoadingFinished, handle_loading_finished)
+
+        await asyncio.sleep(3 * d)
+
+        # Focus emulation: CDP press/release can silently drop when the
+        # tab is backgrounded. Same fix used by extend_video.
         await enable_focus_emulation(self._tab)
 
-        # 1. Switch to image view by clicking the thumbnail whose src
-        # references our target post_id. The post page auto-defaults
-        # to the tail video of the chain when the post has descendants
-        # — then the "..." menu shows VIDEO-context items (Spicy /
-        # Normal / 扩展 / 删除视频) with no "Custom" / edit path. Clicking
-        # the matching image thumbnail in the left column restores the
-        # image view and the IMAGE-context menu (Custom / Spicy /
-        # Normal / 删除帖子).
-        #
-        # Match thumbnails by post_id substring — DOM order varies by
-        # chain depth, and the first imagine-public/images thumbnail
-        # is NOT always our target when the chain has video children
-        # whose share-video preview_image also happens to be rendered
-        # in the same column.
+        # 1. Restore image view by clicking the thumbnail whose src
+        # references post_id. Post pages auto-default to the tail video
+        # of the chain, which flips the "..." menu to video-context
+        # items (no Custom / edit path).
         thumb_clicked = await self._tab.evaluate(
             r"""
             (() => {
@@ -2167,11 +2373,12 @@ class GrokClient(ResponseParser):
             logger.warning(
                 "[edit_image] Could not find thumbnail matching post_id %s in "
                 "the left column. If the 'Custom' menuitem is missing, the "
-                "post page is stuck on video view.",
+                "post page is stuck on video view — prime the sid cache via "
+                "any other generation call so the direct REST path takes over.",
                 post_id,
             )
 
-        # 2. Open 更多选项 menu (Radix — pointer dispatch required)
+        # 2. Open 更多选项 (Radix — pointer dispatch required)
         menu_opened = await self._tab.evaluate(
             r"""
             (() => {
@@ -2195,10 +2402,7 @@ class GrokClient(ResponseParser):
             raise GrokAPIError("Could not find 更多选项 button on image post")
         await asyncio.sleep(1.2 * d)
 
-        # 3. Click the Custom menuitem — this brings up a generation
-        # panel pre-populated with the current image as a reference.
-        # (Grok renamed the old "编辑图像" menuitem to "Custom" as part
-        # of unifying image edit and img2vid into one prompt flow.)
+        # 3. Click Custom (or legacy 编辑图像 / Edit image)
         custom_fired = await self._tab.evaluate(
             r"""
             (() => {
@@ -2223,14 +2427,16 @@ class GrokClient(ResponseParser):
         )
         if not custom_fired:
             raise GrokAPIError(
-                "Could not find 'Custom' menuitem. Grok may have renamed it "
-                "again — adjust edit_image to match."
+                "Could not find 'Custom' menuitem. This commonly happens when "
+                "the target image has video descendants and the page redirected "
+                "to the tail video (whose menu is video-context). Fix: warm the "
+                "x-statsig-id cache by running any other generation call in the "
+                "same session — edit_image will then use the direct REST path "
+                "which works on any chain depth."
             )
         await asyncio.sleep(2.5 * d)
 
-        # 4. Switch to 图片 (Image) mode. The panel defaults to 视频
-        # (Video) mode where the submit button is 生成视频; in 图片
-        # mode the submit button is 编辑.
+        # 4. Switch to 图片 mode (panel defaults to 视频)
         await self._tab.evaluate(
             r"""
             (() => {
@@ -2251,8 +2457,7 @@ class GrokClient(ResponseParser):
         )
         await asyncio.sleep(1.0 * d)
 
-        # 5. Fill the prompt via execCommand (tiptap-safe; direct
-        # innerHTML writes get rejected by ProseMirror).
+        # 5. Fill prompt via execCommand (tiptap-safe)
         escaped_prompt = edit_prompt.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
         fill_result = await self._tab.evaluate(
             f"""
@@ -2272,8 +2477,7 @@ class GrokClient(ResponseParser):
             raise GrokAPIError("Could not find prompt editor (ProseMirror)")
         await asyncio.sleep(1 * d)
 
-        # 6. Click the 编辑 submit button (pointer dispatch). Keep
-        # 生成视频 as a fallback in case mode toggle didn't take.
+        # 6. Click 编辑 submit (fall back to 生成视频 if mode flip failed)
         submit_clicked = await self._tab.evaluate(
             r"""
             (() => {
@@ -2303,17 +2507,14 @@ class GrokClient(ResponseParser):
         # Wait for response with timeout
         start_time = asyncio.get_event_loop().time()
         while asyncio.get_event_loop().time() - start_time < timeout:
-            # Check if we have completed images (progress=100)
             completed = [
                 img for img in captured_data["images"].values() if img.get("progress") == 100
             ]
-            if len(completed) >= 2:  # Edit generates 2 images
+            if len(completed) >= 2:
                 break
             await asyncio.sleep(1)
 
-        # Build result
         images = list(captured_data["images"].values())
-
         return ImageEditResult(
             post_id=post_id,
             edit_prompt=edit_prompt,
@@ -4500,7 +4701,7 @@ class GrokClient(ResponseParser):
             if candidate:
                 video_url = candidate
                 logger.debug(
-                    "[download_video] direct lookup found URL for %s via " "get_post_details",
+                    "[download_video] direct lookup found URL for %s via get_post_details",
                     video_id,
                 )
         except GrokNotFoundError:
