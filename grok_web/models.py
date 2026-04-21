@@ -477,7 +477,29 @@ class VideoGenerationResult(BaseModel):
 
     # Core identifiers
     video_id: str = Field(..., description="Generated video UUID")
-    parent_post_id: str = Field(..., description="Parent image post UUID")
+    source_post_id: str | None = Field(
+        None,
+        description=(
+            "The post this video was generated from — i.e. the id you "
+            "passed to create_video() as the 'post:<uuid>' source (or "
+            "the parent returned in the NDJSON for other paths). This "
+            "is also the page the video's web_url points to."
+        ),
+    )
+    parent_post_id: str = Field(
+        ...,
+        description=(
+            "The post id the video is conceptually linked to (same as "
+            "source_post_id for most flows). NOTE: this is NOT always "
+            "Grok's internal chain-parent — for videos derived from an "
+            "edit_image output, Grok actually roots the video under the "
+            "edit chain's ORIGINAL source image, not the edited image. "
+            "If you need Grok's authoritative chain parent, inspect "
+            "get_post_details(video_id).original_post_id. Prefer "
+            "download_video(video_id) directly — it no longer needs "
+            "you to pass a parent."
+        ),
+    )
 
     # Generation status
     moderated: bool = Field(
@@ -542,8 +564,28 @@ class VideoExtendResult(BaseModel):
     """Result of extend_video() — extends a video with continuation frames."""
 
     video_id: str = Field(..., description="New extended video UUID")
-    source_video_id: str = Field(..., description="Original video UUID that was extended")
-    parent_post_id: str = Field(..., description="Parent image post UUID")
+    source_video_id: str = Field(
+        ...,
+        description=(
+            "The video_id you passed to extend_video() — the source clip "
+            "this extension was generated from. Same role as "
+            "VideoGenerationResult.source_post_id but preserved under "
+            "this name for extend flows since the source is always a "
+            "video, not an image."
+        ),
+    )
+    parent_post_id: str = Field(
+        ...,
+        description=(
+            "The post id the extended video is conceptually linked to "
+            "(usually the same as source_video_id). NOTE: this is NOT "
+            "always Grok's internal chain-parent. If you need Grok's "
+            "authoritative chain parent, inspect "
+            "get_post_details(video_id).original_post_id. Prefer "
+            "download_video(video_id) directly — it no longer needs "
+            "you to pass a parent."
+        ),
+    )
     moderated: bool = Field(False, description="True if content was flagged by moderation")
     progress: int = Field(100, description="Generation progress (100 = complete)")
     mode: str = Field("extend", description="Generation mode")

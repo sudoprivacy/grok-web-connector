@@ -2730,6 +2730,7 @@ class GrokClient(ResponseParser):
                 # Minimal fields — parse_video_ndjson_response's output shape
                 result = VideoGenerationResult(
                     video_id=video_id,
+                    source_post_id=raw.get("originalPostId") or video_id,
                     parent_post_id=raw.get("originalPostId") or video_id,
                     moderated=False,  # verify_final (if set) will re-check
                     progress=100,
@@ -3573,6 +3574,9 @@ class GrokClient(ResponseParser):
         # Build result - for txt2vid, the post_id IS the video
         return VideoGenerationResult(
             video_id=post_id,
+            # txt2vid has no image source; the video post IS the
+            # top-level post, so source and parent both point at it.
+            source_post_id=post_id,
             parent_post_id=post_id,
             moderated=False,  # If we got a redirect, it wasn't moderated
             progress=100 if video_ready or not wait_for_video else 50,
@@ -3767,6 +3771,9 @@ class GrokClient(ResponseParser):
                 # need it should call client.extend_video() directly.
                 result = VideoGenerationResult(
                     video_id=extend_res.video_id,
+                    # For video-extend via dict API, the source post is
+                    # the video we extended from (same as parent_post_id).
+                    source_post_id=extend_res.source_video_id,
                     parent_post_id=extend_res.parent_post_id,
                     moderated=extend_res.moderated,
                     progress=extend_res.progress,
@@ -4354,34 +4361,34 @@ class GrokClient(ResponseParser):
         """Download a video to local file.
 
         Args:
-            video_id: The child video UUID to download
-            output_path: Destination file path (will be created/overwritten)
+            video_id: The child video UUID to download.
+            output_path: Destination file path (will be created/overwritten).
             prefer_hd: If True (default), use hdMediaUrl when available,
                 fall back to mediaUrl otherwise.
-            parent_post_id: Optional — legacy fast-path for callers that
-                know the parent. Modern code can usually leave this
-                ``None`` since the primary lookup now hits the video
-                post directly.
-
-        Lookup strategy (tried in order, each stops on success):
-
-        1. Fetch the video post directly via
-           ``get_post_details(video_id)`` — returns that video's own
-           ``mediaUrl`` / ``hdMediaUrl``. This works even when the
-           video isn't listed under ``parent_post_id.children``,
-           which happens when Grok's chain parent differs from the
-           caller's expectation (e.g. videos generated from an
-           edit_image output are rooted under the edit's original
-           source image, not the edited image itself).
-        2. (Legacy) Walk ``parent_post_id.children`` if provided.
-        3. (Legacy slow path) Scan the user's favorites for a post
-           whose children include the target video.
+            parent_post_id: **Deprecated.** No longer needed — the
+                direct-lookup path hits the video post by id and does
+                not require walking its parent's children. Accepting
+                this kwarg emits a DeprecationWarning; behaviour is
+                preserved for callers still passing it.
 
         Raises:
-            GrokNotFoundError: If video not found in any path.
-            GrokAPIError: If all fetch strategies in
-                ``_download_video_by_url`` fail (e.g. 403 signed URL).
+            GrokNotFoundError: If video not found.
+            GrokAPIError: If all fetch strategies fail (e.g. 403 signed
+                URL rejected all credential modes).
         """
+        if parent_post_id is not None:
+            import warnings
+
+            warnings.warn(
+                "download_video(parent_post_id=...) is deprecated and will "
+                "be removed in a future release. The new direct-lookup path "
+                "resolves the video's URL from video_id alone — pass only "
+                "the video_id going forward. No downstream behaviour change "
+                "is required; existing calls still work.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
         output_path = Path(output_path)
 
         video_url: str | None = None

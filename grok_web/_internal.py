@@ -91,8 +91,13 @@ def parse_video_ndjson_response(
             f"No streamingVideoGenerationResponse found. Response preview: {preview}"
         )
 
+    # parent_post_id fallback: Grok's NDJSON parentPostId → caller's input.
+    # source_post_id: always the caller's input (the post id they passed
+    # to create_video as 'post:<uuid>'). The two differ when Grok roots
+    # the video under a grandparent in its chain — see models.py docs.
     return VideoGenerationResult(
         video_id=video_result.get("videoId", ""),
+        source_post_id=parent_post_id,
         parent_post_id=video_result.get("parentPostId", parent_post_id),
         moderated=video_result.get("moderated", False),
         progress=video_result.get("progress", 0),
