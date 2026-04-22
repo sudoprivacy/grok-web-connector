@@ -108,6 +108,7 @@ class GrokClient(ResponseParser):
         ui_delay: float = 1.0,
         force_new_chrome: bool = False,
         profile: str | None = None,
+        startup_timeout: float = 30.0,
     ):
         """
         Initialize GrokClient.
@@ -127,6 +128,9 @@ class GrokClient(ResponseParser):
                      Use this in BrowserWorkerPool to avoid race conditions.
             profile: Chrome profile name for start_browser (default: "grok-chrome").
                      Worker pool uses per-worker profiles like "grok-chrome-w0".
+            startup_timeout: Seconds to wait for Chrome to bind the debug port
+                     on auto-launch (default: 30.0). Raise on slow/crowded
+                     Windows machines or first-time profile init.
         """
         # Store for deferred loading in __aenter__
         self._provided_cookies = cookies
@@ -154,6 +158,7 @@ class GrokClient(ResponseParser):
         self._auto_launch = auto_launch
         self._force_new_chrome = force_new_chrome
         self._profile = profile
+        self._startup_timeout = startup_timeout
 
     async def _load_or_setup_cookies(self) -> GrokCookies:
         """Load cookies from config, or trigger interactive setup if missing."""
@@ -196,7 +201,11 @@ class GrokClient(ResponseParser):
         if self._auto_launch:
             try:
                 profile_name = self._profile or GROK_CHROME_PROFILE
-                kwargs = {"headless": self._headless, "profile": profile_name}
+                kwargs = {
+                    "headless": self._headless,
+                    "profile": profile_name,
+                    "startup_timeout": self._startup_timeout,
+                }
                 if self._remote_port is not None:
                     kwargs["port"] = self._remote_port
                 if self._force_new_chrome:
@@ -216,29 +225,28 @@ class GrokClient(ResponseParser):
             except FileNotFoundError as e:
                 raise GrokAPIError(str(e)) from e
             except (TimeoutError, RuntimeError) as e:
-                # The most common failure on Windows after long sessions is
-                # orphaned chrome.exe children (helper/renderer processes) that
-                # keep the profile dir locked even though no debug-ready Chrome
-                # is listening. ai-dev-browser's browser_start hardcodes a
-                # 10s port-listen timeout (no kwarg to raise it), so new
-                # launches on a crowded machine silently time out. Give the
-                # caller an actionable hint instead of just surfacing the
-                # upstream string.
+                # Chrome-start timeout remedies, ordered most-to-least
+                # recoverable. Our floor is ai-dev-browser>=0.9.0 so
+                # `startup_timeout` is always available to raise.
                 raise GrokAPIError(
                     f"Chrome failed to start: {e}\n\n"
-                    "Common causes:\n"
-                    "  1. Orphan chrome.exe processes locking the profile dir. "
-                    "Check Task Manager — if you see dozens of chrome.exe but "
-                    "netstat -ano | findstr :<port> is empty, kill them:\n"
+                    "Remedies (try in order):\n"
+                    f"  1. Raise the port-bind timeout — current was "
+                    f"{self._startup_timeout:.0f}s. Pass "
+                    "startup_timeout=60 (or more) to GrokClient / "
+                    "get_client(). Useful on slow/antivirus-heavy machines "
+                    "or first-time profile init.\n"
+                    "  2. Orphan chrome.exe processes may be locking the "
+                    "profile dir. If Task Manager shows many chrome.exe "
+                    "but netstat finds nothing on the debug port:\n"
                     "       taskkill /F /IM chrome.exe   (Windows)\n"
                     "       pkill -f chrome              (macOS/Linux)\n"
-                    "     then retry.\n"
-                    "  2. Previous session used close_chrome=False without "
-                    "cleanup — ai-dev-browser does not currently scan/kill "
-                    "orphans before relaunch. If you repeatedly hit this, "
-                    "pass close_chrome=True on prior sessions.\n"
-                    "  3. First-time profile init on a slow/antivirus-heavy "
-                    "machine. A reboot reliably clears both (1) and (3)."
+                    "     (ai-dev-browser 0.9.1+ will ship browser_cleanup() "
+                    "as a safer, namespace-scoped alternative.)\n"
+                    "  3. Reboot — reliably clears (1) and (2).\n"
+                    "  4. If you repeatedly hit this on long-running "
+                    "workers, pass close_chrome=True between sessions to "
+                    "avoid orphan accumulation."
                 ) from e
 
         # Store actual port (may differ from requested if auto-assigned)

@@ -71,6 +71,7 @@ def get_client(
     browser_port: int | None = None,
     headless: bool = False,
     profile: str | None = None,
+    startup_timeout: float = 30.0,
 ) -> GrokClient:
     """
     Get the Grok API client.
@@ -84,6 +85,9 @@ def get_client(
         browser_port: Chrome debugging port (optional, defaults to 9350)
         headless: Run browser in headless mode (default: False)
         profile: Chrome profile name (optional, defaults to "grok-chrome")
+        startup_timeout: Seconds to wait for Chrome to bind its debug port on
+            auto-launch (default: 30.0). Raise on slow / crowded Windows
+            machines or first-time profile init.
 
     Returns:
         GrokClient instance with all API methods.
@@ -101,6 +105,7 @@ def get_client(
         port=browser_port,
         headless=headless,
         profile=profile,
+        startup_timeout=startup_timeout,
     )
 
 
