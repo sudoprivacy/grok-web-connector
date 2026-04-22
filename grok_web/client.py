@@ -282,6 +282,55 @@ class GrokClient(ResponseParser):
         if self._tab is None:
             self._tab = await self._browser.get("about:blank")
 
+        # Inject a banner-killer that fires on every new document. Grok
+        # serves a OneTrust cookie banner (id=onetrust-consent-sdk) as a
+        # high-z-index bottom-right overlay; its hit-box covers the
+        # 提交 submit button coords on typical desktop widths. CDP
+        # Input.dispatchMouseEvent only sees hit-test results, not our
+        # intended target, so the click is silently absorbed by the
+        # banner — ProseMirror fills fine (DOM API, no coords) but
+        # submit never triggers and create_image hangs to timeout.
+        #
+        # Kill the banner via Page.addScriptToEvaluateOnNewDocument so
+        # it runs before React hydrates on every nav/reload, and via a
+        # MutationObserver as a safety net if the banner remounts
+        # asynchronously. Also run it once immediately in case we
+        # reused a tab that already has the banner up.
+        _banner_killer = r"""
+        (() => {
+            const kill = () => {
+                const ot = document.getElementById('onetrust-consent-sdk');
+                if (ot) ot.remove();
+                document.querySelectorAll('[role="dialog"]').forEach(d => {
+                    const t = (d.innerText || '');
+                    if (t.includes('Cookie') || t.includes('隐私') || t.includes('同意')) {
+                        d.remove();
+                    }
+                });
+            };
+            kill();
+            const start = () => {
+                try {
+                    const obs = new MutationObserver(kill);
+                    obs.observe(document.body, {childList: true, subtree: true});
+                } catch (e) { /* body not ready yet */ }
+            };
+            if (document.body) start();
+            else document.addEventListener('DOMContentLoaded', start);
+        })();
+        """
+        try:
+            await self._tab.send(
+                cdp.page.add_script_to_evaluate_on_new_document(source=_banner_killer)
+            )
+        except Exception as _e:
+            logger.debug(f"banner-killer inject skipped (non-fatal): {_e}")
+        # Also run on the current document in case we reused a tab.
+        import contextlib
+
+        with contextlib.suppress(Exception):
+            await self._tab.evaluate(_banner_killer)
+
         # Set cookies via CDP before navigating to grok.com
         cookie_dict = self.cookies.to_dict()
         for name, value in cookie_dict.items():
@@ -3493,6 +3542,32 @@ class GrokClient(ResponseParser):
             )
             await asyncio.sleep(0.05)
 
+        # Step 5b: Fail-fast if no WS frames arrive shortly after submit.
+        #
+        # If an overlay (cookie banner, auth modal, etc.) intercepted
+        # the submit click, ProseMirror still has our prompt and the
+        # page title updates — but no jobs will ever come, and the
+        # default timeout (300s) makes a silent bug feel like a hang.
+        # 30s is generous for the first ``json`` frame (normally arrives
+        # in <3s) and short enough to surface the overlay hint quickly.
+        wait_first = 30
+        start_first = asyncio.get_event_loop().time()
+        while asyncio.get_event_loop().time() - start_first < wait_first:
+            if len(captured_data["jobs"]) > 0:
+                break
+            await asyncio.sleep(0.5)
+        if len(captured_data["jobs"]) == 0:
+            raise GrokAPIError(
+                f"Submit click fired but no WebSocket generation frames "
+                f"received within {wait_first}s. Most likely cause: an "
+                "overlay (cookie banner, auth modal, etc.) intercepted "
+                "the click via z-index/hit-test. The connector auto-kills "
+                "Grok's OneTrust banner on __aenter__, so if you see this "
+                "there's a new overlay — inspect the tab for "
+                "[role='dialog'] or high-z-index elements covering the "
+                "提交 button coords."
+            )
+
         # Step 6: Wait for initial batch of images via WebSocket
         start_time = asyncio.get_event_loop().time()
         while asyncio.get_event_loop().time() - start_time < timeout:
@@ -3503,15 +3578,6 @@ class GrokClient(ResponseParser):
             if len(completed) >= 6:
                 break
             await asyncio.sleep(1)
-
-        # Check if we got any jobs at all - if not, something went wrong
-        if len(captured_data["jobs"]) == 0:
-            logger.error(
-                "[create_image] No jobs received after initial wait. Navigation or WebSocket may have failed."
-            )
-            raise GrokAPIError(
-                "No image generation jobs received. The page may not have loaded correctly."
-            )
 
         # Step 7: Scroll down to generate more if needed
         # min_success means non-moderated images, so we keep scrolling until we have enough
