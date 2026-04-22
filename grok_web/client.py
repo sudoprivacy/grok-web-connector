@@ -216,7 +216,30 @@ class GrokClient(ResponseParser):
             except FileNotFoundError as e:
                 raise GrokAPIError(str(e)) from e
             except (TimeoutError, RuntimeError) as e:
-                raise GrokAPIError(f"Chrome failed to start: {e}") from e
+                # The most common failure on Windows after long sessions is
+                # orphaned chrome.exe children (helper/renderer processes) that
+                # keep the profile dir locked even though no debug-ready Chrome
+                # is listening. ai-dev-browser's browser_start hardcodes a
+                # 10s port-listen timeout (no kwarg to raise it), so new
+                # launches on a crowded machine silently time out. Give the
+                # caller an actionable hint instead of just surfacing the
+                # upstream string.
+                raise GrokAPIError(
+                    f"Chrome failed to start: {e}\n\n"
+                    "Common causes:\n"
+                    "  1. Orphan chrome.exe processes locking the profile dir. "
+                    "Check Task Manager — if you see dozens of chrome.exe but "
+                    "netstat -ano | findstr :<port> is empty, kill them:\n"
+                    "       taskkill /F /IM chrome.exe   (Windows)\n"
+                    "       pkill -f chrome              (macOS/Linux)\n"
+                    "     then retry.\n"
+                    "  2. Previous session used close_chrome=False without "
+                    "cleanup — ai-dev-browser does not currently scan/kill "
+                    "orphans before relaunch. If you repeatedly hit this, "
+                    "pass close_chrome=True on prior sessions.\n"
+                    "  3. First-time profile init on a slow/antivirus-heavy "
+                    "machine. A reboot reliably clears both (1) and (3)."
+                ) from e
 
         # Store actual port (may differ from requested if auto-assigned)
         self._remote_port = actual_port
