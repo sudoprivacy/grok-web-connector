@@ -298,13 +298,27 @@ class GrokClient(ResponseParser):
         # reused a tab that already has the banner up.
         _banner_killer = r"""
         (() => {
+            const MOD_TEXT_RE = /(moderat|inappropriate|policy|违反|违规|不当|审核|敏感)/i;
             const kill = () => {
+                // OneTrust cookie banner — high-z overlay covering 提交 coords
                 const ot = document.getElementById('onetrust-consent-sdk');
                 if (ot) ot.remove();
+                // Cookie/consent dialogs by text match
                 document.querySelectorAll('[role="dialog"]').forEach(d => {
                     const t = (d.innerText || '');
                     if (t.includes('Cookie') || t.includes('隐私') || t.includes('同意')) {
                         d.remove();
+                    }
+                });
+                // Moderation alerts/toasts. These persist across SPA
+                // navigations after a moderated generation and can
+                // overlap the 制作视频 / 提交 buttons on the next attempt,
+                // causing create_video / create_image to silently fail
+                // to find their click target on 4+ consecutive moderations.
+                document.querySelectorAll('[role="alert"], [role="status"]').forEach(a => {
+                    const t = (a.innerText || '');
+                    if (MOD_TEXT_RE.test(t)) {
+                        a.remove();
                     }
                 });
             };
@@ -2338,6 +2352,31 @@ class GrokClient(ResponseParser):
             status = post_result.get("status")
             err = post_result.get("error", "unknown")
             body_preview = post_result.get("body", "")
+            # Rapid successive REST calls can trip Grok's anti-bot
+            # (status=403, body contains "Request rejected by anti-bot
+            # rules"). The sid is fine; it's call-rate that tripped the
+            # filter. Rather than surface it to the caller and ask them
+            # to back off, fall back to the UI path — it's slower but
+            # naturally paced by DOM interactions, so retry loops that
+            # legitimately call edit_image back-to-back just work.
+            # Invalidate the cached sid so a subsequent call re-captures
+            # a fresh one.
+            if status == 403 and "anti-bot" in body_preview.lower():
+                logger.warning(
+                    "edit_image REST path tripped anti-bot on this call "
+                    "(rapid successive edits?). Falling back to UI path. "
+                    f"body={body_preview!r}"
+                )
+                if self._statsig_snitch is not None:
+                    self._statsig_snitch._by_endpoint.pop("/rest/app-chat/conversations/new", None)
+                # Detach the current network handlers so the UI fallback's
+                # own handlers don't double-fire on the same events.
+                try:
+                    self._tab.remove_handler(cdp.network.ResponseReceived, handle_response)
+                    self._tab.remove_handler(cdp.network.LoadingFinished, handle_loading_finished)
+                except Exception:
+                    pass
+                return await self._edit_image_via_ui(post_id, edit_prompt, timeout)
             raise GrokAPIError(
                 f"edit_image REST POST failed: status={status}, "
                 f"error={err}, body={body_preview!r}, "
@@ -4671,7 +4710,39 @@ class GrokClient(ResponseParser):
 
                 clicked = await _click_make_video_button()
                 if not clicked and click_attempt == max_click_retries:
-                    raise GrokAPIError("Could not find '制作视频' button after retries")
+                    # Last-ditch: moderation state or cached DOM can stick
+                    # across soft navigations in long retry loops (reported
+                    # to fail deterministically on the 4th consecutive call
+                    # with moderated outputs). Force a hard reload and try
+                    # one more time before giving up.
+                    logger.warning(
+                        "[_create_video_via_ui] '制作视频' not found after "
+                        "%d retries — forcing hard page_reload as last-ditch "
+                        "and retrying once.",
+                        max_click_retries,
+                    )
+                    try:
+                        await self._tab.page_reload()
+                        await asyncio.sleep(3 + random.uniform(0, 1.0))
+                        if await _click_make_video_button() and await _wait_for_request(
+                            click_wait_timeout
+                        ):
+                            break
+                    except Exception as _e:
+                        logger.debug(f"page_reload last-ditch failed: {_e}")
+                    raise GrokAPIError(
+                        "Could not find '制作视频' button after retries "
+                        "(including hard page reload). Common causes:\n"
+                        "  1. Consecutive moderated generations (3+) can leave "
+                        "persistent UI state — the connector's banner-killer "
+                        "now tries to dismiss moderation alerts/toasts; if "
+                        "you still hit this, inspect the DOM for a new "
+                        "overlay pattern and report back.\n"
+                        "  2. The target post belongs to another user (no "
+                        "generate permission).\n"
+                        "  3. The target is not an image post (already a "
+                        "video / deleted)."
+                    )
                 elif not clicked:
                     await asyncio.sleep(2 + random.uniform(0, 1.0))
                     continue
