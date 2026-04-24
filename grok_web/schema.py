@@ -170,6 +170,25 @@ PARAMS: dict[str, dict[str, Any]] = {
         ),
         "type": "float",
     },
+    "preserve_source_favorite_state": {
+        "desc": (
+            "Opt-in cleanup of Grok's silent auto-favoriting on "
+            "create_video / extend_video. When the UI click fires "
+            "('制作视频' / '扩展'), Grok appends the source post/video "
+            "to the user's favorites on each call — batches of N "
+            "generations leave N-ish duplicate entries in the "
+            "favorites tab. Setting this to True asks the connector "
+            "to snapshot the source's favorite state before the call "
+            "and revert AFTER (only when the source was confirmed "
+            "NOT favorited pre-call — a revert in the other case "
+            "risks removing a favorite the user placed themselves). "
+            "Defaults to False to satisfy the mutation-opt-in rule: "
+            "the connector never writes to the favorites list unless "
+            "the caller explicitly asks."
+        ),
+        "type": "bool",
+        "default": False,
+    },
 }
 
 # =============================================================================
@@ -188,6 +207,7 @@ VIDEO_KEYS = [
     "timeout",
     "wait_for_video",
     "verify_final",
+    "preserve_source_favorite_state",
 ]
 
 # Keys accepted by extend_video() — keyword args rather than a dict, but
@@ -198,6 +218,7 @@ EXTEND_KEYS = [
     "duration",
     "prompt",
     "timeout",
+    "preserve_source_favorite_state",
 ]
 
 IMAGE_KEYS = [

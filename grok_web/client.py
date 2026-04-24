@@ -147,6 +147,9 @@ class GrokClient(ResponseParser):
         # fires at most once per client — avoids log spam on batch runs
         # where the caller has made an informed opt-out choice.
         self._persistence_hinted = False
+        # Same for create_video / extend_video's "Grok auto-favorited
+        # the source" nudge.
+        self._favorite_pollution_hinted = False
 
         # Snitch for x-statsig-id (populated passively from any grok.com request
         # seen on this tab). Used by direct REST submit to pass anti-bot check.
@@ -1017,6 +1020,31 @@ class GrokClient(ResponseParser):
         await self._api_request("POST", MEDIA_POST_UNLIKE_ENDPOINT, {"id": post_id})
         return True
 
+    async def _get_favorited_state(self, post_id: str) -> bool | None:
+        """Best-effort detection of whether a post is in the user's favorites.
+
+        Uses ``get_post_details`` and inspects ``userInteractionStatus``
+        for any of the known "favorited"/"saved"/"liked" boolean keys.
+        Returns ``None`` when the field is missing or has an unrecognised
+        shape — callers that use this to drive account-state mutations
+        MUST treat ``None`` as "don't touch" rather than guess, since a
+        false-negative would cause the connector to silently remove a
+        favorite the user placed themselves.
+        """
+        try:
+            details = await self.get_post_details(post_id)
+        except Exception:
+            return None
+        raw = (details.raw_data or {}).get("post", details.raw_data or {})
+        uis = raw.get("userInteractionStatus")
+        if isinstance(uis, dict):
+            for key in ("favorited", "saved", "liked", "isFavorited", "isSaved"):
+                if key in uis and isinstance(uis[key], bool):
+                    return uis[key]
+        if isinstance(uis, bool):
+            return uis
+        return None
+
     async def match_local_video(self, local_path: str | Path) -> VideoMatchResult:
         """Match a local grok video to its web counterpart."""
         local_path = Path(local_path)
@@ -1858,6 +1886,7 @@ class GrokClient(ResponseParser):
         duration: str | None = None,
         prompt: str | None = None,
         timeout: int = 600,
+        preserve_source_favorite_state: bool = False,
     ) -> VideoExtendResult:
         """Extend an existing video via the post's "..." menu.
 
@@ -1927,6 +1956,27 @@ class GrokClient(ResponseParser):
                     logger.debug(f"extend_video: chain duration hint = {video_duration_hint:.2f}s")
             except Exception as e:
                 logger.warning(f"extend_video: failed to fetch duration hint: {e}")
+
+        # Known Grok behavior: clicking 扩展 silently appends the source
+        # video to the user's favorites on every call, producing
+        # duplicates across batches. Only auto-revert when the caller
+        # opts in AND we can confirm the source was NOT favorited
+        # pre-call (revert in the "was favorited" case would risk
+        # removing a favorite the user placed themselves).
+        was_source_favorited: bool | None = None
+        if preserve_source_favorite_state:
+            was_source_favorited = await self._get_favorited_state(video_id)
+        elif not self._favorite_pollution_hinted:
+            logger.info(
+                "[extend_video] Grok auto-favorites the source video on "
+                "each UI-driven extend call, which accumulates duplicate "
+                "entries in the user's favorites tab. Pass "
+                "preserve_source_favorite_state=True to have the connector "
+                "snapshot-and-revert the state (only when the source was "
+                "unambiguously not favorited pre-call — safe default). "
+                "Hint fires once per client."
+            )
+            self._favorite_pollution_hinted = True
 
         # Navigate to the video post page
         await navigate_to_post(self._tab, video_id, delay=self._ui_delay)
@@ -2030,6 +2080,16 @@ class GrokClient(ResponseParser):
             duration_s, cumulative_duration_s = await self._fetch_video_duration(
                 gen_result.video_id
             )
+
+        # Restore the caller's favorite state only when it's provably
+        # safe (source was NOT favorited pre-call). Non-fatal on error.
+        if preserve_source_favorite_state and was_source_favorited is False:
+            try:
+                await self.unfavorite_post(video_id)
+            except Exception as _e:
+                logger.warning(
+                    f"[extend_video] could not restore favorite state for {video_id}: {_e}"
+                )
 
         return VideoExtendResult(
             video_id=gen_result.video_id,
@@ -4313,6 +4373,7 @@ class GrokClient(ResponseParser):
         preset = p.get("preset", "normal")
         wait_for_video = p.get("wait_for_video", True)
         verify_final = p.get("verify_final", False)
+        preserve_fav = p.get("preserve_source_favorite_state", False)
 
         # aspect_ratio: default "2:3" for txt2vid, None for upload2vid
         # (Grok UI hides aspect ratio dropdown for multi-image uploads)
@@ -4347,6 +4408,26 @@ class GrokClient(ResponseParser):
             if kind == "post":
                 # img2vid — use first post source
                 post_id = sources[0][1]
+                # Known Grok behavior: clicking "制作视频" silently appends
+                # the source post to the user's favorites on every call,
+                # producing duplicates across batches. We only auto-revert
+                # when the caller opts in AND we can confirm the source
+                # was NOT favorited pre-call (otherwise revert risks
+                # removing a favorite the user placed themselves).
+                was_favorited = None
+                if preserve_fav:
+                    was_favorited = await self._get_favorited_state(post_id)
+                elif not self._favorite_pollution_hinted:
+                    logger.info(
+                        "[create_video] Grok auto-favorites the source post "
+                        "on each UI-driven img2vid call, which accumulates "
+                        "duplicate entries in the user's favorites tab. "
+                        "Pass preserve_source_favorite_state=True to have "
+                        "the connector snapshot-and-revert the state (only "
+                        "when the source was unambiguously not favorited "
+                        "pre-call — safe default). Hint fires once per client."
+                    )
+                    self._favorite_pollution_hinted = True
                 result = await self._create_video_via_ui(
                     parent_post_id=post_id,
                     preset=preset,
@@ -4356,6 +4437,13 @@ class GrokClient(ResponseParser):
                     resolution=resolution,
                     aspect_ratio=aspect_ratio,
                 )
+                if preserve_fav and was_favorited is False:
+                    try:
+                        await self.unfavorite_post(post_id)
+                    except Exception as _e:
+                        logger.warning(
+                            f"[create_video] could not restore favorite state for {post_id}: {_e}"
+                        )
             elif kind == "video":
                 # video-extend — generate a continuation from an existing
                 # Grok video post. UI flow: navigate to the video page,
@@ -4378,6 +4466,7 @@ class GrokClient(ResponseParser):
                     duration=orig_duration,
                     prompt=prompt if prompt else None,
                     timeout=timeout,
+                    preserve_source_favorite_state=preserve_fav,
                 )
                 # extend_video returns VideoExtendResult; adapt its fields
                 # so callers receive a normal VideoGenerationResult. Seed
