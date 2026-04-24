@@ -1394,13 +1394,142 @@ class GrokClient(ResponseParser):
         except Exception:
             return False
 
-    async def _navigate_to_post(self, post_id: str) -> None:
-        """Navigate to a specific post page."""
+    async def select_post(self, post_id: str, *, timeout: float = 6.0) -> None:
+        """Select a specific post on the Imagine tab.
+
+        This is a correctness-guaranteed navigation primitive: a plain
+        ``/imagine/post/<id>`` fetch is not sufficient, because Grok's
+        SPA frequently redirects to the chain's "latest" node (most
+        recent video / edit) when the requested node has descendants.
+        Leaving that redirect uncorrected makes every subsequent UI
+        action operate on the wrong post — the classic
+        ``extend_video(video_id=X)`` fanout trap, a
+        ``create_video(images=["post:X"])`` where the source image is
+        an old root with video children, ``edit_image`` on deep chains,
+        etc.
+
+        Resolution: navigate, wait for hydration, check the URL/DOM,
+        and — if the redirect happened — click the sidebar thumbnail
+        whose ``<img>`` src references ``post_id``. Thumbnails encode
+        their post_id in the media URL so matching is reliable.
+
+        Compose this with :meth:`extend_current`,
+        :meth:`generate_video_from_current`, :meth:`edit_current` to
+        build end-to-end flows where the target post is explicit.
+
+        Args:
+            post_id: Post UUID to select.
+            timeout: Max seconds to wait for the selection to land
+                (default 6.0). Does not include the page load itself.
+
+        Raises:
+            GrokAPIError: Post is 404, or the thumbnail-correction
+                failed to find a sidebar entry matching ``post_id``
+                within ``timeout`` (most often: the post doesn't
+                belong to a chain Grok will show in the sidebar —
+                e.g. orphaned / deleted).
+        """
         import asyncio
 
         url = f"{self.BASE_URL}/imagine/post/{post_id}"
         await self._tab.get(url)
+        # Initial hydration wait. Keep short; we'll poll after.
         await asyncio.sleep(2)
+
+        # 404 check (Grok renders the SPA shell with a "not found" body).
+        page_text = await self._tab.evaluate("document.body.innerText")
+        if page_text and ("Page not found" in page_text or "404" in page_text):
+            raise GrokAPIError(f"Post {post_id} not found (404)")
+
+        # Fast-path: URL still contains the requested id. Common for
+        # root nodes / chain tails where Grok doesn't redirect.
+        current_url = await self._tab.evaluate("location.href")
+        if post_id in str(current_url):
+            return
+
+        # Redirect path: Grok's SPA jumped us to a descendant. The
+        # sidebar (left-column post list) shows every node in the
+        # chain as a clickable thumbnail with <img src> containing
+        # the node's own uuid. Find the one for post_id and click it.
+        logger.debug(
+            "[select_post] URL redirected (%s → %s); clicking sidebar "
+            "thumbnail to restore selection",
+            post_id,
+            current_url,
+        )
+        deadline = asyncio.get_event_loop().time() + timeout
+        while asyncio.get_event_loop().time() < deadline:
+            clicked = await self._tab.evaluate(
+                r"""
+                (() => {
+                    const want = "__POST_ID__";
+                    const imgs = Array.from(document.querySelectorAll('img'))
+                        .filter(i => (i.currentSrc || i.src || '').includes(want));
+                    if (imgs.length === 0) return 'no-thumb';
+                    // Walk up to the nearest clickable (BUTTON or A).
+                    let el = imgs[0];
+                    while (el && el.tagName !== 'BUTTON' && el.tagName !== 'A'
+                           && el.parentElement) {
+                        el = el.parentElement;
+                    }
+                    if (!el) return 'no-button';
+                    const r = el.getBoundingClientRect();
+                    const x = r.x + r.width/2, y = r.y + r.height/2;
+                    const o = {bubbles:true, cancelable:true, clientX:x, clientY:y,
+                               pointerType:'mouse', button:0, pointerId:1, isPrimary:true};
+                    el.dispatchEvent(new PointerEvent('pointerdown', o));
+                    el.dispatchEvent(new MouseEvent('mousedown', o));
+                    el.dispatchEvent(new PointerEvent('pointerup', o));
+                    el.dispatchEvent(new MouseEvent('mouseup', o));
+                    el.dispatchEvent(new MouseEvent('click', o));
+                    return 'ok';
+                })()
+                """.replace("__POST_ID__", post_id)
+            )
+            if clicked == "ok":
+                await asyncio.sleep(1.0)
+                # Verify: URL should now contain post_id OR the main
+                # <img>/<video> should reference it. Accept either.
+                current_url = await self._tab.evaluate("location.href")
+                if post_id in str(current_url):
+                    return
+                landed = await self._tab.evaluate(
+                    r"""
+                    (() => {
+                        const want = "__POST_ID__";
+                        // The post "main view" is typically the largest
+                        // <img> or <video> near the top-right of the layout.
+                        const mains = Array.from(document.querySelectorAll('img, video'))
+                            .filter(e => {
+                                const r = e.getBoundingClientRect();
+                                return r.width > 200;
+                            })
+                            .map(e => e.currentSrc || e.src || '')
+                            .filter(Boolean);
+                        return mains.some(src => src.includes(want));
+                    })()
+                    """.replace("__POST_ID__", post_id)
+                )
+                if landed:
+                    return
+            # Not yet. Retry the loop (sidebar may still be hydrating).
+            await asyncio.sleep(0.5)
+
+        raise GrokAPIError(
+            f"select_post: could not select {post_id} within {timeout}s. "
+            "The sidebar didn't surface a thumbnail matching this id — "
+            "the post may not be part of a chain Grok renders in the "
+            "left column (orphan, deleted, or different account)."
+        )
+
+    async def _navigate_to_post(self, post_id: str) -> None:
+        """Deprecated: use :meth:`select_post`.
+
+        Thin alias kept for internal callers; new code should use
+        ``select_post`` which guarantees the requested post is
+        actually selected even when Grok's SPA redirects.
+        """
+        await self.select_post(post_id)
 
     # =========================================================================
     # UI Menu Operations (shared helper + specific actions)
@@ -1878,53 +2007,53 @@ class GrokClient(ResponseParser):
 
         return True
 
-    async def extend_video(
+    async def extend_current(
         self,
-        video_id: str,
         *,
         seed_start: float | None = None,
         duration: str | None = None,
         prompt: str | None = None,
         timeout: int = 600,
-        preserve_source_favorite_state: bool = False,
-    ) -> VideoExtendResult:
-        """Extend an existing video via the post's "..." menu.
+        video_duration_hint: float | None = None,
+    ) -> VideoGenerationResult:
+        """Extend whatever post is currently selected on the tab.
 
-        Flow: navigate to the video post → open "..." → click "扩展" → Grok
-        renders an extend panel with a filmstrip seed selector on top of
-        the video and a prompt editor at the bottom. The library then
-        drags the filmstrip's right handle to ``video_id``'s own chain
-        tail (pinning the seed at the source post, not at whatever the
-        chain's current tail happens to be) and submits.
+        Lower-level primitive: opens "..." → 扩展, configures the
+        filmstrip (duration + optional seed drag), fills the prompt,
+        submits. Does NOT navigate. Caller is responsible for ensuring
+        the correct post is selected via :meth:`select_post` first —
+        otherwise extend operates on whatever Grok happens to be
+        showing, which is the classic "extend silently serializes the
+        chain" trap.
 
-        **Default semantics (v0.17+)**: ``extend_video(video_id=X)``
-        always branches from X. Calling it in a loop with the same X
-        produces N parallel branches — fanout. For serial extension
-        (each call building on the previous), pass
-        ``video_id=previous_result.video_id`` on each iteration; the
-        seed still pins at that node's own tail, which IS the end of
-        the serial chain, so the result is correct.
+        When ``seed_start`` is None we skip the drag entirely; the
+        filmstrip's native default handle position is the currently
+        selected post's own tail, which is what a freshly-selected
+        node's default state resolves to. Pass an explicit
+        ``seed_start`` only for surgical mid-source seeding.
 
-        Override with an explicit ``seed_start=<float>`` if you need a
-        specific timestamp within the source.
+        See :meth:`extend_video` for the video_id-driven wrapper that
+        composes ``select_post + extend_current`` — use that for the
+        common case; use ``extend_current`` directly when composing
+        with your own navigation logic.
 
-        Args (keyword-only, all optional except video_id). Per-key
-        descriptions below are generated from
-        ``grok_web.schema.PARAMS`` (SSOT).
-
-            <SCHEMA_ARGS>
+        Args:
+            seed_start: Specific seed timestamp in chain-coords; None
+                uses the filmstrip's native default (selected post's
+                own tail).
+            duration: '6s' or '10s'. None keeps Grok's current toggle.
+            prompt: Extend prompt. None leaves the UI's pre-filled text.
+            timeout: Max seconds to wait for the generation response.
+            video_duration_hint: Optional filmstrip-timeline length in
+                seconds (equal to ``videoExtensionStartTime +
+                videoDuration`` on the selected post). Skips a DOM
+                bootstrap inside ``wait_for_filmstrip``. If omitted we
+                bootstrap from the DOM.
 
         Returns:
-            VideoExtendResult with new video_id, source linkage, moderation
-            verdict, and ``seed_start_requested`` / ``seed_start_actual`` /
-            ``seed_start_displayed`` so callers can verify where the drag
-            landed.
-
-        Raises:
-            GrokAPIError: If the menu item is missing, the seed drag drifts
-                outside ``SEED_DRIFT_TOLERANCE`` (1.0s), ``video_id`` has
-                no ``videoDuration`` metadata (can't resolve the pin
-                position), or generation fails.
+            VideoGenerationResult. For full source-linkage metadata
+            (source_video_id, seed_start_*, duration_s,
+            cumulative_duration_s), use :meth:`extend_video`.
         """
         import asyncio
         import random
@@ -1939,7 +2068,6 @@ class GrokClient(ResponseParser):
             select_duration,
             wait_for_filmstrip,
         )
-        from .actions.navigation import navigate_to_post
         from .actions.network_monitor import CDPMonitor
         from .actions.post_menu import click_menu_item, open_post_menu
 
@@ -1949,85 +2077,15 @@ class GrokClient(ResponseParser):
                 "passing through — Grok UI may reject."
             )
 
-        # Compute the filmstrip's total timeline duration from post
-        # metadata. For an extended chain the tail post's timeline is
-        # (videoExtensionStartTime + videoDuration) — that's how many
-        # seconds the filmstrip covers. Grok's <video> element stays at
-        # readyState 0 on the post page (HLS, no autoload), so we can't
-        # rely on v.duration.
-        # Resolve the pin position. One round-trip to get_post_details
-        # gives us both the filmstrip's total timeline duration AND —
-        # when seed_start is None — the default pin at video_id's own
-        # tail (so naive fanout loops actually fan out, not serialize
-        # via Grok's chain-walk default).
-        try:
-            details = await self.get_post_details(video_id)
-        except Exception as e:
-            raise GrokAPIError(
-                f"extend_video: could not fetch post details for {video_id}: {e}"
-            ) from e
-        raw = details.raw_data or {}
-        post = raw.get("post", raw)
-        own = post.get("videoDuration")
-        start = post.get("videoExtensionStartTime") or 0
-        if own is None:
-            raise GrokAPIError(
-                f"extend_video: source {video_id} has no videoDuration "
-                "in post metadata — cannot resolve the filmstrip pin "
-                "position. Not a video post, or metadata incomplete."
-            )
-        video_duration_hint: float = float(start) + float(own)
-        logger.debug(f"extend_video: chain-coord tail of source = {video_duration_hint:.2f}s")
-        if seed_start is None:
-            seed_start = video_duration_hint
-            logger.debug(
-                f"extend_video: seed_start=None → pinning at source's "
-                f"own tail ({seed_start:.2f}s) for fanout-safe default"
-            )
-
-        # Known Grok behavior: clicking 扩展 silently appends the source
-        # video to the user's favorites on every call, producing
-        # duplicates across batches. Only auto-revert when the caller
-        # opts in AND we can confirm the source was NOT favorited
-        # pre-call (revert in the "was favorited" case would risk
-        # removing a favorite the user placed themselves).
-        was_source_favorited: bool | None = None
-        if preserve_source_favorite_state:
-            was_source_favorited = await self._get_favorited_state(video_id)
-        elif not self._favorite_pollution_hinted:
-            logger.info(
-                "[extend_video] Grok auto-favorites the source video on "
-                "each UI-driven extend call, which accumulates duplicate "
-                "entries in the user's favorites tab. Pass "
-                "preserve_source_favorite_state=True to have the connector "
-                "snapshot-and-revert the state (only when the source was "
-                "unambiguously not favorited pre-call — safe default). "
-                "Hint fires once per client."
-            )
-            self._favorite_pollution_hinted = True
-
-        # Navigate to the video post page
-        await navigate_to_post(self._tab, video_id, delay=self._ui_delay)
-
-        # When the Chrome window lacks OS focus, CDP silently drops
-        # mousePressed / mouseReleased (only mouseMoved survives), which
-        # makes the filmstrip drag appear to fire with no effect. Force
-        # the page to behave as focused so our drag events register.
+        # Focus emulation so CDP press/release events don't get dropped
+        # when the window lacks OS focus.
         await enable_focus_emulation(self._tab)
 
-        actual_seed: float | None = None
-        displayed_seed: int | None = None
-
-        # Start CDP monitoring before triggering the extend action
         async with CDPMonitor(self._tab, "/app-chat/conversations/new") as monitor:
             await asyncio.sleep(1 + random.uniform(0, 0.5))
 
-            # 1. Open "..." menu and click 扩展. Grok's current UI (2026-04)
-            # puts the post directly into "extend mode" — filmstrip appears
-            # on top of the video, a +6s/+10s duration picker + prompt
-            # editor appear at the bottom. No separate "从框架扩展" click
-            # is needed anymore (that was the previous-gen flow).
-            # Keep legacy menu names as fallbacks for UI reverts.
+            # 1. Open "..." and click 扩展. Keep legacy label names as
+            # fallbacks in case Grok reverts.
             await open_post_menu(self._tab, delay=self._ui_delay)
             await click_menu_item(
                 self._tab,
@@ -2040,23 +2098,24 @@ class GrokClient(ResponseParser):
                 delay=self._ui_delay,
             )
 
-            # 2. Wait for the filmstrip to mount (proves extend mode is on)
+            # 2. Wait for the filmstrip to mount.
             fs = await wait_for_filmstrip(
                 self._tab, timeout=8.0, video_duration_hint=video_duration_hint
             )
             video_duration = fs["video_duration"]
 
-            # 3. Pick duration via the +6s/+10s toggle (if requested).
-            #    Do this BEFORE dragging — changing duration resets the
-            #    selection window.
+            # 3. Duration toggle (must precede any drag — changing
+            # duration resets the selection window).
             if duration is not None:
                 await select_duration(self._tab, duration)
-                # re-read geometry (handle rect shifts with duration)
                 fs = await wait_for_filmstrip(
                     self._tab, timeout=3.0, video_duration_hint=video_duration_hint
                 )
 
-            # 4. Drag the handle to the requested seed_start (if given).
+            # 4. Drag only if caller asked for a specific seed — the
+            # native handle already sits at the selected post's tail.
+            actual_seed: float | None = None
+            displayed_seed: int | None = None
             if seed_start is not None:
                 await drag_seed_handle(
                     self._tab,
@@ -2076,14 +2135,13 @@ class GrokClient(ResponseParser):
                         "be stable; retry."
                     )
 
-            # 5. Fill prompt if caller passed one (else UI keeps pre-filled text)
+            # 5. Prompt
             if prompt is not None:
                 await fill_prompt(self._tab, prompt)
 
-            # 6. Click 生成视频 to submit
+            # 6. Submit
             await click_generate(self._tab)
 
-            # 5. Wait for the request to fire
             if not await monitor.wait_for_request(timeout=10):
                 raise GrokAPIError(
                     "Extend did not trigger a generation request after "
@@ -2091,17 +2149,114 @@ class GrokClient(ResponseParser):
                     "(missing prompt? seed not selected?) or the UI changed. "
                     "Use get_menu_items() / screenshots to debug."
                 )
-
-            # 6. Wait for response body
             await monitor.wait_for_body(timeout=timeout)
 
-        # Parse response (same NDJSON format as create_video)
+        # Parse response. source_post_id on the base result defaults to
+        # parentPostId from NDJSON; the wrapper (extend_video) will
+        # override with the caller-provided source_video_id.
         gen_result = parse_video_ndjson_response(
-            monitor.body, video_id, statsig_id=monitor.statsig_id
+            monitor.body, parent_post_id="", statsig_id=monitor.statsig_id
+        )
+        # Stash drag metadata on private fields so the wrapper can
+        # surface it on VideoExtendResult without another round-trip.
+        gen_result.__dict__["_extend_seed_actual"] = actual_seed
+        gen_result.__dict__["_extend_seed_displayed"] = displayed_seed
+        gen_result.__dict__["_extend_seed_requested"] = seed_start
+        return gen_result
+
+    async def extend_video(
+        self,
+        video_id: str,
+        *,
+        seed_start: float | None = None,
+        duration: str | None = None,
+        prompt: str | None = None,
+        timeout: int = 600,
+        preserve_source_favorite_state: bool = False,
+    ) -> VideoExtendResult:
+        """Extend a specific video by its post id.
+
+        Thin composition of the public primitives :meth:`select_post`
+        and :meth:`extend_current`, plus favorite-state cleanup and
+        result enrichment. If you want the composition to be more
+        explicit in your own code, you can call those two directly —
+        ``extend_video`` is the convenience shape for the common case.
+
+        Flow: ``select_post(video_id)`` lands the tab on the requested
+        post (correcting for Grok's SPA redirect-to-chain-tail
+        behavior), then ``extend_current`` opens the extend panel and
+        submits. With the correct post selected, the filmstrip's
+        default handle position is video_id's own tail, so
+        ``seed_start=None`` produces fanout-safe branching without
+        any drag. Explicit ``seed_start`` still triggers the drag for
+        mid-source seeding.
+
+        Args (keyword-only, all optional except video_id). Per-key
+        descriptions below are generated from
+        ``grok_web.schema.PARAMS`` (SSOT).
+
+            <SCHEMA_ARGS>
+
+        Returns:
+            VideoExtendResult with new video_id, source linkage,
+            moderation verdict, seed drift metadata, and
+            duration_s / cumulative_duration_s.
+
+        Raises:
+            GrokAPIError: If select_post cannot land on video_id,
+                the menu item is missing, the seed drag drifts
+                outside ``SEED_DRIFT_TOLERANCE`` (1.0s), or
+                generation fails.
+        """
+        # One get_post_details call does double duty: the duration
+        # hint (skips a wait_for_filmstrip bootstrap) and the
+        # favorite-state snapshot if the caller opted in.
+        try:
+            details = await self.get_post_details(video_id)
+        except Exception as e:
+            raise GrokAPIError(
+                f"extend_video: could not fetch post details for {video_id}: {e}"
+            ) from e
+        raw = details.raw_data or {}
+        post = raw.get("post", raw)
+        own = post.get("videoDuration")
+        start = post.get("videoExtensionStartTime") or 0
+        video_duration_hint: float | None = None
+        if own is not None:
+            video_duration_hint = float(start) + float(own)
+
+        # Known Grok behavior: clicking 扩展 silently appends the
+        # source video to favorites on every call. Only auto-revert
+        # when the caller opts in AND we can confirm the source was
+        # NOT favorited pre-call.
+        was_source_favorited: bool | None = None
+        if preserve_source_favorite_state:
+            was_source_favorited = await self._get_favorited_state(video_id)
+        elif not self._favorite_pollution_hinted:
+            logger.info(
+                "[extend_video] Grok auto-favorites the source video on "
+                "each UI-driven extend call, which accumulates duplicate "
+                "entries in the user's favorites tab. Pass "
+                "preserve_source_favorite_state=True to have the connector "
+                "snapshot-and-revert the state (only when the source was "
+                "unambiguously not favorited pre-call — safe default). "
+                "Hint fires once per client."
+            )
+            self._favorite_pollution_hinted = True
+
+        # Correctness: select_post guarantees video_id is actually
+        # shown even when Grok's SPA redirects to a descendant.
+        await self.select_post(video_id)
+
+        gen_result = await self.extend_current(
+            seed_start=seed_start,
+            duration=duration,
+            prompt=prompt,
+            timeout=timeout,
+            video_duration_hint=video_duration_hint,
         )
 
-        # Enrich with authoritative duration from Grok's post metadata.
-        # Skip when the result was moderated — no durable post to look up.
+        # Duration enrichment from post metadata (skip moderated).
         duration_s: int | None = None
         cumulative_duration_s: float | None = None
         if not gen_result.moderated and gen_result.video_id:
@@ -2109,8 +2264,7 @@ class GrokClient(ResponseParser):
                 gen_result.video_id
             )
 
-        # Restore the caller's favorite state only when it's provably
-        # safe (source was NOT favorited pre-call). Non-fatal on error.
+        # Restore favorite state only when provably safe.
         if preserve_source_favorite_state and was_source_favorited is False:
             try:
                 await self.unfavorite_post(video_id)
@@ -2119,19 +2273,24 @@ class GrokClient(ResponseParser):
                     f"[extend_video] could not restore favorite state for {video_id}: {_e}"
                 )
 
+        # Recover seed drag metadata stashed by extend_current.
+        seed_actual = gen_result.__dict__.get("_extend_seed_actual")
+        seed_displayed = gen_result.__dict__.get("_extend_seed_displayed")
+        seed_requested = gen_result.__dict__.get("_extend_seed_requested")
+
         return VideoExtendResult(
             video_id=gen_result.video_id,
             source_video_id=video_id,
-            parent_post_id=gen_result.parent_post_id,
+            parent_post_id=gen_result.parent_post_id or video_id,
             moderated=gen_result.moderated,
             progress=gen_result.progress,
             mode=gen_result.mode,
             model_name=gen_result.model_name,
             conversation_id=gen_result.conversation_id,
             statsig_id=gen_result.statsig_id,
-            seed_start_requested=seed_start,
-            seed_start_actual=actual_seed,
-            seed_start_displayed=displayed_seed,
+            seed_start_requested=seed_requested,
+            seed_start_actual=seed_actual,
+            seed_start_displayed=seed_displayed,
             duration_s=duration_s,
             cumulative_duration_s=cumulative_duration_s,
         )
@@ -2591,17 +2750,33 @@ class GrokClient(ResponseParser):
             conversation_id=captured_data.get("conversation_id"),
         )
 
-    async def _edit_image_via_ui(
-        self, post_id: str, edit_prompt: str, timeout: int
+    async def edit_current(
+        self, edit_prompt: str, *, timeout: int = 300, source_post_id: str | None = None
     ) -> ImageEditResult:
-        """UI fallback for edit_image when no x-statsig-id is cached.
+        """Edit the image post currently selected on the tab.
 
-        Drives the full UI path: restore image view → 更多选项 → Custom →
-        图片 mode → prompt → 编辑. Works on shallow chains; may fail on
-        deep chains where the post page auto-redirects to the tail video
-        (in which case the caller can warm the sid cache via any other
-        generation call, then retry — edit_image will use the direct
-        REST path).
+        Lower-level primitive: opens 更多选项 → Custom → 图片 mode,
+        fills the prompt, clicks 编辑, and waits for the NDJSON
+        response. Does NOT navigate. Caller is responsible for
+        selecting the source image first via :meth:`select_post`;
+        otherwise the menu will show video-context items (no Custom
+        menuitem) and the call fails with a clear error.
+
+        ``source_post_id`` is used only for result metadata
+        (``ImageEditResult.post_id``). If omitted, set to empty
+        string — callers that care about identity should pass it or
+        use :meth:`edit_image` which handles it for you.
+
+        Args:
+            edit_prompt: The edit instruction text.
+            timeout: Max seconds to wait for both candidate images
+                to reach progress=100 (default 300).
+            source_post_id: Optional label for the result. Does not
+                influence the UI interaction.
+
+        Returns:
+            ImageEditResult. The ``post_id`` field reflects
+            ``source_post_id`` (or empty if omitted).
         """
         import asyncio
         import json as json_mod
@@ -2612,10 +2787,6 @@ class GrokClient(ResponseParser):
 
         d = self._ui_delay
 
-        # Navigate to the post
-        await self._navigate_to_post(post_id)
-
-        # Set up network monitoring
         await self._tab.send(cdp.network.enable())
 
         captured_data: dict[str, Any] = {"conversation_id": None, "images": {}}
@@ -2662,57 +2833,10 @@ class GrokClient(ResponseParser):
         self._tab.add_handler(cdp.network.ResponseReceived, handle_response)
         self._tab.add_handler(cdp.network.LoadingFinished, handle_loading_finished)
 
-        await asyncio.sleep(3 * d)
-
-        # Focus emulation: CDP press/release can silently drop when the
-        # tab is backgrounded. Same fix used by extend_video.
+        await asyncio.sleep(1 * d)
         await enable_focus_emulation(self._tab)
 
-        # 1. Restore image view by clicking the thumbnail whose src
-        # references post_id. Post pages auto-default to the tail video
-        # of the chain, which flips the "..." menu to video-context
-        # items (no Custom / edit path).
-        thumb_clicked = await self._tab.evaluate(
-            r"""
-            (() => {
-                const want = "__POST_ID__";
-                const imgs = Array.from(document.querySelectorAll('img'))
-                    .filter(i => {
-                        const r = i.getBoundingClientRect();
-                        if (r.width < 30 || r.width > 120) return false;
-                        return (i.currentSrc || i.src || '').includes(want);
-                    });
-                if (imgs.length === 0) return false;
-                let el = imgs[0];
-                while (el && el.tagName !== 'BUTTON' && el.parentElement) {
-                    el = el.parentElement;
-                }
-                if (!el) return false;
-                const r = el.getBoundingClientRect();
-                const x = r.x + r.width/2, y = r.y + r.height/2;
-                const o = {bubbles: true, cancelable: true, clientX: x, clientY: y,
-                           pointerType: 'mouse', button: 0, pointerId: 1, isPrimary: true};
-                el.dispatchEvent(new PointerEvent('pointerdown', o));
-                el.dispatchEvent(new MouseEvent('mousedown', o));
-                el.dispatchEvent(new PointerEvent('pointerup', o));
-                el.dispatchEvent(new MouseEvent('mouseup', o));
-                el.dispatchEvent(new MouseEvent('click', o));
-                return true;
-            })()
-            """.replace("__POST_ID__", post_id)
-        )
-        if thumb_clicked:
-            await asyncio.sleep(1.5 * d)
-        else:
-            logger.warning(
-                "[edit_image] Could not find thumbnail matching post_id %s in "
-                "the left column. If the 'Custom' menuitem is missing, the "
-                "post page is stuck on video view — prime the sid cache via "
-                "any other generation call so the direct REST path takes over.",
-                post_id,
-            )
-
-        # 2. Open 更多选项 (Radix — pointer dispatch required)
+        # 1. Open 更多选项 (Radix — pointer dispatch required)
         menu_opened = await self._tab.evaluate(
             r"""
             (() => {
@@ -2850,11 +2974,24 @@ class GrokClient(ResponseParser):
 
         images = list(captured_data["images"].values())
         return ImageEditResult(
-            post_id=post_id,
+            post_id=source_post_id or "",
             edit_prompt=edit_prompt,
             images=images,
             conversation_id=captured_data.get("conversation_id"),
         )
+
+    async def _edit_image_via_ui(
+        self, post_id: str, edit_prompt: str, timeout: int
+    ) -> ImageEditResult:
+        """UI fallback for edit_image when no x-statsig-id is cached.
+
+        Thin composition of :meth:`select_post` and :meth:`edit_current`.
+        Works on any chain depth since select_post defensively lands
+        the tab on post_id even when Grok's SPA redirects to a
+        descendant. See :meth:`edit_image` for the public entry point.
+        """
+        await self.select_post(post_id)
+        return await self.edit_current(edit_prompt, timeout=timeout, source_post_id=post_id)
 
     async def _upload_image(self, image_path: str | Path, timeout: int = 15) -> int:
         """Upload a local image to Grok Imagine (internal).
@@ -4434,14 +4571,14 @@ class GrokClient(ResponseParser):
             kind = next(iter(types))
 
             if kind == "post":
-                # img2vid — use first post source
+                # img2vid — use first post source. Explicit
+                # select_post + generate_video_from_current composition:
+                # select guarantees Grok shows post_id (correcting any
+                # SPA redirect to a descendant), then we generate from
+                # the currently-selected view. Keeping the wrapper shape
+                # matches the rest of the dict API while the underlying
+                # primitives stay independently usable.
                 post_id = sources[0][1]
-                # Known Grok behavior: clicking "制作视频" silently appends
-                # the source post to the user's favorites on every call,
-                # producing duplicates across batches. We only auto-revert
-                # when the caller opts in AND we can confirm the source
-                # was NOT favorited pre-call (otherwise revert risks
-                # removing a favorite the user placed themselves).
                 was_favorited = None
                 if preserve_fav:
                     was_favorited = await self._get_favorited_state(post_id)
@@ -4456,8 +4593,9 @@ class GrokClient(ResponseParser):
                         "pre-call — safe default). Hint fires once per client."
                     )
                     self._favorite_pollution_hinted = True
-                result = await self._create_video_via_ui(
-                    parent_post_id=post_id,
+                await self.select_post(post_id)
+                result = await self.generate_video_from_current(
+                    source_post_id=post_id,
                     preset=preset,
                     timeout=timeout,
                     adjustment_prompt=prompt if prompt else None,
@@ -4589,9 +4727,9 @@ class GrokClient(ResponseParser):
 
         return result
 
-    async def _create_video_via_ui(
+    async def generate_video_from_current(
         self,
-        parent_post_id: str,
+        source_post_id: str,
         preset: str = "normal",
         timeout: int = 300,
         stable_id: str | None = None,
@@ -4601,31 +4739,42 @@ class GrokClient(ResponseParser):
         aspect_ratio: str = "2:3",
         thumbnail_index: int | None = None,
     ) -> VideoGenerationResult:
-        """
-        Generate video by simulating UI button click (more reliable for anti-bot bypass).
+        """Generate a video from the image post currently selected on the tab.
 
-        This navigates to the post page, opens the settings gear menu to configure
-        video options, then triggers generation via the "制作视频" menu item.
+        Lower-level primitive: opens the settings gear menu to configure
+        video options (duration / resolution / aspect ratio), clicks
+        "制作视频" on the image overlay, optionally enters a prompt for
+        custom mode, and waits for the NDJSON generation response.
+
+        Does NOT navigate. Caller is responsible for selecting the
+        source image first via :meth:`select_post` — ``source_post_id``
+        is only used for result labeling, retry thumbnail-matching,
+        and the legacy ``stable_id`` reload path. If the tab is not on
+        ``source_post_id``'s view, the UI click either fails (button
+        not found → retried internally) or operates on the wrong post.
+
+        See :meth:`create_video` for the dict-API wrapper that composes
+        ``select_post + generate_video_from_current`` — use that for the
+        common case.
 
         Args:
-            parent_post_id: The image post ID to generate video from
-            preset: Video style preset - 'normal', 'fun', or 'spicy'
-            timeout: Max seconds to wait for video generation (default 300).
-                    Video generation typically takes 2-5 minutes for img2vid mode.
+            source_post_id: The image post UUID to generate from. Used
+                for result metadata (``source_post_id`` / ``parent_post_id``)
+                and as the anchor for internal retry-recovery if Grok's
+                UI drifts mid-flow.
+            preset: 'normal', 'fun', or 'spicy'.
+            timeout: Max seconds to wait for the generation response.
             stable_id: Optional custom stable_id to inject before generation.
-                      Use generate_stable_id() to create one. Controls A/B style bucket.
-            adjustment_prompt: Video generation prompt (same as typing in Grok UI after image).
-                      Can include any instructions: camera movement, character actions, or both.
-                      Examples: "Static Shot", "she turns her head", "camera zooms in while he walks".
-                      When provided, overrides preset and sets result.mode='custom'.
-            duration: Video duration in seconds (default 10). Options: 6, 10.
-            resolution: Video resolution (default "720p"). Options: "480p", "720p".
-            aspect_ratio: Video aspect ratio (default "2:3").
-                         Options: "2:3", "3:2", "1:1", "9:16", "16:9".
+            adjustment_prompt: Video prompt (triggers 'custom' mode). None
+                keeps Grok's default preset mode.
+            duration: 6 or 10 seconds.
+            resolution: "480p" or "720p".
+            aspect_ratio: "2:3" / "3:2" / "1:1" / "9:16" / "16:9".
+            thumbnail_index: If the source has multiple images, pick one
+                by index before generating.
 
         Returns:
-            VideoGenerationResult with video_id (may be empty if moderated).
-            When adjustment_prompt is used, result.mode will be 'custom'.
+            VideoGenerationResult with video_id (empty if moderated).
         """
         import asyncio
 
@@ -4634,6 +4783,11 @@ class GrokClient(ResponseParser):
         # Inject custom stable_id if provided
         if stable_id:
             await self.set_stable_id(stable_id, reload_page=False)
+
+        # Internal alias to keep the body untouched. This is the post we
+        # anchor result metadata and retry-recovery to; navigation to it
+        # happened in the caller via select_post.
+        parent_post_id = source_post_id
 
         # Normalize preset to string
         preset_str = str(preset).lower()
@@ -4645,9 +4799,6 @@ class GrokClient(ResponseParser):
             "spicy": "Spicy",
         }
         preset_menu_text = preset_menu_map.get(preset_str, "Normal")
-
-        # Navigate to the post page (this reloads with our stable_id)
-        await self._navigate_to_post(parent_post_id)
 
         # Set up network monitoring to capture the response and statsig_id
         await self._tab.send(cdp.network.enable())
@@ -4696,53 +4847,6 @@ class GrokClient(ResponseParser):
 
             await switch_to_image_view(self._tab, delay=self._ui_delay)
             await select_thumbnail(self._tab, thumbnail_index, delay=self._ui_delay)
-
-        # 2026-04 UI: when an image post already has video children,
-        # navigating to /imagine/post/<image_id> silently redirects to
-        # the tail video's view (the URL mutates, 制作视频 button
-        # disappears, <video> element takes over). The left column still
-        # shows a thumbnail of the root image — click it to restore the
-        # image view with 制作视频 overlay button. This is the same
-        # pattern edit_image uses; any image post with descendants
-        # needs this nudge before we can find the generate button.
-        current_url = await self._tab.evaluate("location.href")
-        if parent_post_id not in str(current_url):
-            logger.debug(
-                "[_create_video_via_ui] URL redirected to descendant "
-                "(%s → %s); clicking image thumbnail to restore image view",
-                parent_post_id,
-                current_url,
-            )
-            # Find & click the left-column thumbnail whose src references
-            # the parent_post_id. Dispatch a full pointer-event sequence
-            # (Radix-style click semantics — .click() alone no-ops here).
-            restored = await self._tab.evaluate(
-                r"""
-                (() => {
-                    const want = "__POST_ID__";
-                    const imgs = Array.from(document.querySelectorAll('img'))
-                        .filter(i => (i.currentSrc||i.src||'').includes(want));
-                    if (imgs.length === 0) return 'no-thumb';
-                    let el = imgs[0];
-                    while (el && el.tagName !== 'BUTTON' && el.parentElement) {
-                        el = el.parentElement;
-                    }
-                    if (!el) return 'no-button';
-                    const r = el.getBoundingClientRect();
-                    const x = r.x + r.width/2, y = r.y + r.height/2;
-                    const o = {bubbles:true, cancelable:true, clientX:x, clientY:y,
-                               pointerType:'mouse', button:0, pointerId:1, isPrimary:true};
-                    el.dispatchEvent(new PointerEvent('pointerdown', o));
-                    el.dispatchEvent(new MouseEvent('mousedown', o));
-                    el.dispatchEvent(new PointerEvent('pointerup', o));
-                    el.dispatchEvent(new MouseEvent('mouseup', o));
-                    el.dispatchEvent(new MouseEvent('click', o));
-                    return 'ok';
-                })()
-                """.replace("__POST_ID__", parent_post_id)
-            )
-            if restored == "ok":
-                await asyncio.sleep(1.5)
 
         # --- New UI: Settings gear menu ---
         # The settings gear (button[aria-label="设置"]) opens a Radix dropdown containing:
@@ -4939,9 +5043,9 @@ class GrokClient(ResponseParser):
                     # with moderated outputs). Force a hard reload and try
                     # one more time before giving up.
                     logger.warning(
-                        "[_create_video_via_ui] '制作视频' not found after "
-                        "%d retries — forcing hard page_reload as last-ditch "
-                        "and retrying once.",
+                        "[generate_video_from_current] '制作视频' not found "
+                        "after %d retries — forcing hard page_reload as "
+                        "last-ditch and retrying once.",
                         max_click_retries,
                     )
                     try:
