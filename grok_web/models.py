@@ -576,8 +576,37 @@ class VideoGenerationResult(BaseModel):
         return f"https://grok.com/imagine/post/{self.parent_post_id}"
 
     @property
+    def is_complete(self) -> bool:
+        """True iff Grok reported progress=100 before we returned.
+
+        A ``False`` value can mean either *failed* or *still in-flight*
+        — discriminate with :attr:`in_progress` / :attr:`moderated`.
+        """
+        return self.progress == 100
+
+    @property
+    def in_progress(self) -> bool:
+        """True iff generation is still running on Grok's side.
+
+        We hit our polling timeout before progress reached 100, but
+        ``video_id`` was already assigned and nothing was moderated —
+        the video should finish on Grok's side. Use
+        :meth:`GrokClient.wait_for_video_completion` to resume polling,
+        or re-query via :meth:`GrokClient.get_post_details` later.
+        """
+        return bool(self.video_id) and self.progress < 100 and not self.moderated
+
+    @property
     def success(self) -> bool:
-        """Check if video was generated successfully (not moderated)."""
+        """True iff the video finished rendering AND was not moderated.
+
+        Returns ``False`` for moderated results AND for results where we
+        timed out while generation was still in-flight (``progress < 100``
+        but ``video_id`` already assigned). Check :attr:`in_progress` if
+        you need to distinguish "failed / moderated" from "still going —
+        we gave up early". See :meth:`GrokClient.wait_for_video_completion`
+        to recover the latter without re-submitting.
+        """
         return self.progress == 100 and not self.moderated
 
 
@@ -670,8 +699,34 @@ class VideoExtendResult(BaseModel):
         return f"https://grok.com/imagine/post/{self.source_video_id}"
 
     @property
+    def is_complete(self) -> bool:
+        """True iff Grok reported progress=100 before we returned.
+
+        A ``False`` value can mean either *failed* or *still in-flight*
+        — discriminate with :attr:`in_progress` / :attr:`moderated`.
+        """
+        return self.progress == 100
+
+    @property
+    def in_progress(self) -> bool:
+        """True iff the extension is still running on Grok's side.
+
+        We hit our polling timeout before progress reached 100, but
+        ``video_id`` was already assigned and nothing was moderated.
+        Resume polling via
+        :meth:`GrokClient.wait_for_video_completion` (pass ``video_id``).
+        """
+        return bool(self.video_id) and self.progress < 100 and not self.moderated
+
+    @property
     def success(self) -> bool:
-        """Check if video was extended successfully."""
+        """True iff the extension finished AND was not moderated.
+
+        Returns ``False`` for moderated results AND for partial results
+        where we timed out while generation was still in-flight. Check
+        :attr:`in_progress` to distinguish, and use
+        :meth:`GrokClient.wait_for_video_completion` to resume.
+        """
         return self.progress == 100 and not self.moderated
 
 

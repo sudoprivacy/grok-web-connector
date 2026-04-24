@@ -59,7 +59,16 @@ PARAMS: dict[str, dict[str, Any]] = {
         "type": "str",
     },
     "timeout": {
-        "desc": "Max seconds to wait for generation.",
+        "desc": (
+            "Max seconds to wait for generation. Per-endpoint defaults: "
+            "create_image / edit_image = 300 (image gen is fast); "
+            "create_video / extend_video = 600 (img2vid under queue "
+            "pressure or NSFW routing regularly needs >300s). If "
+            "create_video / extend_video returns with ``in_progress=True`` "
+            "you can resume polling via "
+            "``client.wait_for_video_completion(video_id, timeout=N)`` "
+            "without re-submitting the job."
+        ),
         "type": "int",
         "default": 300,
     },

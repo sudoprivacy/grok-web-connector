@@ -895,6 +895,105 @@ class GrokClient(ResponseParser):
         videos = post.get("videos") or []
         return bool(videos and _is_moderated_obj(videos[0]))
 
+    async def wait_for_video_completion(
+        self,
+        video_id: str,
+        timeout: int = 300,
+        poll_interval: float = 5.0,
+    ) -> VideoGenerationResult:
+        """Poll Grok's REST until an in-flight video finishes rendering.
+
+        Use this when :meth:`create_video` or :meth:`extend_video`
+        returned a result with ``in_progress == True`` — i.e. the local
+        polling timeout fired before Grok finished, but the video is
+        still being generated on the server. Avoids re-submitting the
+        whole job (which would burn another queue slot + statsig quota).
+
+        Polls ``/rest/media/post/get`` every ``poll_interval`` seconds,
+        treating a populated ``mediaUrl`` without the moderated-placeholder
+        thumbnail as success.
+
+        Args:
+            video_id: UUID from ``VideoGenerationResult.video_id`` /
+                ``VideoExtendResult.video_id``.
+            timeout: Max seconds to poll (default 300).
+            poll_interval: Seconds between polls (default 5.0).
+
+        Returns:
+            A synthesized ``VideoGenerationResult`` with ``progress=100``
+            and the authoritative ``duration_s`` / ``parent_post_id`` /
+            ``source_post_id`` from the finished post.
+
+        Raises:
+            GrokAPIError: If Grok moderated the video post-render, or if
+                polling exceeded ``timeout`` before completion.
+
+        Example:
+            >>> result = await client.create_video({"images": [...], "prompt": "..."})
+            >>> if result.in_progress:
+            ...     # Server was still generating when we gave up — wait it out.
+            ...     result = await client.wait_for_video_completion(
+            ...         result.video_id, timeout=600
+            ...     )
+            >>> assert result.is_complete and not result.moderated
+        """
+        import asyncio as _asyncio
+
+        deadline = _asyncio.get_event_loop().time() + timeout
+        last_post: dict = {}
+        while _asyncio.get_event_loop().time() < deadline:
+            try:
+                data = await self._api_request("POST", MEDIA_POST_GET_ENDPOINT, {"id": video_id})
+            except GrokNotFoundError:
+                raise GrokAPIError(
+                    f"wait_for_video_completion: video {video_id} not found "
+                    "(deleted / wrong id / not yet persisted)"
+                ) from None
+            except Exception as e:
+                logger.debug(f"wait_for_video_completion: poll error, retrying: {e}")
+                await _asyncio.sleep(poll_interval)
+                continue
+
+            post = data.get("post", data)
+            last_post = post
+            thumb = post.get("thumbnailImageUrl") or ""
+            if MODERATED_THUMBNAIL_UUID in thumb:
+                raise GrokAPIError(
+                    f"Video {video_id} was moderated post-render "
+                    "(thumbnail matches moderated-placeholder UUID)."
+                )
+            if post.get("mediaUrl"):
+                # Populated media URL = render complete, not moderated.
+                duration_s = post.get("videoDuration")
+                try:
+                    duration_s_int = int(duration_s) if duration_s is not None else None
+                except (TypeError, ValueError):
+                    duration_s_int = None
+                parent = post.get("originalPostId") or video_id
+                return VideoGenerationResult(
+                    video_id=video_id,
+                    source_post_id=parent,
+                    parent_post_id=parent,
+                    moderated=False,
+                    progress=100,
+                    mode=post.get("mode") or "normal",
+                    model_name=post.get("modelName"),
+                    image_reference=None,
+                    conversation_id=None,
+                    statsig_id=None,
+                    duration_s=duration_s_int,
+                )
+            await _asyncio.sleep(poll_interval)
+
+        # Timed out. Report best-known state.
+        raise GrokAPIError(
+            f"wait_for_video_completion: video {video_id} did not finish "
+            f"within {timeout}s (last seen: mediaUrl="
+            f"{last_post.get('mediaUrl')!r}). Still in flight on Grok's "
+            "side; either call wait_for_video_completion again with a "
+            "larger timeout, or re-check later via get_post_details."
+        )
+
     async def get_asset_file_size(self, asset_url: str) -> int:
         """Get file size of a Grok asset via HEAD request."""
         self._validate_asset_url(asset_url)
@@ -1758,7 +1857,7 @@ class GrokClient(ResponseParser):
         seed_start: float | None = None,
         duration: str | None = None,
         prompt: str | None = None,
-        timeout: int = 300,
+        timeout: int = 600,
     ) -> VideoExtendResult:
         """Extend an existing video via the post's "..." menu.
 
@@ -4196,7 +4295,14 @@ class GrokClient(ResponseParser):
 
         images = p.get("images", [])
         prompt = p.get("prompt", "")
-        timeout = p.get("timeout", 300)
+        # Video gen defaults to 600s (not the shared schema default of 300).
+        # img2vid under NSFW/queue pressure regularly hits progress<100 at
+        # 300s, which returned a confusing partial result; 600 absorbs
+        # those naturally. Callers that need shorter can still pass
+        # ``timeout``; callers still hitting timeouts can use
+        # ``wait_for_video_completion(video_id, timeout=...)`` on the
+        # returned ``in_progress`` result to resume without re-submitting.
+        timeout = p.get("timeout", 600)
 
         # Normalize duration to int
         duration = p.get("duration", "10s")
