@@ -2264,7 +2264,20 @@ class GrokClient(ResponseParser):
                 gen_result.video_id
             )
 
-        # Restore favorite state only when provably safe.
+        # Phantom detection: Grok occasionally returns a structurally
+        # valid streamingVideoGenerationResponse (with a UUID-formatted
+        # videoId and moderated=False) even though no real extension
+        # occurred — the "new" post just echoes the source's metadata
+        # and eventually becomes unfetchable. Observed on specific
+        # prompt+source combinations where the pipeline silently drops
+        # the generation upstream of the usual moderation verdict.
+        #
+        # Signal: a real extension always grows chain-coord duration
+        # past the source's own tail (which we already computed as
+        # video_duration_hint). If the new post reports
+        # cumulative_duration_s <= source_tail, the response was fake.
+        # Restore favorite state BEFORE we raise so retry loops don't
+        # leave the user's account in a weird state.
         if preserve_source_favorite_state and was_source_favorited is False:
             try:
                 await self.unfavorite_post(video_id)
@@ -2272,6 +2285,27 @@ class GrokClient(ResponseParser):
                 logger.warning(
                     f"[extend_video] could not restore favorite state for {video_id}: {_e}"
                 )
+        if (
+            not gen_result.moderated
+            and gen_result.video_id
+            and video_duration_hint is not None
+            and cumulative_duration_s is not None
+            and cumulative_duration_s <= video_duration_hint + 0.01  # float slack
+        ):
+            from .exceptions import GrokGenerationFailedError
+
+            raise GrokGenerationFailedError(
+                f"extend_video: phantom response — Grok returned video_id "
+                f"{gen_result.video_id!r} with moderated=False but "
+                f"cumulative_duration_s ({cumulative_duration_s:.2f}s) did "
+                f"not grow past the source's own tail "
+                f"({video_duration_hint:.2f}s). No real extension occurred; "
+                "Grok silently dropped the generation upstream of the "
+                "usual moderation verdict. The returned video_id will "
+                "typically become unfetchable within seconds. Retrying "
+                "with the same prompt may reproduce; vary the prompt "
+                "phrasing or seed_start to recover."
+            )
 
         # Recover seed drag metadata stashed by extend_current.
         seed_actual = gen_result.__dict__.get("_extend_seed_actual")

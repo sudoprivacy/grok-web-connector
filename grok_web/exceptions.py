@@ -33,6 +33,27 @@ class GrokConfigError(GrokError):
     pass
 
 
+class GrokGenerationFailedError(GrokAPIError):
+    """Raised when Grok's response looks structurally valid but the
+    generation did not actually produce a real post.
+
+    Examples:
+    - Response contains a ``streamingVideoGenerationResponse`` block,
+      including a valid-format ``videoId``, but no actual extension
+      happened (``cumulative_duration`` didn't grow past the source's
+      chain tail). Grok's server probably pre-filtered the prompt /
+      reference frame before the generation pipeline produced output.
+    - Returned ``video_id`` is not fetchable via
+      ``/rest/media/post/get`` — Grok never persisted it.
+
+    Callers should treat this as retryable, but with the understanding
+    that the same prompt may reproduce the failure. Varying the prompt
+    phrasing or seed usually clears it.
+    """
+
+    pass
+
+
 class GrokRateLimitError(GrokAPIError):
     """
     Raised when Grok API returns "Too many requests" (error code 8).

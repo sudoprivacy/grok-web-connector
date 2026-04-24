@@ -20,6 +20,7 @@ from .exceptions import (
     GrokAuthError,
     GrokConfigError,
     GrokError,
+    GrokGenerationFailedError,
     GrokNotFoundError,
     GrokRateLimitError,
 )
@@ -154,6 +155,7 @@ __all__ = [
     "GrokNotFoundError",
     "GrokConfigError",
     "GrokRateLimitError",
+    "GrokGenerationFailedError",
     # Auth utilities
     "load_cookies",
     "save_cookies",
