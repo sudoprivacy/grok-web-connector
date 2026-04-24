@@ -237,6 +237,98 @@ class AuthManager:
             print("ℹ️ No config file to remove")
             return False
 
+    def refresh_cookies(
+        self,
+        sso: str | None = None,
+        sso_rw: str | None = None,
+        userid: str | None = None,
+        cf_clearance: str | None = None,
+        interactive: bool = True,
+    ) -> bool:
+        """Refresh saved cookies without driving an automation browser.
+
+        Useful when the automation Chrome is Turnstile-blocked and
+        cannot complete the interactive ``setup`` flow. User opens
+        their regular browser → signs in at grok.com → copies each
+        cookie value from DevTools (Application → Cookies), and pastes
+        them here.
+
+        Any argument left as None (and ``interactive=True``) prompts
+        the user; leaving the prompt blank keeps whatever's currently
+        in the config. So the common "only cf_clearance expired" case
+        is one non-blank paste + three empty enters.
+
+        Sanity warnings (non-fatal):
+        - ``sso`` / ``sso-rw`` usually look like JWTs (``a.b.c``).
+        - ``x-userid`` is a UUID.
+        - ``cf_clearance`` is usually >50 chars.
+
+        Non-interactive mode (``interactive=False``) requires at least
+        one non-None argument; any unset field retains its existing
+        saved value (no prompting, no clearing).
+        """
+        import re
+
+        existing: dict[str, str] = {}
+        if self.config_path.exists():
+            try:
+                with open(self.config_path) as f:
+                    existing = (json.load(f) or {}).get("cookies", {}) or {}
+            except Exception:
+                pass
+
+        def _resolve(field: str, new: str | None, current: str) -> str:
+            if new is not None:
+                return new.strip()
+            if not interactive:
+                return current
+            preview = (current[:20] + "…") if current else "<unset>"
+            raw = input(f"  {field} [{preview}]: ").strip()
+            return raw if raw else current
+
+        # Resolve each field (prompt or keep).
+        new_sso = _resolve("sso", sso, existing.get("sso", ""))
+        new_sso_rw = _resolve("sso-rw", sso_rw, existing.get("sso-rw", ""))
+        new_userid = _resolve("x-userid", userid, existing.get("x-userid", ""))
+        new_cf = _resolve("cf_clearance", cf_clearance, existing.get("cf_clearance", ""))
+
+        # Sanity checks (warn but don't fail — Grok formats evolve).
+        if new_sso and new_sso.count(".") != 2:
+            print(f"  ⚠ sso doesn't look like a JWT (expected a.b.c, got {len(new_sso)} chars)")
+        if new_sso_rw and new_sso_rw.count(".") != 2:
+            print(
+                f"  ⚠ sso-rw doesn't look like a JWT (expected a.b.c, got {len(new_sso_rw)} chars)"
+            )
+        uuid_re = re.compile(
+            r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I
+        )
+        if new_userid and not uuid_re.match(new_userid):
+            print(f"  ⚠ x-userid doesn't look like a UUID (got {len(new_userid)} chars)")
+        if new_cf and len(new_cf) < 30:
+            print(f"  ⚠ cf_clearance is shorter than expected ({len(new_cf)} chars, usually >50)")
+
+        required = {
+            "sso": new_sso,
+            "sso-rw": new_sso_rw,
+            "x-userid": new_userid,
+            "cf_clearance": new_cf,
+        }
+        missing = [k for k, v in required.items() if not v]
+        if missing:
+            print(f"❌ Missing required cookies: {missing}")
+            return False
+
+        self._save_cookies(
+            {
+                "sso": new_sso,
+                "sso-rw": new_sso_rw,
+                "x-userid": new_userid,
+                "cf_clearance": new_cf,
+            }
+        )
+        print(f"✅ Cookies written to: {self.config_path}")
+        return True
+
 
 def main():
     """CLI entry point."""
@@ -245,9 +337,11 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python -m grok_web.auth_manager setup     # Interactive login
-  python -m grok_web.auth_manager status    # Check auth status
-  python -m grok_web.auth_manager clear     # Clear saved auth
+  python -m grok_web.auth_manager setup             # Interactive login via automation browser
+  python -m grok_web.auth_manager status            # Check auth status
+  python -m grok_web.auth_manager clear             # Clear saved auth
+  python -m grok_web.auth_manager refresh-cookies   # Paste cookies from your regular browser
+  python -m grok_web.auth_manager refresh-cookies --cf-clearance "<value>"
 """,
     )
 
@@ -272,6 +366,38 @@ Examples:
 
     # clear
     subparsers.add_parser("clear", help="Clear saved authentication")
+
+    # refresh-cookies — paste cookies from a non-automation browser
+    # (primary remedy when CF Turnstile flags the automation Chrome).
+    refresh_parser = subparsers.add_parser(
+        "refresh-cookies",
+        help=(
+            "Paste new cookie values without launching an automation "
+            "browser (use when CF Turnstile blocks the setup flow)."
+        ),
+    )
+    refresh_parser.add_argument(
+        "--sso", default=None, help="New sso cookie value (JWT); omit to prompt / keep"
+    )
+    refresh_parser.add_argument(
+        "--sso-rw", default=None, help="New sso-rw cookie value (JWT); omit to prompt / keep"
+    )
+    refresh_parser.add_argument(
+        "--userid", default=None, help="New x-userid value (UUID); omit to prompt / keep"
+    )
+    refresh_parser.add_argument(
+        "--cf-clearance",
+        default=None,
+        help="New cf_clearance value; omit to prompt / keep",
+    )
+    refresh_parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help=(
+            "Do not prompt for unset fields; keep their existing values. "
+            "Useful in scripts that only refresh cf_clearance."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -316,6 +442,27 @@ Examples:
 
     elif args.command == "clear":
         auth.clear_auth()
+
+    elif args.command == "refresh-cookies":
+        print()
+        print("🔐 Refresh Grok cookies (paste from your regular browser)")
+        print("=" * 60)
+        print("  In your normal Chrome/Firefox (NOT the automation one):")
+        print("    1. Visit https://grok.com and sign in if needed")
+        print("    2. DevTools → Application (or Storage) → Cookies → https://grok.com")
+        print("    3. Copy each cookie's Value column")
+        print()
+        print("  Press ENTER at a prompt to keep the currently-saved value.")
+        print()
+        ok = auth.refresh_cookies(
+            sso=args.sso,
+            sso_rw=getattr(args, "sso_rw", None),
+            userid=args.userid,
+            cf_clearance=getattr(args, "cf_clearance", None),
+            interactive=not args.non_interactive,
+        )
+        if not ok:
+            exit(1)
 
     else:
         parser.print_help()

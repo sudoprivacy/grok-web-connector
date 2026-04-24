@@ -411,11 +411,27 @@ class GrokClient(ResponseParser):
             )
             if cf_present:
                 raise GrokAuthError(
-                    "Cloudflare challenge detected but this installation of "
-                    "ai-dev-browser (v0.8.0+) no longer ships cloudflare_verify. "
-                    "Pass the challenge manually in the Chrome window, then "
-                    "retry get_client(). If you have the option, downgrade "
-                    "ai-dev-browser to <0.8 for automatic handling."
+                    "Cloudflare challenge detected on grok.com. The automation "
+                    "Chrome can pass CF but Turnstile can take multiple tries "
+                    "(CF scoring varies by IP / session freshness / load).\n\n"
+                    "Remedies, in order:\n"
+                    "  1. Click the Turnstile widget manually in the Chrome "
+                    "window and give it 30-60s. If it keeps retrying, try a "
+                    "different network or wait a few minutes — this is usually "
+                    "transient.\n"
+                    "  2. If (1) doesn't clear it (or you want to bypass the "
+                    "widget entirely), paste a fresh cf_clearance from your "
+                    "regular browser:\n"
+                    "     a. Open grok.com in your normal Chrome/Firefox.\n"
+                    "     b. DevTools → Application → Cookies → https://grok.com.\n"
+                    "     c. Copy the cf_clearance Value column.\n"
+                    "     d. Run:\n"
+                    "          python -m grok_web.auth_manager refresh-cookies \\\n"
+                    "              --cf-clearance '<paste_value>'\n"
+                    "     e. Retry get_client(). sso / sso-rw / x-userid are kept.\n\n"
+                    "  If sso / sso-rw also expired (check `python -m grok_web."
+                    "auth_manager status`), run refresh-cookies without flags "
+                    "for an interactive prompt to paste all four."
                 )
 
         # Install passive x-statsig-id snitch. The frontend rotates this
