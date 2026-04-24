@@ -189,6 +189,24 @@ PARAMS: dict[str, dict[str, Any]] = {
         "type": "bool",
         "default": False,
     },
+    "branch_from_source": {
+        "desc": (
+            "For extend_video / create_video({'images':['video:...']}): "
+            "pin the seed at the source video's own chain tail so "
+            "consecutive calls on the same source produce N parallel "
+            "branches instead of a serial chain-walk. Without this "
+            "(or without an explicit seed_start), 'tail-extend' follows "
+            "whatever the chain's current tail is — which moves with "
+            "each call, so a naive fanout loop silently serializes. "
+            "Equivalent to computing "
+            "videoExtensionStartTime + videoDuration from "
+            "get_post_details(source) and passing it as seed_start, "
+            "but without the extra round-trip. Mutually exclusive with "
+            "seed_start."
+        ),
+        "type": "bool",
+        "default": False,
+    },
 }
 
 # =============================================================================
@@ -208,6 +226,7 @@ VIDEO_KEYS = [
     "wait_for_video",
     "verify_final",
     "preserve_source_favorite_state",
+    "branch_from_source",
 ]
 
 # Keys accepted by extend_video() — keyword args rather than a dict, but
@@ -219,6 +238,7 @@ EXTEND_KEYS = [
     "prompt",
     "timeout",
     "preserve_source_favorite_state",
+    "branch_from_source",
 ]
 
 IMAGE_KEYS = [

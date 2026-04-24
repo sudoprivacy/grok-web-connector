@@ -1887,6 +1887,7 @@ class GrokClient(ResponseParser):
         prompt: str | None = None,
         timeout: int = 600,
         preserve_source_favorite_state: bool = False,
+        branch_from_source: bool = False,
     ) -> VideoExtendResult:
         """Extend an existing video via the post's "..." menu.
 
@@ -1897,6 +1898,19 @@ class GrokClient(ResponseParser):
         position (this triggers 从框架扩展 mode in the UI) and then submits;
         otherwise the classic tail-extend path is used.
 
+        **Fanout trap** — ``seed_start=None`` means "chain tail-extend",
+        which appends to whatever the *chain's* current tail is, NOT
+        ``video_id``'s. Consecutive calls on the same ``video_id`` walk
+        down the chain (each builds on the previous call's output), so
+        a naive ``for _ in range(N): extend_video(video_id=X)`` loop
+        produces a serial extension, not N parallel branches. To fan
+        out N branches off the same source, pass
+        ``branch_from_source=True`` — the library pins the seed at X's
+        own tail for every iteration. (Equivalent to computing
+        ``videoExtensionStartTime + videoDuration`` from
+        ``get_post_details(video_id)`` and passing it as ``seed_start``
+        yourself — the kwarg just removes the extra round-trip.)
+
         Args (keyword-only, all optional except video_id). Per-key
         descriptions below are generated from
         ``grok_web.schema.PARAMS`` (SSOT).
@@ -1905,14 +1919,20 @@ class GrokClient(ResponseParser):
 
         Returns:
             VideoExtendResult with new video_id, source linkage, moderation
-            verdict, and — when ``seed_start`` was passed —
+            verdict, and — when ``seed_start`` was passed or computed from
+            ``branch_from_source`` —
             ``seed_start_requested`` / ``seed_start_actual`` /
             ``seed_start_displayed`` so callers can verify where the drag
             landed.
 
         Raises:
+            ValueError: If ``branch_from_source=True`` is combined with an
+                explicit ``seed_start`` (they define the same thing —
+                pick one).
             GrokAPIError: If the menu item is missing, the seed drag drifts
-                outside ``SEED_DRIFT_TOLERANCE`` (1.0s), or generation fails.
+                outside ``SEED_DRIFT_TOLERANCE`` (1.0s),
+                ``branch_from_source=True`` but the source has no
+                ``videoDuration`` metadata, or generation fails.
         """
         import asyncio
         import random
@@ -1943,6 +1963,44 @@ class GrokClient(ResponseParser):
         # seconds the filmstrip covers. Grok's <video> element stays at
         # readyState 0 on the post page (HLS, no autoload), so we can't
         # rely on v.duration.
+        # branch_from_source resolves to a concrete seed_start at the
+        # source's own tail (chain coords). Folds into the seed_start
+        # path below — the library-side drag is identical, we're just
+        # removing the caller's computation step and the ambiguity
+        # about which node's "tail" we mean.
+        if branch_from_source:
+            if seed_start is not None:
+                raise ValueError(
+                    "extend_video: branch_from_source=True conflicts with "
+                    "seed_start=<float>. They define the same thing — "
+                    "pick one. branch_from_source pins the seed at the "
+                    "source's own chain tail (for fanout loops off a "
+                    "fixed source); seed_start=<float> places it at an "
+                    "explicit timestamp."
+                )
+            try:
+                details = await self.get_post_details(video_id)
+            except Exception as e:
+                raise GrokAPIError(
+                    f"extend_video(branch_from_source=True): could not "
+                    f"fetch post details for {video_id}: {e}"
+                ) from e
+            raw = details.raw_data or {}
+            post = raw.get("post", raw)
+            own = post.get("videoDuration")
+            start = post.get("videoExtensionStartTime") or 0
+            if own is None:
+                raise GrokAPIError(
+                    f"extend_video(branch_from_source=True): source "
+                    f"{video_id} has no videoDuration in post metadata — "
+                    "cannot compute tail. Use explicit seed_start."
+                )
+            seed_start = float(start) + float(own)
+            logger.debug(
+                f"extend_video: branch_from_source pinned seed_start="
+                f"{seed_start:.2f}s (start={start}, own={own})"
+            )
+
         video_duration_hint: float | None = None
         if seed_start is not None:
             try:
@@ -4467,6 +4525,7 @@ class GrokClient(ResponseParser):
                     prompt=prompt if prompt else None,
                     timeout=timeout,
                     preserve_source_favorite_state=preserve_fav,
+                    branch_from_source=p.get("branch_from_source", False),
                 )
                 # extend_video returns VideoExtendResult; adapt its fields
                 # so callers receive a normal VideoGenerationResult. Seed
