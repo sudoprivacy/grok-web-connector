@@ -56,7 +56,12 @@ class GrokGenerationFailedError(GrokAPIError):
 
 class GrokRateLimitError(GrokAPIError):
     """
-    Raised when Grok API returns "Too many requests" (error code 8).
+    Raised when Grok rate-limits or anti-abuse-throttles the session.
+
+    Detection sources (any one):
+    - NDJSON error with code 8 / "too many requests" text
+    - Visible UI banner matching rate-limit patterns
+      ("请稍后" / "稍候" / "频繁" / "rate limit" / "too many" / "try again later")
 
     IMPORTANT: Rate limits are GLOBAL, not per-request!
 
@@ -78,6 +83,36 @@ class GrokRateLimitError(GrokAPIError):
             # Stop all workers, wait globally
             await asyncio.sleep(600)  # Wait 10 minutes
             # Or wait until next hour if near boundary
+    """
+
+    pass
+
+
+class GrokQuotaExceededError(GrokRateLimitError):
+    """Raised when the session hits a daily / billing-period quota limit.
+
+    Distinct from :class:`GrokRateLimitError` (transient throttle) —
+    quota errors mean this account is done generating until the next
+    reset window (typically 24 hours). Do NOT retry on a backoff loop;
+    stop the run and wait for the quota cycle.
+
+    Detection: UI banners matching patterns like "今日生成已达上限",
+    "daily limit", "quota exceeded".
+
+    Inherits from :class:`GrokRateLimitError` so code that catches the
+    parent still handles this; catch :class:`GrokQuotaExceededError`
+    specifically when you want "stop, don't retry" semantics.
+
+    Example:
+        try:
+            result = await client.extend_video(...)
+        except GrokQuotaExceededError:
+            # Hard stop — retrying won't help for ~24h
+            logger.error("Quota exceeded; aborting batch")
+            return
+        except GrokRateLimitError:
+            # Soft throttle — back off and retry later
+            await asyncio.sleep(600)
     """
 
     pass

@@ -22,6 +22,7 @@ from .exceptions import (
     GrokError,
     GrokGenerationFailedError,
     GrokNotFoundError,
+    GrokQuotaExceededError,
     GrokRateLimitError,
 )
 from .models import (
@@ -155,6 +156,7 @@ __all__ = [
     "GrokNotFoundError",
     "GrokConfigError",
     "GrokRateLimitError",
+    "GrokQuotaExceededError",
     "GrokGenerationFailedError",
     # Auth utilities
     "load_cookies",

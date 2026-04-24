@@ -1036,6 +1036,57 @@ class GrokClient(ResponseParser):
         await self._api_request("POST", MEDIA_POST_UNLIKE_ENDPOINT, {"id": post_id})
         return True
 
+    async def _scan_for_rate_limit_banner(self) -> tuple[str, str] | None:
+        """Scan visible toasts / alerts for Grok rate-limit or quota text.
+
+        Grok's UI surfaces rate-limiting and quota-exhaustion via
+        transient toast banners in ``[role="status"]`` /
+        ``[role="alert"]`` / ``[aria-live]`` regions. The underlying
+        NDJSON response in these cases OFTEN comes back with
+        ``moderated=true`` and NO rate-limit error code — so without a
+        DOM-level signal, callers see a flood of "moderated" results
+        and burn their retry budget on what's actually throttling.
+
+        Returns ``(category, text)`` where category is
+        ``"quota_exceeded"`` (hard stop, don't retry today) or
+        ``"rate_limit"`` (transient, backoff + retry), or ``None`` if no
+        matching banner is currently visible.
+        """
+        # JS returns JSON.stringify-ed dict (or "null"). Plain-dict returns
+        # from tab.evaluate come back as a CDP RemoteObject preview shape
+        # ([[key, {type,value}], ...]) which is awkward to parse — stringifying
+        # in JS and loading in Python is the sturdy path.
+        raw = await self._tab.evaluate(
+            r"""
+            JSON.stringify((() => {
+                const QUOTA_RE = /(daily\s*limit|quota\s*exceeded|quota\s*used|今日.*上限|已达.*上限|用尽|额度.*耗尽|daily\s*quota)/i;
+                const RATE_RE = /(rate\s*limit|too\s*many|try\s*again\s*later|slow\s*down|请稍后|稍候|频繁|限流|限制|throttl)/i;
+                const nodes = document.querySelectorAll('[role="status"], [role="alert"], [aria-live]');
+                for (const n of nodes) {
+                    const r = n.getBoundingClientRect();
+                    if (r.width <= 0 || r.height <= 0) continue;
+                    const t = (n.innerText || '').trim();
+                    if (!t) continue;
+                    if (QUOTA_RE.test(t)) return {category: 'quota_exceeded', text: t.substring(0, 240)};
+                    if (RATE_RE.test(t)) return {category: 'rate_limit', text: t.substring(0, 240)};
+                }
+                return null;
+            })())
+            """,
+            await_promise=False,
+        )
+        if not isinstance(raw, str) or raw == "null":
+            return None
+        import json as _json
+
+        try:
+            parsed = _json.loads(raw)
+        except Exception:
+            return None
+        if isinstance(parsed, dict) and parsed.get("category"):
+            return parsed["category"], parsed.get("text", "")
+        return None
+
     async def _get_favorited_state(self, post_id: str) -> bool | None:
         """Best-effort detection of whether a post is in the user's favorites.
 
@@ -2187,6 +2238,41 @@ class GrokClient(ResponseParser):
         gen_result = parse_video_ndjson_response(
             monitor.body, parent_post_id="", statsig_id=monitor.statsig_id
         )
+
+        # Rate-limit / quota reclassification. Grok's NDJSON frequently
+        # reports moderated=true with no rate-limit error code when the
+        # actual failure is anti-abuse throttle or daily quota — and the
+        # UI surfaces a toast banner. A rate-limit / quota signal is
+        # strictly more severe than moderation (affects the whole
+        # session, not one prompt), so raise regardless of the parsed
+        # moderated state: even if the current generation happened to
+        # produce a real video, the caller needs to know the session is
+        # now throttled so they can back off. False-positive risk
+        # (stale toast from an earlier call while this one succeeded)
+        # exists but is low — Grok toasts auto-dismiss quickly — and
+        # the recoverable cost is a retry that will re-find the video
+        # via /rest/media/post/get.
+        banner = await self._scan_for_rate_limit_banner()
+        if banner is not None:
+            category, banner_text = banner
+            from .exceptions import GrokQuotaExceededError, GrokRateLimitError
+
+            if category == "quota_exceeded":
+                raise GrokQuotaExceededError(
+                    f"Grok reports quota exceeded for this session "
+                    f"(visible UI banner: {banner_text!r}). Stop retrying — "
+                    f"quota typically resets every 24h. NDJSON-level "
+                    f"moderated={gen_result.moderated}; ignore that field, "
+                    f"the throttle classification takes precedence."
+                )
+            raise GrokRateLimitError(
+                f"Grok rate-limited this session (visible UI banner: "
+                f"{banner_text!r}). Back off 5-10 min and retry, or reduce "
+                f"concurrent worker count. NDJSON-level "
+                f"moderated={gen_result.moderated}; ignore that field, the "
+                f"throttle classification takes precedence."
+            )
+
         # Stash drag metadata on private fields so the wrapper can
         # surface it on VideoExtendResult without another round-trip.
         gen_result.__dict__["_extend_seed_actual"] = actual_seed
