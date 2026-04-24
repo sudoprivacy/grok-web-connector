@@ -1620,13 +1620,17 @@ class GrokClient(ResponseParser):
 
     async def _click_menu_item(self, *text_options: str) -> bool:
         """
-        Click a menu item by its text (supports multiple language options).
+        Click a menu item matching any of the given text_options.
 
-        Uses mouse_click() which works better than JS click()
-        for React/Radix menu items.
+        Matches against both the item's trimmed ``innerText`` AND its
+        ``aria-label``. Some 2026-04 Grok menuitems (e.g. 赞 / 踩 at the
+        top of the "..." menu) are rendered as icon-only buttons with
+        an empty innerText and the Chinese label on aria-label — so
+        text-only matching silently missed them and raised "menu item
+        not found" even though the item was present.
 
         Args:
-            *text_options: One or more text strings to match (e.g., "Save", "保存")
+            *text_options: One or more strings to match (e.g., "Save", "保存")
 
         Returns:
             True if item was clicked
@@ -1638,17 +1642,27 @@ class GrokClient(ResponseParser):
 
         d = self._ui_delay
 
-        # Try to find and click the matching menu item
         for _ in range(3):
-            # Get all menu items
             items = await self._tab.query_selector_all('[role="menuitem"]')
 
             for item in items:
-                # Get text property (elements have a .text property)
                 item_text = item.text.strip() if item.text else ""
+                aria_label = item.attrs.get("aria-label", "") if hasattr(item, "attrs") else ""
+                if not aria_label:
+                    # Fallback: read aria-label via evaluate
+                    try:
+                        idx = items.index(item)
+                        aria_label = (
+                            await self._tab.evaluate(
+                                f"document.querySelectorAll('[role=\"menuitem\"]')"
+                                f"[{idx}].getAttribute('aria-label') || ''"
+                            )
+                            or ""
+                        )
+                    except Exception:
+                        aria_label = ""
 
-                if item_text in text_options:
-                    # Radix menu items need pointer events
+                if item_text in text_options or aria_label in text_options:
                     idx = items.index(item)
                     await self._tab.evaluate(f"""
                         (function() {{

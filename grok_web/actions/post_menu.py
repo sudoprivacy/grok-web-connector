@@ -138,13 +138,17 @@ async def click_menu_item(tab, *text_options: str, delay: float = 1.0) -> bool:
     wanted_literal = _json.dumps(list(text_options))
 
     for attempt in range(3):
+        # Match on both innerText (text-only menuitems like "扩展")
+        # and aria-label (icon-only menuitems like 赞/踩 which have
+        # empty innerText and carry the label on aria-label).
         js = r"""
             (() => {
                 const wanted = new Set(__WANTED__);
                 const items = Array.from(document.querySelectorAll('[role="menuitem"]'));
                 for (const mi of items) {
                     const t = (mi.innerText || '').trim();
-                    if (!wanted.has(t)) continue;
+                    const al = (mi.getAttribute('aria-label') || '').trim();
+                    if (!wanted.has(t) && !wanted.has(al)) continue;
                     const r = mi.getBoundingClientRect();
                     const x = r.x + r.width/2, y = r.y + r.height/2;
                     const o = {bubbles: true, cancelable: true,
@@ -159,7 +163,7 @@ async def click_menu_item(tab, *text_options: str, delay: float = 1.0) -> bool:
                     mi.dispatchEvent(new PointerEvent('pointerup', o));
                     mi.dispatchEvent(new MouseEvent('mouseup', o));
                     mi.dispatchEvent(new MouseEvent('click', o));
-                    return t;
+                    return t || al;
                 }
                 return null;
             })()
