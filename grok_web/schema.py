@@ -158,15 +158,19 @@ PARAMS: dict[str, dict[str, Any]] = {
             "should seed. Video-extend only — requires 'video:<uuid>' ref in "
             "images (dict API) or use of client.extend_video. Grok anchors a "
             "fixed-length seed window at this position and generates "
-            "'duration' more seconds after it. If omitted, Grok extends from "
-            "the end (classic behavior). The drag is pixel-based so the "
-            "actual value may drift slightly — see "
-            "VideoExtendResult.seed_start_actual for what landed (UI shows "
-            "integer seconds; internal precision is ~0.01s). Valid range: "
-            "0 to source_video.duration. As of 2026-04 the seed-window "
-            "length is fixed at '6s' or '10s' per the 'duration' field; a "
-            "future Grok revision may extend this set — the library passes "
-            "unknown duration values through with a warning."
+            "'duration' more seconds after it. **Omitting (None)** pins the "
+            "seed at video_id's own chain tail, which makes consecutive "
+            "calls on the same video_id produce parallel branches (fanout) "
+            "rather than silently walking Grok's chain tail. For serial "
+            "extension, pass video_id=previous_result.video_id on each "
+            "iteration. The drag is pixel-based so the actual value may "
+            "drift slightly — see VideoExtendResult.seed_start_actual for "
+            "what landed (UI shows integer seconds; internal precision is "
+            "~0.01s). Valid range: 0 to source_video.duration. As of "
+            "2026-04 the seed-window length is fixed at '6s' or '10s' per "
+            "the 'duration' field; a future Grok revision may extend this "
+            "set — the library passes unknown duration values through with "
+            "a warning."
         ),
         "type": "float",
     },
@@ -185,24 +189,6 @@ PARAMS: dict[str, dict[str, Any]] = {
             "Defaults to False to satisfy the mutation-opt-in rule: "
             "the connector never writes to the favorites list unless "
             "the caller explicitly asks."
-        ),
-        "type": "bool",
-        "default": False,
-    },
-    "branch_from_source": {
-        "desc": (
-            "For extend_video / create_video({'images':['video:...']}): "
-            "pin the seed at the source video's own chain tail so "
-            "consecutive calls on the same source produce N parallel "
-            "branches instead of a serial chain-walk. Without this "
-            "(or without an explicit seed_start), 'tail-extend' follows "
-            "whatever the chain's current tail is — which moves with "
-            "each call, so a naive fanout loop silently serializes. "
-            "Equivalent to computing "
-            "videoExtensionStartTime + videoDuration from "
-            "get_post_details(source) and passing it as seed_start, "
-            "but without the extra round-trip. Mutually exclusive with "
-            "seed_start."
         ),
         "type": "bool",
         "default": False,
@@ -226,7 +212,6 @@ VIDEO_KEYS = [
     "wait_for_video",
     "verify_final",
     "preserve_source_favorite_state",
-    "branch_from_source",
 ]
 
 # Keys accepted by extend_video() — keyword args rather than a dict, but
@@ -238,7 +223,6 @@ EXTEND_KEYS = [
     "prompt",
     "timeout",
     "preserve_source_favorite_state",
-    "branch_from_source",
 ]
 
 IMAGE_KEYS = [
