@@ -58,6 +58,102 @@ def _is_infra_failure(exc: BaseException) -> bool:
     return any(hint in text for hint in _INFRA_ERROR_HINTS)
 
 
+def encode_exception(exc: BaseException) -> str:
+    """Serialize an exception's class hierarchy alongside its message.
+
+    Output shape is a JSON tag on the first line followed by the
+    original message::
+
+        {"etype":"GrokRateLimitError","ebases":["GrokAPIError","GrokError","Exception"]}
+        Grok rate-limited this session (visible UI banner: '...')
+
+    This preserves the exception class info across ai-dev-browser's
+    ``JobResult.error: str`` serialization boundary — JobResult is
+    upstream so we can't add an ``error_type`` field directly.
+    Downstream callers parse via :func:`parse_result_error` or
+    :func:`matches_exception` from ``grok_web.pool``.
+
+    The JSON uses short keys (``etype`` / ``ebases``) to keep the
+    header compact. Bases walk the MRO up to and including
+    ``Exception``, stopping before ``object``.
+    """
+    import json
+
+    bases: list[str] = []
+    for base in type(exc).__mro__[1:]:
+        if base is object:
+            break
+        bases.append(base.__name__)
+        if base is Exception:
+            break
+    tag = {"etype": type(exc).__name__, "ebases": bases}
+    return json.dumps(tag, separators=(",", ":"), ensure_ascii=False) + "\n" + str(exc)
+
+
+def parse_result_error(result) -> tuple[str | None, list[str], str]:
+    """Extract ``(exception_class_name, base_class_names, message)`` from a
+    :class:`JobResult` whose ``error`` was encoded by :func:`encode_exception`.
+
+    Returns ``(None, [], result.error or "")`` if the error wasn't set
+    by the connector's worker path (e.g. upstream ai-dev-browser code
+    set it directly, or the first line is not a valid tag JSON).
+
+    Example::
+
+        cls_name, bases, message = parse_result_error(result)
+        if cls_name == "GrokQuotaExceededError":
+            stop_batch()
+        elif "GrokRateLimitError" in ([cls_name] if cls_name else []) + bases:
+            await asyncio.sleep(600)
+    """
+    import json
+
+    raw = (getattr(result, "error", None) or "") if result is not None else ""
+    if not raw or not raw.startswith("{"):
+        return None, [], raw
+    # Split off the first line; rest is the original message.
+    nl = raw.find("\n")
+    if nl == -1:
+        return None, [], raw
+    header, message = raw[:nl], raw[nl + 1 :]
+    try:
+        tag = json.loads(header)
+    except Exception:
+        return None, [], raw
+    if not isinstance(tag, dict) or "etype" not in tag:
+        return None, [], raw
+    cls_name = tag.get("etype")
+    bases = tag.get("ebases") or []
+    if not isinstance(cls_name, str) or not isinstance(bases, list):
+        return None, [], raw
+    return cls_name, [b for b in bases if isinstance(b, str)], message
+
+
+def matches_exception(result, cls: type) -> bool:
+    """Return True iff the exception recorded in ``result.error`` was of
+    type ``cls`` or a subclass of it.
+
+    Operates on the serialized class names (not a real ``isinstance``
+    check, because the exception object doesn't survive the
+    JobResult boundary). Honors Python's MRO: catching
+    ``GrokRateLimitError`` matches both ``GrokRateLimitError`` and
+    ``GrokQuotaExceededError`` since the latter's MRO includes the
+    former.
+
+    Example::
+
+        from grok_web import GrokRateLimitError
+        from grok_web.pool import matches_exception
+
+        if matches_exception(result, GrokRateLimitError):
+            await asyncio.sleep(600)
+    """
+    cls_name, bases, _ = parse_result_error(result)
+    if cls_name is None:
+        return False
+    return cls.__name__ == cls_name or cls.__name__ in bases
+
+
 class BrowserWorkerPool(BrowserPool[GrokClient]):
     """
     Manage multiple concurrent browser workers with job queuing and persistence.
@@ -286,7 +382,12 @@ class BrowserWorkerPool(BrowserPool[GrokClient]):
                         consecutive_failures = 0
 
                 except Exception as e:
-                    await self._handle_job_failure(worker, job, str(e))
+                    # Encode the class hierarchy so downstream callers can
+                    # branch on exception type (e.g. GrokRateLimitError vs
+                    # GrokQuotaExceededError) instead of string-matching
+                    # message text — see pool.parse_result_error /
+                    # pool.matches_exception.
+                    await self._handle_job_failure(worker, job, encode_exception(e))
                     if _is_infra_failure(e):
                         consecutive_failures += 1
                     else:
