@@ -12,7 +12,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
-    {name = "Your Name", email = "elfenliedsp@gmail.com"}
+    {name = "grok-web-connector contributors"}
 ]
 dependencies = [
     "pydantic>=2.0.0",
