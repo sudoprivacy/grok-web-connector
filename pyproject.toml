@@ -21,7 +21,7 @@ dependencies = [
     # crowded Windows machines where the old 10s hardcode timed out.
     # cloudflare_verify was removed in 0.8.0; client.py handles its
     # absence with a minimal in-tree detector.
-    "ai-dev-browser>=0.9.0,<1.0",
+    "ai-dev-browser>=0.9.3,<1.0",
 ]
 
 [project.scripts]

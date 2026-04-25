@@ -33,12 +33,7 @@ from ai_dev_browser.pool import (
     save_state,
 )
 
-from .worker_pool import (
-    BrowserWorkerPool,
-    encode_exception,
-    matches_exception,
-    parse_result_error,
-)
+from .worker_pool import BrowserWorkerPool, matches_exception
 
 __all__ = [
     # Main class
@@ -55,10 +50,8 @@ __all__ = [
     "PoolState",
     "load_state",
     "save_state",
-    # Error-type helpers: JobResult.error carries a JSON tag line
-    # encoding the exception class hierarchy, so callers can branch
-    # by type (e.g. GrokRateLimitError) instead of string-matching.
-    "encode_exception",
-    "parse_result_error",
+    # Exception-type helper (reads native JobResult.error_type /
+    # error_bases populated by ai-dev-browser 0.9.3+; honors MRO so
+    # catching a parent class matches subclasses).
     "matches_exception",
 ]
