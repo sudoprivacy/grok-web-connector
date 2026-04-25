@@ -1036,6 +1036,120 @@ class GrokClient(ResponseParser):
         await self._api_request("POST", MEDIA_POST_UNLIKE_ENDPOINT, {"id": post_id})
         return True
 
+    async def _download_url_to_file(self, url: str, dest: Path) -> bool:
+        """Download a URL via page-context fetch and write bytes to ``dest``.
+
+        Two-strategy fallback (mirrors :meth:`_asset_request_head`):
+        ``credentials: 'omit'`` first — works for public CDN URLs
+        (imagine-public.x.ai serves ACAO:* which CORS rejects with
+        credentials:include). On 401/403 falls back to
+        ``credentials: 'include'`` for signed paths (assets.grok.com).
+
+        Used by :meth:`_resolve_image_refs_to_local` to download
+        ``post:<uuid>`` reference images for re-upload via the file
+        input on the Imagine homepage / Custom edit panel.
+        """
+        import base64
+        import json as _json
+
+        async def _fetch(creds: str) -> dict:
+            js = """
+                (async () => {
+                    try {
+                        const r = await fetch(__URL__, {credentials: __CREDS__});
+                        if (!r.ok) return JSON.stringify({ok: false, status: r.status});
+                        const buf = await r.arrayBuffer();
+                        const u8 = new Uint8Array(buf);
+                        let bin = '';
+                        for (let i = 0; i < u8.length; i++) bin += String.fromCharCode(u8[i]);
+                        return JSON.stringify({ok: true, b64: btoa(bin), size: u8.length});
+                    } catch (e) {
+                        return JSON.stringify({ok: false, error: String(e)});
+                    }
+                })()
+            """.replace("__URL__", _json.dumps(url)).replace("__CREDS__", _json.dumps(creds))
+            raw = await self._tab.evaluate(js, await_promise=True)
+            try:
+                return _json.loads(raw) if isinstance(raw, str) else {}
+            except Exception:
+                return {"ok": False}
+
+        obj = await _fetch("omit")
+        if not obj.get("ok") and obj.get("status") in (401, 403):
+            obj = await _fetch("include")
+        if not obj.get("ok"):
+            return False
+        try:
+            dest.write_bytes(base64.b64decode(obj["b64"]))
+        except Exception:
+            return False
+        return True
+
+    async def _resolve_image_refs_to_local(self, images: list[str], tmpdir: Path) -> list[Path]:
+        """Resolve a mixed-form ``images`` list to local file paths.
+
+        Each entry is one of:
+        - bare path / ``"path:..."``  → used as-is, must exist on disk
+        - ``"post:<uuid>"``           → downloads the post's media via
+                                        :meth:`get_post_details` ``media_url``,
+                                        writes to ``tmpdir`` (caller cleans up)
+        - ``"file:<id>"``             → not supported here (would need an
+                                        upload-vs-fetch path); raises GrokAPIError
+        - ``"video:<uuid>"``          → not supported (videos can't be image refs)
+
+        Returns the resolved list of :class:`Path` objects in input order.
+        """
+        from .prompt_parser import classify_image_source
+
+        resolved: list[Path] = []
+        for spec in images:
+            kind, value = classify_image_source(spec)
+            if kind == "file":
+                p = Path(value)
+                if not p.exists():
+                    raise GrokAPIError(f"Image ref not found on disk: {value}")
+                resolved.append(p)
+                continue
+            if kind == "post":
+                try:
+                    details = await self.get_post_details(value)
+                except Exception as e:
+                    raise GrokAPIError(
+                        f"Resolve post:{value} as image ref: get_post_details failed: {e}"
+                    ) from e
+                url = details.media_url or details.thumbnail_url
+                if not url:
+                    raise GrokAPIError(
+                        f"post:{value} has no media_url — cannot use as image ref. "
+                        "Either it's a video post (use the thumbnail explicitly) or "
+                        "the post has no media."
+                    )
+                # Pick a file extension from the URL; default .jpg.
+                suffix = ".jpg"
+                for ext in (".png", ".jpg", ".jpeg", ".webp"):
+                    if ext in url.lower():
+                        suffix = ext
+                        break
+                dest = tmpdir / f"ref_{value}{suffix}"
+                if not await self._download_url_to_file(url, dest):
+                    raise GrokAPIError(f"Failed to download post:{value}'s media from {url}")
+                resolved.append(dest)
+                continue
+            if kind == "video":
+                raise GrokAPIError(
+                    f"video:{value} is not a valid image reference. Image refs "
+                    "must be image posts (post:<uuid>) or local files."
+                )
+            if kind == "upload":
+                raise GrokAPIError(
+                    f"file:{value} (previously uploaded ID) is not supported as an "
+                    "image ref for create_image / edit_image — these flows use "
+                    "the UI file input, not the REST upload endpoint. Use "
+                    "post:<uuid> or a local path instead."
+                )
+            raise GrokAPIError(f"Unrecognized image ref form: {spec!r}")
+        return resolved
+
     async def _scan_for_rate_limit_banner(self) -> tuple[str, str] | None:
         """Scan visible toasts / alerts for Grok rate-limit or quota text.
 
@@ -2619,10 +2733,20 @@ class GrokClient(ResponseParser):
         )
 
     async def edit_image(self, params: dict) -> ImageEditResult:
-        """Edit an image to generate new variations.
+        """Edit an image to generate new variations, with optional refs.
 
-        Navigates to the post, clicks edit, enters the prompt,
-        and captures the API response with generated images.
+        Canonical shape (v0.18.0+) — semi-structured ``prompt`` + ``images``::
+
+            await client.edit_image({
+                "prompt": "edit @1 to add ropes from @2 colored like @3",
+                "images": ["post:source", "post:ref_a", "post:ref_b"],
+            })
+
+        ``images[0]`` is the post being edited; ``images[1:]`` are
+        reference images. ``@1`` in the prompt = source, ``@2..@N+1`` =
+        refs. Each entry may be ``"post:<uuid>"`` (Grok auto-downloads
+        the media into a temp file and re-uploads) or a local file
+        path.
 
         Args:
             params: Dict with keys from EDIT_KEYS (see grok_web.schema).
@@ -2635,18 +2759,101 @@ class GrokClient(ResponseParser):
             ImageEditResult with image URLs and moderation info.
 
         Examples:
+            # Single-source (no refs) — direct REST when sid available
+            await client.edit_image({
+                "prompt": "add wings",
+                "images": ["post:abc-123"],
+            })
+
+            # Multi-ref — uses UI path (REST single-ref-only today)
+            await client.edit_image({
+                "prompt": "@1 character with @2 outfit and @3 lighting",
+                "images": ["post:src", "post:outfit_ref", "post:light_ref"],
+            })
+
+            # Legacy shape (deprecated, still works with a DeprecationWarning):
             await client.edit_image({
                 "post_id": "abc-123",
                 "edit_prompt": "add wings",
             })
         """
+        import warnings
+
+        from .prompt_parser import classify_image_source
         from .schema import EDIT_KEYS, validate_params
 
         p = validate_params(params, EDIT_KEYS)
 
-        post_id = p["post_id"]
-        edit_prompt = p["edit_prompt"]
+        # Canonical input is `prompt` + `images`. Legacy is `post_id` +
+        # `edit_prompt`; normalize and warn. Either form works through
+        # v0.18.x; legacy form will be removed in v0.19.0.
+        canonical_prompt = p.get("prompt")
+        canonical_images = p.get("images")
+        legacy_post_id = p.get("post_id")
+        legacy_edit_prompt = p.get("edit_prompt")
+
+        if canonical_images is None and legacy_post_id:
+            warnings.warn(
+                "edit_image: 'post_id' is deprecated since v0.18.0; "
+                "use images=[f'post:{post_id}', ...] instead. "
+                "post_id will be removed in v0.19.0.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            canonical_images = [f"post:{legacy_post_id}"]
+        if canonical_prompt is None and legacy_edit_prompt is not None:
+            warnings.warn(
+                "edit_image: 'edit_prompt' is deprecated since v0.18.0; "
+                "use 'prompt' instead. edit_prompt will be removed in v0.19.0.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            canonical_prompt = legacy_edit_prompt
+
+        if not canonical_images:
+            raise GrokAPIError(
+                "edit_image: 'images' is required (or legacy 'post_id'). "
+                "First entry is the post being edited; rest are references."
+            )
+        if canonical_prompt is None:
+            raise GrokAPIError("edit_image: 'prompt' is required (or legacy 'edit_prompt').")
+
+        source_kind, source_value = classify_image_source(canonical_images[0])
+        if source_kind != "post":
+            raise GrokAPIError(
+                f"edit_image: images[0] (the source being edited) must be "
+                f"'post:<uuid>'; got {canonical_images[0]!r}"
+            )
+
+        # Re-bind to the existing local names so the rest of the body
+        # (REST primary + UI fallback) doesn't need rewriting.
+        post_id = source_value
+        edit_prompt = canonical_prompt
+        ref_specs: list[str] = list(canonical_images[1:])
+
         timeout = p.get("timeout", 60)
+
+        # Multi-ref always takes the UI path. The direct REST primary
+        # was built for single-ref edits; multi-ref via REST would need
+        # an extra probe of Grok's image_edit payload shape that we
+        # haven't done. UI is naturally paced and verified working.
+        if ref_specs:
+            import tempfile
+
+            tmpdir = Path(tempfile.mkdtemp(prefix="grok_edit_refs_"))
+            try:
+                ref_paths = await self._resolve_image_refs_to_local(ref_specs, tmpdir)
+                await self.select_post(post_id)
+                return await self.edit_current(
+                    edit_prompt,
+                    timeout=timeout,
+                    source_post_id=post_id,
+                    reference_images=ref_paths,
+                )
+            finally:
+                for f in tmpdir.iterdir():
+                    f.unlink(missing_ok=True)
+                tmpdir.rmdir()
         import asyncio
         import json as json_mod
 
@@ -2901,28 +3108,44 @@ class GrokClient(ResponseParser):
         )
 
     async def edit_current(
-        self, edit_prompt: str, *, timeout: int = 300, source_post_id: str | None = None
+        self,
+        edit_prompt: str,
+        *,
+        timeout: int = 300,
+        source_post_id: str | None = None,
+        reference_images: list[Path] | None = None,
     ) -> ImageEditResult:
         """Edit the image post currently selected on the tab.
 
         Lower-level primitive: opens 更多选项 → Custom → 图片 mode,
-        fills the prompt, clicks 编辑, and waits for the NDJSON
-        response. Does NOT navigate. Caller is responsible for
-        selecting the source image first via :meth:`select_post`;
-        otherwise the menu will show video-context items (no Custom
-        menuitem) and the call fails with a clear error.
+        optionally uploads additional reference images, fills the
+        prompt, clicks 编辑, and waits for the NDJSON response. Does
+        NOT navigate. Caller is responsible for selecting the source
+        image first via :meth:`select_post`.
+
+        Reference images: the source post (the one being edited) is
+        always available as ``@1`` in the prompt — it's the implicit
+        "Image 1" in Grok's @ popup with zero uploads needed. Each
+        path in ``reference_images`` is uploaded into the panel and
+        becomes ``@2, @3, ...`` in order. So a 2-ref edit_current
+        with ``edit_prompt = "edit @1 to add ropes from @2 colored
+        like @3"`` and ``reference_images=[ref_a, ref_b]`` resolves
+        as: @1 = source (current selection), @2 = ref_a, @3 = ref_b.
 
         ``source_post_id`` is used only for result metadata
-        (``ImageEditResult.post_id``). If omitted, set to empty
-        string — callers that care about identity should pass it or
-        use :meth:`edit_image` which handles it for you.
+        (``ImageEditResult.post_id``).
 
         Args:
-            edit_prompt: The edit instruction text.
+            edit_prompt: The edit instruction text. May contain
+                ``@N`` markers (1 = source, 2..N = reference_images).
             timeout: Max seconds to wait for both candidate images
                 to reach progress=100 (default 300).
             source_post_id: Optional label for the result. Does not
                 influence the UI interaction.
+            reference_images: Optional local file paths to upload as
+                additional refs. Up to ~6 (Grok's UI cap). Use
+                :meth:`edit_image` if you want the connector to
+                resolve ``post:<uuid>`` / file paths for you.
 
         Returns:
             ImageEditResult. The ``post_id`` field reflects
@@ -3065,25 +3288,92 @@ class GrokClient(ResponseParser):
         )
         await asyncio.sleep(1.0 * d)
 
-        # 5. Fill prompt via execCommand (tiptap-safe)
-        escaped_prompt = edit_prompt.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
-        fill_result = await self._tab.evaluate(
-            f"""
-            (() => {{
-                const ed = document.querySelector('.tiptap.ProseMirror')
-                       || document.querySelector('[contenteditable="true"]');
-                if (!ed) return 'no-editor';
-                ed.focus();
-                document.execCommand('selectAll');
-                document.execCommand('delete');
-                document.execCommand('insertText', false, `{escaped_prompt}`);
-                return 'ok';
-            }})()
-            """
-        )
-        if fill_result == "no-editor":
-            raise GrokAPIError("Could not find prompt editor (ProseMirror)")
-        await asyncio.sleep(1 * d)
+        # 4b. Upload reference images (if any). One setFileInputFiles call
+        # for ALL refs — calling it multiple times REPLACES rather than
+        # appends. Probe-verified: the source post is the implicit @1 in
+        # Grok's @ popup; each upload becomes @2, @3, ... in order.
+        if reference_images:
+            from ai_dev_browser import cdp as _cdp_refs
+
+            from .actions.imagine_input import _count_uploaded_images, set_prompt_with_refs
+            from .prompt_parser import parse_prompt
+
+            doc = await self._tab.send(_cdp_refs.dom.get_document(-1, True))
+            node_id = await self._tab.send(
+                _cdp_refs.dom.query_selector(doc.node_id, 'input[type="file"][name="files"]')
+            )
+            if not node_id:
+                raise GrokAPIError(
+                    "edit_current: file input not found in the edit panel — "
+                    "Grok UI may have changed."
+                )
+            from ai_dev_browser.core._element import filter_recurse
+
+            node = filter_recurse(doc, lambda n: n.node_id == node_id)
+            await self._tab.send(
+                _cdp_refs.dom.set_file_input_files(
+                    [str(p.absolute()) for p in reference_images],
+                    backend_node_id=node.backend_node_id,
+                )
+            )
+            # Wait for the Remove buttons to appear, proving uploads landed.
+            deadline = asyncio.get_event_loop().time() + 15
+            while asyncio.get_event_loop().time() < deadline:
+                cnt = await _count_uploaded_images(self._tab)
+                if cnt >= len(reference_images):
+                    break
+                await asyncio.sleep(0.5)
+            else:
+                raise GrokAPIError(
+                    f"edit_current: only {cnt}/{len(reference_images)} reference "
+                    "images appeared after upload (timed out at 15s)."
+                )
+
+            # Validate @N markers against combined image list (source + refs).
+            # parse_prompt raises if @N out of range — surface that clearly.
+            full_image_list = ["__source__", *[str(p) for p in reference_images]]
+            try:
+                segments = parse_prompt(edit_prompt, full_image_list)
+            except ValueError as e:
+                raise GrokAPIError(
+                    f"edit_current: {e} (source counts as @1, "
+                    f"reference_images map to @2..@{len(full_image_list)})"
+                ) from e
+        else:
+            segments = []
+
+        # 5. Fill prompt. If we have refs AND the prompt uses @N markers,
+        # walk segments via set_prompt_with_refs (types text + types @ +
+        # clicks "Image N" per ref). Otherwise plain execCommand insert.
+        prompt_filled_via_refs = False
+        if reference_images and segments and any(s["type"] == "ref" for s in segments):
+            from .actions.imagine_input import set_prompt_with_refs
+
+            await set_prompt_with_refs(self._tab, segments, delay=self._ui_delay)
+            prompt_filled_via_refs = True
+            await asyncio.sleep(1 * d)
+
+        if not prompt_filled_via_refs:
+            escaped_prompt = (
+                edit_prompt.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
+            )
+            fill_result = await self._tab.evaluate(
+                f"""
+                (() => {{
+                    const ed = document.querySelector('.tiptap.ProseMirror')
+                           || document.querySelector('[contenteditable="true"]');
+                    if (!ed) return 'no-editor';
+                    ed.focus();
+                    document.execCommand('selectAll');
+                    document.execCommand('delete');
+                    document.execCommand('insertText', false, `{escaped_prompt}`);
+                    return 'ok';
+                }})()
+                """
+            )
+            if fill_result == "no-editor":
+                raise GrokAPIError("Could not find prompt editor (ProseMirror)")
+            await asyncio.sleep(1 * d)
 
         # 6. Click 编辑 submit (fall back to 生成视频 if mode flip failed)
         submit_clicked = await self._tab.evaluate(
@@ -3742,6 +4032,7 @@ class GrokClient(ResponseParser):
         p = validate_params(params, IMAGE_KEYS)
 
         prompt = p.get("prompt", "")
+        ref_specs: list[str] = list(p.get("images") or [])
         aspect_ratio = p.get("aspect_ratio", "2:3")
         min_success = p.get("min_success", 1)
         max_scroll = p.get("max_scroll", 5)
@@ -3994,30 +4285,97 @@ class GrokClient(ResponseParser):
         )
         await asyncio.sleep(0.5 * d)
 
-        # Step 3: Fill the prompt into the tiptap editor. execCommand is
-        # the tiptap-safe path — direct innerHTML/value writes bypass
-        # ProseMirror's schema and get stripped. Re-check the editor is
-        # still mounted: the aspect-ratio menuitem click above can
-        # remount the panel on some builds, racing the editor out.
+        # Step 2.5: Upload reference images (if any). One setFileInputFiles
+        # call for ALL refs — calling it multiple times REPLACES rather
+        # than appends. Each upload becomes @1, @2, ... in Grok's @
+        # popup (no implicit source on the Imagine homepage, unlike
+        # edit_image's edit panel where @1 is the source).
+        ref_paths: list[Path] = []
+        ref_tmpdir: Path | None = None
+        if ref_specs:
+            import tempfile
+
+            ref_tmpdir = Path(tempfile.mkdtemp(prefix="grok_create_image_refs_"))
+            try:
+                ref_paths = await self._resolve_image_refs_to_local(ref_specs, ref_tmpdir)
+                doc = await self._tab.send(cdp.dom.get_document(-1, True))
+                node_id = await self._tab.send(
+                    cdp.dom.query_selector(doc.node_id, 'input[type="file"][name="files"]')
+                )
+                if not node_id:
+                    raise GrokAPIError("create_image: file input not found on Imagine page")
+                from ai_dev_browser.core._element import filter_recurse
+
+                node = filter_recurse(doc, lambda n: n.node_id == node_id)
+                await self._tab.send(
+                    cdp.dom.set_file_input_files(
+                        [str(p.absolute()) for p in ref_paths],
+                        backend_node_id=node.backend_node_id,
+                    )
+                )
+                # Wait for Remove buttons to appear
+                from .actions.imagine_input import _count_uploaded_images
+
+                deadline = asyncio.get_event_loop().time() + 15
+                while asyncio.get_event_loop().time() < deadline:
+                    cnt = await _count_uploaded_images(self._tab)
+                    if cnt >= len(ref_paths):
+                        break
+                    await asyncio.sleep(0.5)
+                else:
+                    raise GrokAPIError(
+                        f"create_image: only {cnt}/{len(ref_paths)} reference "
+                        "images appeared after upload (timed out at 15s)."
+                    )
+            except BaseException:
+                # Best-effort cleanup on any error path
+                if ref_tmpdir and ref_tmpdir.exists():
+                    for f in ref_tmpdir.iterdir():
+                        f.unlink(missing_ok=True)
+                    ref_tmpdir.rmdir()
+                raise
+
+        # Step 3: Fill the prompt into the tiptap editor.
+        # If we have refs AND the prompt uses @N markers, walk segments
+        # via set_prompt_with_refs (types text, types @, clicks 'Image N').
+        # Otherwise plain execCommand insert (tiptap-safe).
         if not await self._wait_for_selector(".tiptap.ProseMirror", timeout=10):
             raise GrokAPIError("Prompt editor (ProseMirror) disappeared after aspect selection")
-        escaped_prompt = prompt.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
-        fill_result = await self._tab.evaluate(
-            f"""
-            (() => {{
-                const ed = document.querySelector('.tiptap.ProseMirror');
-                if (!ed) return 'not-found';
-                ed.focus();
-                document.execCommand('selectAll');
-                document.execCommand('delete');
-                document.execCommand('insertText', false, `{escaped_prompt}`);
-                return 'ok';
-            }})()
-            """
-        )
-        if fill_result == "not-found":
-            raise GrokAPIError("Could not find prompt editor (ProseMirror)")
-        await asyncio.sleep(1 * d)
+
+        prompt_filled_via_refs = False
+        if ref_specs and prompt:
+            from .actions.imagine_input import set_prompt_with_refs
+            from .prompt_parser import parse_prompt
+
+            try:
+                segments = parse_prompt(prompt, [str(p) for p in ref_paths])
+            except ValueError as e:
+                raise GrokAPIError(
+                    f"create_image: {e} (images map to @1..@{len(ref_paths)})"
+                ) from e
+            if any(s["type"] == "ref" for s in segments):
+                await set_prompt_with_refs(self._tab, segments, delay=self._ui_delay)
+                prompt_filled_via_refs = True
+                await asyncio.sleep(1 * d)
+
+        if not prompt_filled_via_refs:
+            escaped_prompt = prompt.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
+            fill_result = await self._tab.evaluate(
+                f"""
+                (() => {{
+                    const ed = document.querySelector('.tiptap.ProseMirror');
+                    if (!ed) return 'not-found';
+                    ed.focus();
+                    document.execCommand('selectAll');
+                    document.execCommand('delete');
+                    document.execCommand('insertText', false, `{escaped_prompt}`);
+                    return 'ok';
+                }})()
+                """
+            )
+            if fill_result == "not-found":
+                raise GrokAPIError("Could not find prompt editor (ProseMirror)")
+            await asyncio.sleep(1 * d)
 
         # Step 4: Click the 提交 submit via real CDP mouse. The button's
         # handler rejects JS-synthesised PointerEvents (checks

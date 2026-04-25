@@ -21,12 +21,22 @@ logger = logging.getLogger(__name__)
 PARAMS: dict[str, dict[str, Any]] = {
     "images": {
         "desc": (
-            "Source references. Local file paths (uploads), 'post:<uuid>' "
-            "(existing Grok IMAGE post, triggers img2vid), 'video:<uuid>' "
-            "(existing Grok VIDEO post, triggers video-extend), or "
-            "'file:<uuid>' (previously uploaded via client.upload_images "
-            "— skips re-upload). Max 5 for images/uploads; only first "
-            "'video:' ref is used."
+            "Image references. Each entry is a local file path, "
+            "'post:<uuid>' (an existing Grok image post — connector "
+            "downloads the media and re-uploads as a ref), 'video:<uuid>' "
+            "(only for create_video → triggers video-extend), or "
+            "'file:<uuid>' (only for create_video → previously uploaded "
+            "via client.upload_images, skips re-upload). \n\n"
+            "**Per-method semantics**:\n"
+            "  • create_video: post: → img2vid (single source); video: → "
+            "video-extend (single source); file:/local paths → upload2vid "
+            "with @N marker support.\n"
+            "  • create_image: each entry uploaded as a ref; @N in prompt "
+            "maps to images[N-1] (1-based). Empty/omitted = txt2img.\n"
+            "  • edit_image: images[0] is the post being edited (must be "
+            "post:<uuid>); images[1:] are reference images. @1 = source, "
+            "@2..@N+1 = refs.\n"
+            "  • upload_images: each entry must be a local path."
         ),
         "type": "list[str]",
     },
@@ -238,6 +248,10 @@ IMAGE_KEYS = [
 ]
 
 EDIT_KEYS = [
+    # Canonical (v0.18.0+) — semi-structured prompt + images
+    "prompt",
+    "images",
+    # Legacy aliases (deprecated v0.18.0, removed v0.19.0)
     "post_id",
     "edit_prompt",
     "timeout",
