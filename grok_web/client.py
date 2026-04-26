@@ -812,6 +812,7 @@ class GrokClient(ResponseParser):
         limit: int | None = 40,
         source: str | None = "favorites",
         include_raw_data: bool = False,
+        safe_for_work: bool = True,
     ) -> list[PostSummary]:
         """List posts with basic metadata, with automatic pagination.
 
@@ -822,13 +823,31 @@ class GrokClient(ResponseParser):
                 - "favorites": Your saved/favorited posts (default)
                 - None: All public posts
             include_raw_data: Include raw API response in each PostSummary
+            safe_for_work: When False, sets Grok's ``safeForWork: false``
+                filter parameter to match what the Grok web UI sends by
+                default. Empirically this does NOT broaden the result
+                set vs ``safe_for_work=True`` for the
+                ``source="favorites"`` filter — both return identical
+                lists. Exposed so the connector matches UI request
+                shape, and in case future Grok-side filter behavior
+                differentiates them. Don't rely on this to unlock
+                enumeration of NSFW user-generated content — that
+                channel hasn't been found.
         """
         # Map user-friendly source names to API values
         api_source = source
         if source == "favorites":
             api_source = "MEDIA_POST_SOURCE_LIKED"
 
-        filter_data: dict[str, Any] = {"source": api_source} if api_source else {}
+        filter_data: dict[str, Any] = {}
+        if api_source:
+            filter_data["source"] = api_source
+        if not safe_for_work:
+            # Match the UI's default for non-SFW environments. Grok's
+            # bulk listing filters NSFW out unless this is explicitly
+            # false. Without it, user-generated NSFW content is invisible
+            # via this enumeration even if it's the user's own posts.
+            filter_data["safeForWork"] = False
 
         posts: list[PostSummary] = []
         cursor: str | None = None
@@ -2542,6 +2561,18 @@ class GrokClient(ResponseParser):
         seed_displayed = gen_result.__dict__.get("_extend_seed_displayed")
         seed_requested = gen_result.__dict__.get("_extend_seed_requested")
 
+        # is_persisted probe — see VideoGenerationResult docstring for
+        # rationale. ~150ms; best-effort.
+        is_persisted: bool | None = None
+        if gen_result.video_id:
+            try:
+                await self.get_post_details(gen_result.video_id)
+                is_persisted = True
+            except GrokNotFoundError:
+                is_persisted = False
+            except Exception:
+                pass
+
         return VideoExtendResult(
             video_id=gen_result.video_id,
             source_video_id=video_id,
@@ -2557,6 +2588,7 @@ class GrokClient(ResponseParser):
             seed_start_displayed=seed_displayed,
             duration_s=duration_s,
             cumulative_duration_s=cumulative_duration_s,
+            is_persisted=is_persisted,
         )
 
     async def get_menu_items(self, post_id: str) -> list[str]:
@@ -5232,6 +5264,23 @@ class GrokClient(ResponseParser):
             dur_s, _ = await self._fetch_video_duration(result.video_id)
             if dur_s is not None:
                 result.duration_s = dur_s
+
+        # is_persisted probe: confirm video_id resolves to a real post.
+        # Mainly catches the moderated-NSFW case where Grok's NDJSON
+        # streams a videoId that's just a per-stream identifier — no
+        # real post is persisted. Without this signal the caller has
+        # to discover the bogus id by their own get_post_details call
+        # 404'ing. ~150ms cost; best-effort, never hard-fails the result.
+        if result.video_id:
+            try:
+                await self.get_post_details(result.video_id)
+                result.is_persisted = True
+            except GrokNotFoundError:
+                result.is_persisted = False
+            except Exception:
+                # Network / auth blip — leave None ("unknown"); caller
+                # can decide whether to retry the check.
+                pass
 
         return result
 

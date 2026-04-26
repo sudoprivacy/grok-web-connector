@@ -568,6 +568,23 @@ class VideoGenerationResult(BaseModel):
             "request was moderated."
         ),
     )
+    is_persisted: bool | None = Field(
+        None,
+        description=(
+            "Whether ``video_id`` resolves to a real, fetchable post on "
+            "Grok's side. Populated by a post-call ``get_post_details`` "
+            "probe (~150ms): ``True`` if the id is fetchable, ``False`` "
+            "if it 404s, ``None`` if the probe was skipped or errored.\n\n"
+            "Why this matters: in moderated NSFW gens, Grok's NDJSON "
+            "frequently streams a ``videoId`` that's just a per-stream "
+            "identifier — no real post is persisted under it, so any "
+            "downstream ``get_post_details`` / ``download_video`` call "
+            "with that id will 404. ``is_persisted=False`` is the "
+            "explicit signal: the id is unusable, don't bother trying. "
+            "For ``moderated=True + is_persisted=False`` the call is "
+            "fully terminal (Grok rejected the gen, no recovery)."
+        ),
+    )
 
     @computed_field
     @property
@@ -689,6 +706,14 @@ class VideoExtendResult(BaseModel):
             "``can_extend_more = result.cumulative_duration_s < 30``. "
             "For the first extension of a chain, this equals duration_s "
             "itself. None if post metadata wasn't ready or moderated."
+        ),
+    )
+    is_persisted: bool | None = Field(
+        None,
+        description=(
+            "Whether ``video_id`` resolves to a real, fetchable post on "
+            "Grok's side. See :class:`VideoGenerationResult.is_persisted` "
+            "for full semantics — same field for the same reason."
         ),
     )
 
