@@ -294,9 +294,10 @@ async def test_download_and_match_roundtrip(client, tmp_path):
     try:
         out = tmp_path / "v.mp4"
         saved = await client.download_video(
-            gen.video_id,
-            str(out),
-            parent_post_id=TEST_SOURCE_POST_ID,
+            {
+                "video_id": gen.video_id,
+                "output_path": str(out),
+            }
         )
         assert Path(saved).exists() and Path(saved).stat().st_size > 1000
 

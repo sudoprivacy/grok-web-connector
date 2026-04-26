@@ -934,12 +934,16 @@ class GrokClient(ResponseParser):
         return bool(videos and _is_moderated_obj(videos[0]))
 
     async def wait_for_video_completion(
-        self,
-        video_id: str,
-        timeout: int = 300,
-        poll_interval: float = 5.0,
+        self, params, *legacy_args, **legacy_kwargs
     ) -> VideoGenerationResult:
         """Poll Grok's REST until an in-flight video finishes rendering.
+
+        Canonical shape (v0.19.0+) — dict-style::
+
+            await client.wait_for_video_completion({
+                "video_id": "abc-123",
+                "timeout": 600,
+            })
 
         Use this when :meth:`create_video` or :meth:`extend_video`
         returned a result with ``in_progress == True`` — i.e. the local
@@ -952,10 +956,12 @@ class GrokClient(ResponseParser):
         thumbnail as success.
 
         Args:
-            video_id: UUID from ``VideoGenerationResult.video_id`` /
-                ``VideoExtendResult.video_id``.
-            timeout: Max seconds to poll (default 300).
-            poll_interval: Seconds between polls (default 5.0).
+            params: Dict with keys from WAIT_FOR_COMPLETION_KEYS (see
+                grok_web.schema). ``video_id`` is required. Per-key
+                descriptions below are generated from
+                ``grok_web.schema.PARAMS`` (SSOT).
+
+                <SCHEMA_ARGS>
 
         Returns:
             A synthesized ``VideoGenerationResult`` with ``progress=100``
@@ -965,16 +971,72 @@ class GrokClient(ResponseParser):
         Raises:
             GrokAPIError: If Grok moderated the video post-render, or if
                 polling exceeded ``timeout`` before completion.
+            TypeError: If ``params`` is not a dict (or, for the
+                deprecated positional form, a ``video_id`` string), or
+                if ``video_id`` is missing.
 
         Example:
             >>> result = await client.create_video({"images": [...], "prompt": "..."})
             >>> if result.in_progress:
             ...     # Server was still generating when we gave up — wait it out.
-            ...     result = await client.wait_for_video_completion(
-            ...         result.video_id, timeout=600
-            ...     )
+            ...     result = await client.wait_for_video_completion({
+            ...         "video_id": result.video_id, "timeout": 600,
+            ...     })
             >>> assert result.is_complete and not result.moderated
+
+        Legacy form (deprecated v0.19.0, removed v0.20.0)::
+
+            await client.wait_for_video_completion(video_id, timeout=600)
+
+        Still works but emits ``DeprecationWarning``.
         """
+        import warnings
+
+        from .schema import WAIT_FOR_COMPLETION_KEYS, validate_params
+
+        if isinstance(params, str):
+            warnings.warn(
+                "wait_for_video_completion(video_id, ...) positional/kwarg "
+                "form is deprecated since v0.19.0; use "
+                "wait_for_video_completion({'video_id': ..., ...}) for "
+                "consistency with create_video / edit_image. Removed in "
+                "v0.20.0.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            normalized = {"video_id": params}
+            # Accept legacy positional timeout/poll_interval as well.
+            legacy_positional_keys = ("timeout", "poll_interval")
+            for i, val in enumerate(legacy_args):
+                if i >= len(legacy_positional_keys):
+                    raise TypeError(
+                        "wait_for_video_completion: too many positional args "
+                        "(legacy signature accepts at most 3, got "
+                        f"{1 + len(legacy_args)})"
+                    )
+                normalized[legacy_positional_keys[i]] = val
+            normalized.update(legacy_kwargs)
+            params = normalized
+        elif isinstance(params, dict):
+            if legacy_args or legacy_kwargs:
+                raise TypeError(
+                    "wait_for_video_completion: cannot mix dict params and "
+                    "positional/kwargs. Pass everything inside the dict."
+                )
+        else:
+            raise TypeError(
+                "wait_for_video_completion: first arg must be a dict "
+                "(canonical) or a video_id str (deprecated), got "
+                f"{type(params).__name__}"
+            )
+
+        p = validate_params(params, WAIT_FOR_COMPLETION_KEYS)
+        video_id = p.get("video_id")
+        if not video_id:
+            raise TypeError("wait_for_video_completion: 'video_id' is required in params dict")
+        timeout = p.get("timeout", 300)
+        poll_interval = p.get("poll_interval", 5.0)
+
         import asyncio as _asyncio
 
         deadline = _asyncio.get_event_loop().time() + timeout
@@ -1594,8 +1656,15 @@ class GrokClient(ResponseParser):
         except Exception:
             return False
 
-    async def select_post(self, post_id: str, *, timeout: float = 6.0) -> None:
+    async def select_post(self, params, **legacy_kwargs) -> None:
         """Select a specific post on the Imagine tab.
+
+        Canonical shape (v0.19.0+) — dict-style::
+
+            await client.select_post({
+                "post_id": "abc-123",
+                "timeout": 6.0,
+            })
 
         This is a correctness-guaranteed navigation primitive: a plain
         ``/imagine/post/<id>`` fetch is not sufficient, because Grok's
@@ -1603,10 +1672,10 @@ class GrokClient(ResponseParser):
         recent video / edit) when the requested node has descendants.
         Leaving that redirect uncorrected makes every subsequent UI
         action operate on the wrong post — the classic
-        ``extend_video(video_id=X)`` fanout trap, a
-        ``create_video(images=["post:X"])`` where the source image is
-        an old root with video children, ``edit_image`` on deep chains,
-        etc.
+        ``extend_video({'video_id': X})`` fanout trap, a
+        ``create_video({'images': ['post:X']})`` where the source
+        image is an old root with video children, ``edit_image`` on
+        deep chains, etc.
 
         Resolution: navigate, wait for hydration, check the URL/DOM,
         and — if the redirect happened — click the sidebar thumbnail
@@ -1618,9 +1687,12 @@ class GrokClient(ResponseParser):
         build end-to-end flows where the target post is explicit.
 
         Args:
-            post_id: Post UUID to select.
-            timeout: Max seconds to wait for the selection to land
-                (default 6.0). Does not include the page load itself.
+            params: Dict with keys from SELECT_POST_KEYS (see
+                grok_web.schema). ``post_id`` is required; ``timeout``
+                defaults to 6.0. Per-key descriptions below are
+                generated from ``grok_web.schema.PARAMS`` (SSOT).
+
+                <SCHEMA_ARGS>
 
         Raises:
             GrokAPIError: Post is 404, or the thumbnail-correction
@@ -1628,7 +1700,51 @@ class GrokClient(ResponseParser):
                 within ``timeout`` (most often: the post doesn't
                 belong to a chain Grok will show in the sidebar —
                 e.g. orphaned / deleted).
+            TypeError: If ``params`` is not a dict (or, for the
+                deprecated positional form, a ``post_id`` string), or
+                if ``post_id`` is missing.
+
+        Legacy form (deprecated v0.19.0, removed v0.20.0)::
+
+            await client.select_post("abc-123", timeout=6.0)
+
+        Still works but emits ``DeprecationWarning``.
         """
+        import warnings
+
+        from .schema import SELECT_POST_KEYS, validate_params
+
+        if isinstance(params, str):
+            warnings.warn(
+                "select_post(post_id, ...) positional/kwarg form is "
+                "deprecated since v0.19.0; use select_post({'post_id': ...}) "
+                "for consistency with create_video / edit_image. Removed "
+                "in v0.20.0.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            params = {"post_id": params, **legacy_kwargs}
+        elif isinstance(params, dict):
+            if legacy_kwargs:
+                raise TypeError(
+                    "select_post: cannot mix dict params and kwargs. "
+                    "Pass everything inside the dict."
+                )
+        else:
+            raise TypeError(
+                f"select_post: first arg must be a dict (canonical) or "
+                f"a post_id str (deprecated), got {type(params).__name__}"
+            )
+
+        p = validate_params(params, SELECT_POST_KEYS)
+        post_id = p.get("post_id")
+        if not post_id:
+            raise TypeError("select_post: 'post_id' is required in params dict")
+        # select_post defaults to 6.0s — short, since the caller pays
+        # the page-load latency before this is checked. Read from the
+        # original params so the schema's int(300) default doesn't win.
+        timeout = params.get("timeout", 6.0)
+
         import asyncio
 
         url = f"{self.BASE_URL}/imagine/post/{post_id}"
@@ -1729,7 +1845,7 @@ class GrokClient(ResponseParser):
         ``select_post`` which guarantees the requested post is
         actually selected even when Grok's SPA redirects.
         """
-        await self.select_post(post_id)
+        await self.select_post({"post_id": post_id})
 
     # =========================================================================
     # UI Menu Operations (shared helper + specific actions)
@@ -2413,17 +2529,17 @@ class GrokClient(ResponseParser):
         gen_result.__dict__["_extend_seed_requested"] = seed_start
         return gen_result
 
-    async def extend_video(
-        self,
-        video_id: str,
-        *,
-        seed_start: float | None = None,
-        duration: str | None = None,
-        prompt: str | None = None,
-        timeout: int = 600,
-        preserve_source_favorite_state: bool = False,
-    ) -> VideoExtendResult:
+    async def extend_video(self, params, **legacy_kwargs) -> VideoExtendResult:
         """Extend a specific video by its post id.
+
+        Canonical shape (v0.19.0+) — dict-style, matching create_video /
+        create_image / edit_image::
+
+            await client.extend_video({
+                "video_id": "abc-123",
+                "prompt": "continue the scene",
+                "duration": "6s",
+            })
 
         Thin composition of the public primitives :meth:`select_post`
         and :meth:`extend_current`, plus favorite-state cleanup and
@@ -2431,20 +2547,21 @@ class GrokClient(ResponseParser):
         explicit in your own code, you can call those two directly —
         ``extend_video`` is the convenience shape for the common case.
 
-        Flow: ``select_post(video_id)`` lands the tab on the requested
-        post (correcting for Grok's SPA redirect-to-chain-tail
-        behavior), then ``extend_current`` opens the extend panel and
-        submits. With the correct post selected, the filmstrip's
-        default handle position is video_id's own tail, so
-        ``seed_start=None`` produces fanout-safe branching without
-        any drag. Explicit ``seed_start`` still triggers the drag for
-        mid-source seeding.
+        Flow: ``select_post`` lands the tab on the requested post
+        (correcting for Grok's SPA redirect-to-chain-tail behavior),
+        then ``extend_current`` opens the extend panel and submits.
+        With the correct post selected, the filmstrip's default handle
+        position is video_id's own tail, so ``seed_start=None``
+        produces fanout-safe branching without any drag. Explicit
+        ``seed_start`` still triggers the drag for mid-source seeding.
 
-        Args (keyword-only, all optional except video_id). Per-key
-        descriptions below are generated from
-        ``grok_web.schema.PARAMS`` (SSOT).
+        Args:
+            params: Dict with keys from EXTEND_KEYS (see grok_web.schema).
+                ``video_id`` is required; everything else is optional.
+                Per-key descriptions below are generated from
+                ``grok_web.schema.PARAMS`` (SSOT).
 
-            <SCHEMA_ARGS>
+                <SCHEMA_ARGS>
 
         Returns:
             VideoExtendResult with new video_id, source linkage,
@@ -2456,7 +2573,56 @@ class GrokClient(ResponseParser):
                 the menu item is missing, the seed drag drifts
                 outside ``SEED_DRIFT_TOLERANCE`` (1.0s), or
                 generation fails.
+            TypeError: If ``params`` is not a dict (or, for the
+                deprecated positional form, a ``video_id`` string), or
+                if ``video_id`` is missing.
+
+        Legacy form (deprecated v0.19.0, removed v0.20.0)::
+
+            await client.extend_video("abc-123", prompt="...", duration="6s")
+
+        Still works but emits ``DeprecationWarning``.
         """
+        import warnings
+
+        from .schema import EXTEND_KEYS, validate_params
+
+        if isinstance(params, str):
+            warnings.warn(
+                "extend_video(video_id, ...) positional/kwarg form is "
+                "deprecated since v0.19.0; use extend_video({'video_id': ..., "
+                "...}) for consistency with create_video / edit_image. "
+                "Removed in v0.20.0.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            params = {"video_id": params, **legacy_kwargs}
+        elif isinstance(params, dict):
+            if legacy_kwargs:
+                raise TypeError(
+                    "extend_video: cannot mix dict params and kwargs. "
+                    "Pass everything inside the dict."
+                )
+        else:
+            raise TypeError(
+                f"extend_video: first arg must be a dict (canonical) or "
+                f"a video_id str (deprecated), got {type(params).__name__}"
+            )
+
+        p = validate_params(params, EXTEND_KEYS)
+        video_id = p.get("video_id")
+        if not video_id:
+            raise TypeError("extend_video: 'video_id' is required in params dict")
+        seed_start = p.get("seed_start")
+        duration = p.get("duration")
+        prompt = p.get("prompt")
+        # extend_video defaults to 600s (not the shared schema default of 300)
+        # for the same reason as create_video — extend under NSFW or queue
+        # pressure regularly needs >300s. Read from the original `params`
+        # dict so an explicit caller value still wins.
+        timeout = params.get("timeout", 600)
+        preserve_source_favorite_state = p.get("preserve_source_favorite_state", False)
+
         # One get_post_details call does double duty: the duration
         # hint (skips a wait_for_filmstrip bootstrap) and the
         # favorite-state snapshot if the caller opted in.
@@ -2495,7 +2661,7 @@ class GrokClient(ResponseParser):
 
         # Correctness: select_post guarantees video_id is actually
         # shown even when Grok's SPA redirects to a descendant.
-        await self.select_post(video_id)
+        await self.select_post({"post_id": video_id})
 
         gen_result = await self.extend_current(
             seed_start=seed_start,
@@ -2875,7 +3041,7 @@ class GrokClient(ResponseParser):
             tmpdir = Path(tempfile.mkdtemp(prefix="grok_edit_refs_"))
             try:
                 ref_paths = await self._resolve_image_refs_to_local(ref_specs, tmpdir)
-                await self.select_post(post_id)
+                await self.select_post({"post_id": post_id})
                 return await self.edit_current(
                     edit_prompt,
                     timeout=timeout,
@@ -3462,7 +3628,7 @@ class GrokClient(ResponseParser):
         the tab on post_id even when Grok's SPA redirects to a
         descendant. See :meth:`edit_image` for the public entry point.
         """
-        await self.select_post(post_id)
+        await self.select_post({"post_id": post_id})
         return await self.edit_current(edit_prompt, timeout=timeout, source_post_id=post_id)
 
     async def _upload_image(self, image_path: str | Path, timeout: int = 15) -> int:
@@ -5065,8 +5231,8 @@ class GrokClient(ResponseParser):
         # 300s, which returned a confusing partial result; 600 absorbs
         # those naturally. Callers that need shorter can still pass
         # ``timeout``; callers still hitting timeouts can use
-        # ``wait_for_video_completion(video_id, timeout=...)`` on the
-        # returned ``in_progress`` result to resume without re-submitting.
+        # ``wait_for_video_completion({'video_id': ..., 'timeout': ...})`` on
+        # the returned ``in_progress`` result to resume without re-submitting.
         timeout = p.get("timeout", 600)
 
         # Normalize duration to int
@@ -5133,7 +5299,7 @@ class GrokClient(ResponseParser):
                         "pre-call — safe default). Hint fires once per client."
                     )
                     self._favorite_pollution_hinted = True
-                await self.select_post(post_id)
+                await self.select_post({"post_id": post_id})
                 result = await self.generate_video_from_current(
                     source_post_id=post_id,
                     preset=preset,
@@ -5167,12 +5333,14 @@ class GrokClient(ResponseParser):
                 # expects '6s'/'10s', not the int we normalized earlier).
                 orig_duration = params.get("duration")
                 extend_res = await self.extend_video(
-                    video_id=src_vid,
-                    seed_start=p.get("seed_start"),
-                    duration=orig_duration,
-                    prompt=prompt if prompt else None,
-                    timeout=timeout,
-                    preserve_source_favorite_state=preserve_fav,
+                    {
+                        "video_id": src_vid,
+                        "seed_start": p.get("seed_start"),
+                        "duration": orig_duration,
+                        "prompt": prompt if prompt else None,
+                        "timeout": timeout,
+                        "preserve_source_favorite_state": preserve_fav,
+                    }
                 )
                 # extend_video returns VideoExtendResult; adapt its fields
                 # so callers receive a normal VideoGenerationResult. Seed
@@ -5784,44 +5952,102 @@ class GrokClient(ResponseParser):
     # Video download
     # =========================================================================
 
-    async def download_video(
-        self,
-        video_id: str,
-        output_path: str | Path,
-        *,
-        prefer_hd: bool = True,
-        parent_post_id: str | None = None,
-    ) -> Path:
+    async def download_video(self, params, *legacy_args, **legacy_kwargs) -> Path:
         """Download a video to local file.
 
+        Canonical shape (v0.19.0+) — dict-style::
+
+            await client.download_video({
+                "video_id": "abc-123",
+                "output_path": "out.mp4",
+                "prefer_hd": True,
+            })
+
         Args:
-            video_id: The child video UUID to download.
-            output_path: Destination file path (will be created/overwritten).
-            prefer_hd: If True (default), use hdMediaUrl when available,
-                fall back to mediaUrl otherwise.
-            parent_post_id: **Deprecated.** No longer needed — the
-                direct-lookup path hits the video post by id and does
-                not require walking its parent's children. Accepting
-                this kwarg emits a DeprecationWarning; behaviour is
-                preserved for callers still passing it.
+            params: Dict with keys from DOWNLOAD_KEYS (see grok_web.schema).
+                ``video_id`` and ``output_path`` are required. Per-key
+                descriptions below are generated from
+                ``grok_web.schema.PARAMS`` (SSOT).
+
+                <SCHEMA_ARGS>
+
+        Returns:
+            Path to the downloaded file (same as ``output_path``).
 
         Raises:
             GrokNotFoundError: If video not found.
             GrokAPIError: If all fetch strategies fail (e.g. 403 signed
                 URL rejected all credential modes).
-        """
-        if parent_post_id is not None:
-            import warnings
+            TypeError: If ``params`` is not a dict (or, for the
+                deprecated positional form, ``video_id`` + ``output_path``
+                strings), or if a required key is missing.
 
+        Legacy form (deprecated v0.19.0, removed v0.20.0)::
+
+            await client.download_video(video_id, output_path,
+                                        prefer_hd=True)
+
+        Still works but emits ``DeprecationWarning``. The
+        ``parent_post_id`` kwarg is also accepted for backwards
+        compatibility but ignored — the direct-lookup path no longer
+        needs it.
+        """
+        import warnings
+
+        from .schema import DOWNLOAD_KEYS, validate_params
+
+        if isinstance(params, str):
             warnings.warn(
-                "download_video(parent_post_id=...) is deprecated and will "
-                "be removed in a future release. The new direct-lookup path "
-                "resolves the video's URL from video_id alone — pass only "
-                "the video_id going forward. No downstream behaviour change "
-                "is required; existing calls still work.",
+                "download_video(video_id, output_path, ...) positional/kwarg "
+                "form is deprecated since v0.19.0; use "
+                "download_video({'video_id': ..., 'output_path': ...}) for "
+                "consistency with create_video / edit_image. Removed in "
+                "v0.20.0.",
                 DeprecationWarning,
                 stacklevel=2,
             )
+            normalized = {"video_id": params}
+            if legacy_args:
+                # First positional after video_id was output_path.
+                normalized["output_path"] = legacy_args[0]
+                if len(legacy_args) > 1:
+                    raise TypeError(
+                        "download_video: too many positional args (legacy "
+                        f"signature accepts at most 2, got {1 + len(legacy_args)})"
+                    )
+            # parent_post_id was a deprecated no-op even on the legacy
+            # signature; warn-and-drop rather than rejecting the call.
+            if "parent_post_id" in legacy_kwargs:
+                legacy_kwargs.pop("parent_post_id")
+                warnings.warn(
+                    "download_video(parent_post_id=...) has been a no-op "
+                    "since the direct-lookup path landed; the kwarg is "
+                    "ignored and will be removed in v0.20.0.",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+            normalized.update(legacy_kwargs)
+            params = normalized
+        elif isinstance(params, dict):
+            if legacy_args or legacy_kwargs:
+                raise TypeError(
+                    "download_video: cannot mix dict params and "
+                    "positional/kwargs. Pass everything inside the dict."
+                )
+        else:
+            raise TypeError(
+                f"download_video: first arg must be a dict (canonical) or "
+                f"a video_id str (deprecated), got {type(params).__name__}"
+            )
+
+        p = validate_params(params, DOWNLOAD_KEYS)
+        video_id = p.get("video_id")
+        output_path = p.get("output_path")
+        if not video_id:
+            raise TypeError("download_video: 'video_id' is required in params dict")
+        if not output_path:
+            raise TypeError("download_video: 'output_path' is required in params dict")
+        prefer_hd = p.get("prefer_hd", True)
 
         output_path = Path(output_path)
 
@@ -5847,24 +6073,10 @@ class GrokClient(ResponseParser):
         except GrokNotFoundError:
             pass
 
-        # Strategy 2: parent_post_id.children lookup (legacy fast path).
-        # Still useful when caller wants HD URL that only the parent's
-        # child listing carries, or when the video-post direct lookup
-        # is rate-limited.
-        if not video_url and parent_post_id:
-            try:
-                details = await self.get_post_details(parent_post_id)
-                for child in details.children:
-                    if child.id == video_id:
-                        candidate = (child.hd_media_url if prefer_hd else None) or child.media_url
-                        if candidate:
-                            video_url = candidate
-                            break
-            except GrokNotFoundError:
-                pass
-
-        # Strategy 3: favorites scan (legacy slow path).
-        if not video_url and not parent_post_id:
+        # Strategy 2: favorites scan (legacy slow path) — only when the
+        # direct lookup didn't surface the URL. Iterates the user's
+        # favorited parents and looks for video_id among their children.
+        if not video_url:
             posts = await self.list_posts(limit=100, source="favorites")
             for post in posts:
                 try:
@@ -6005,11 +6217,14 @@ class GrokClient(ResponseParser):
 
 def _splice_all_docstrings() -> None:
     from .schema import (
+        DOWNLOAD_KEYS,
         EDIT_KEYS,
         EXTEND_KEYS,
         IMAGE_KEYS,
+        SELECT_POST_KEYS,
         UPLOAD_KEYS,
         VIDEO_KEYS,
+        WAIT_FOR_COMPLETION_KEYS,
         splice_schema_into_docstring,
     )
 
@@ -6019,6 +6234,9 @@ def _splice_all_docstrings() -> None:
         ("edit_image", EDIT_KEYS),
         ("create_image", IMAGE_KEYS),
         ("upload_images", UPLOAD_KEYS),
+        ("download_video", DOWNLOAD_KEYS),
+        ("select_post", SELECT_POST_KEYS),
+        ("wait_for_video_completion", WAIT_FOR_COMPLETION_KEYS),
     ]:
         method = getattr(GrokClient, method_name, None)
         if method is None:

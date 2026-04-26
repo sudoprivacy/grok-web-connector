@@ -73,10 +73,11 @@ PARAMS: dict[str, dict[str, Any]] = {
             "Max seconds to wait for generation. Per-endpoint defaults: "
             "create_image / edit_image = 300 (image gen is fast); "
             "create_video / extend_video = 600 (img2vid under queue "
-            "pressure or NSFW routing regularly needs >300s). If "
-            "create_video / extend_video returns with ``in_progress=True`` "
+            "pressure or NSFW routing regularly needs >300s); "
+            "select_post = 6.0 (sidebar-correction wait, not page-load). "
+            "If create_video / extend_video returns with ``in_progress=True`` "
             "you can resume polling via "
-            "``client.wait_for_video_completion(video_id, timeout=N)`` "
+            "``client.wait_for_video_completion({'video_id': ..., 'timeout': N})`` "
             "without re-submitting the job."
         ),
         "type": "int",
@@ -203,6 +204,32 @@ PARAMS: dict[str, dict[str, Any]] = {
         "type": "bool",
         "default": False,
     },
+    "output_path": {
+        "desc": (
+            "Local destination path for download_video. Existing files "
+            "are overwritten; parent directory must already exist. Accepts "
+            "str or pathlib.Path."
+        ),
+        "type": "str | Path",
+    },
+    "prefer_hd": {
+        "desc": (
+            "If True (default), download_video prefers hdMediaUrl when "
+            "available, falling back to mediaUrl. Set False to force the "
+            "smaller mediaUrl asset."
+        ),
+        "type": "bool",
+        "default": True,
+    },
+    "poll_interval": {
+        "desc": (
+            "Seconds between REST polls in wait_for_video_completion. "
+            "Default 5.0; lower values poll faster (and burn more quota), "
+            "higher values cost more wall-clock latency on the success edge."
+        ),
+        "type": "float",
+        "default": 5.0,
+    },
 }
 
 # =============================================================================
@@ -259,6 +286,26 @@ EDIT_KEYS = [
 
 UPLOAD_KEYS = [
     "images",
+]
+
+# Keys accepted by download_video({...}) — dict-style as of v0.19.0.
+DOWNLOAD_KEYS = [
+    "video_id",
+    "output_path",
+    "prefer_hd",
+]
+
+# Keys accepted by select_post({...}) — dict-style as of v0.19.0.
+SELECT_POST_KEYS = [
+    "post_id",
+    "timeout",
+]
+
+# Keys accepted by wait_for_video_completion({...}) — dict-style as of v0.19.0.
+WAIT_FOR_COMPLETION_KEYS = [
+    "video_id",
+    "timeout",
+    "poll_interval",
 ]
 
 # =============================================================================

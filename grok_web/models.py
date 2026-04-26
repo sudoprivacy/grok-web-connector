@@ -739,7 +739,8 @@ class VideoExtendResult(BaseModel):
         We hit our polling timeout before progress reached 100, but
         ``video_id`` was already assigned and nothing was moderated.
         Resume polling via
-        :meth:`GrokClient.wait_for_video_completion` (pass ``video_id``).
+        :meth:`GrokClient.wait_for_video_completion`
+        (``{'video_id': result.video_id}``).
         """
         return bool(self.video_id) and self.progress < 100 and not self.moderated
 
