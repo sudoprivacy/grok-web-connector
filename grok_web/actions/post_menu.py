@@ -107,8 +107,39 @@ async def open_post_menu(tab, *, delay: float = 1.0) -> bool:
         if attempt < 2:
             await asyncio.sleep(2 * delay)
 
+    # Diagnostic: dump visible button labels so the next failure is
+    # actionable without a live browser. Grok occasionally renames the
+    # aria-label or restructures the menu trigger — this list tells us
+    # exactly what to add to _MENU_BUTTON_NAMES.
+    try:
+        visible = await tab.evaluate(
+            r"""
+            (() => {
+                const btns = Array.from(document.querySelectorAll('button'));
+                return btns
+                    .filter(b => {
+                        const r = b.getBoundingClientRect();
+                        return r.width > 0 && r.height > 0;
+                    })
+                    .map(b => ({
+                        aria: b.getAttribute('aria-label') || '',
+                        haspopup: b.getAttribute('aria-haspopup') || '',
+                        text: (b.innerText || '').trim().slice(0, 40),
+                    }))
+                    .filter(d => d.aria || d.haspopup || d.text)
+                    .slice(0, 30);
+            })()
+            """
+        )
+    except Exception:
+        visible = None
     raise GrokAPIError(
-        "Could not open '...' post menu (button may be missing or Radix trigger isn't firing — check pointer-event dispatch)"
+        "Could not open '...' post menu (button may be missing or Radix "
+        "trigger isn't firing). Tried aria-labels: "
+        f"{sorted(_MENU_BUTTON_NAMES)}. "
+        f"Visible buttons on page: {visible!r}. "
+        "If the page actually has a '...' menu but a different aria-label, "
+        "add it to grok_web/actions/post_menu.py::_MENU_BUTTON_NAMES."
     )
 
 

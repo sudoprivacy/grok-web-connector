@@ -3439,54 +3439,21 @@ class GrokClient(ResponseParser):
         await asyncio.sleep(1 * d)
         await enable_focus_emulation(self._tab)
 
-        # 1. Open 更多选项 (Radix — pointer dispatch required)
-        menu_opened = await self._tab.evaluate(
-            r"""
-            (() => {
-                const b = Array.from(document.querySelectorAll('button'))
-                    .find(x => (x.getAttribute('aria-label')||'')==='更多选项');
-                if (!b) return false;
-                const r = b.getBoundingClientRect();
-                const x = r.x + r.width/2, y = r.y + r.height/2;
-                const o = {bubbles:true, cancelable:true, clientX:x, clientY:y,
-                           pointerType:'mouse', button:0, pointerId:1, isPrimary:true};
-                b.dispatchEvent(new PointerEvent('pointerdown', o));
-                b.dispatchEvent(new MouseEvent('mousedown', o));
-                b.dispatchEvent(new PointerEvent('pointerup', o));
-                b.dispatchEvent(new MouseEvent('mouseup', o));
-                b.dispatchEvent(new MouseEvent('click', o));
-                return true;
-            })()
-            """
-        )
-        if not menu_opened:
-            raise GrokAPIError("Could not find 更多选项 button on image post")
-        await asyncio.sleep(1.2 * d)
+        # 1. Open 更多选项 / More options / Options — use the resilient
+        # post_menu helper rather than handwritten JS so a Grok-side
+        # aria-label rename only needs to be patched in one place
+        # (actions/post_menu.py::_MENU_BUTTON_NAMES). The helper retries
+        # 3x, multi-locale, and verifies the menu actually opened by
+        # checking that role=menuitem nodes appeared.
+        from .actions.post_menu import click_menu_item, open_post_menu
+
+        await open_post_menu(self._tab, delay=d)
+        await asyncio.sleep(0.2 * d)
 
         # 3. Click Custom (or legacy 编辑图像 / Edit image)
-        custom_fired = await self._tab.evaluate(
-            r"""
-            (() => {
-                const mi = Array.from(document.querySelectorAll('[role=menuitem]'))
-                    .find(m => {
-                        const t = (m.innerText||'').trim();
-                        return t === 'Custom' || t === '编辑图像' || t === 'Edit image';
-                    });
-                if (!mi) return false;
-                const r = mi.getBoundingClientRect();
-                const x = r.x + r.width/2, y = r.y + r.height/2;
-                const o = {bubbles:true, cancelable:true, clientX:x, clientY:y,
-                           pointerType:'mouse', button:0, pointerId:1, isPrimary:true};
-                mi.dispatchEvent(new PointerEvent('pointerdown', o));
-                mi.dispatchEvent(new MouseEvent('mousedown', o));
-                mi.dispatchEvent(new PointerEvent('pointerup', o));
-                mi.dispatchEvent(new MouseEvent('mouseup', o));
-                mi.dispatchEvent(new MouseEvent('click', o));
-                return true;
-            })()
-            """
-        )
-        if not custom_fired:
+        try:
+            await click_menu_item(self._tab, "Custom", "编辑图像", "Edit image", delay=d)
+        except GrokAPIError as e:
             raise GrokAPIError(
                 "Could not find 'Custom' menuitem. This commonly happens when "
                 "the target image has video descendants and the page redirected "
@@ -3494,7 +3461,7 @@ class GrokClient(ResponseParser):
                 "x-statsig-id cache by running any other generation call in the "
                 "same session — edit_image will then use the direct REST path "
                 "which works on any chain depth."
-            )
+            ) from e
         await asyncio.sleep(2.5 * d)
 
         # 4. Switch to 图片 mode (panel defaults to 视频)
