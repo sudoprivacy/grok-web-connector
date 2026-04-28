@@ -1161,7 +1161,19 @@ class GrokClient(ResponseParser):
         if not obj.get("ok"):
             return False
         try:
-            dest.write_bytes(base64.b64decode(obj["b64"]))
+            data = base64.b64decode(obj["b64"])
+            # Same flush+fsync as _download_video_by_url — the immediate
+            # consumer here is the browser's file input via CDP, which
+            # also opens the file out-of-process and could see a partial
+            # state on Windows.
+            import os as _os
+
+            with open(dest, "wb") as _f:
+                _f.write(data)
+                _f.flush()
+                _os.fsync(_f.fileno())
+            if dest.stat().st_size != len(data):
+                return False
         except Exception:
             return False
         return True
@@ -2911,7 +2923,27 @@ class GrokClient(ResponseParser):
             if result.get("status") == 200:
                 video_data = base64.b64decode(result["data"])
                 output_path.parent.mkdir(parents=True, exist_ok=True)
-                output_path.write_bytes(video_data)
+                # Explicit flush + fsync + post-close size check. On
+                # Windows, Path.write_bytes returns before the OS finishes
+                # making the file readable to other processes — a caller
+                # that subprocesses ffprobe immediately can hit empty/
+                # partial state ~20-30% of the time. fsync forces the
+                # writeback before we return; the size check catches the
+                # rare disk-full / truncated-write case.
+                import os as _os
+
+                with open(output_path, "wb") as _f:
+                    _f.write(video_data)
+                    _f.flush()
+                    _os.fsync(_f.fileno())
+                actual = output_path.stat().st_size
+                if actual != len(video_data):
+                    raise GrokAPIError(
+                        f"download_video: size mismatch after write — "
+                        f"expected {len(video_data)} bytes, got {actual} "
+                        f"(URL: {video_url[:80]}). Disk full or filesystem "
+                        "race; retry the call."
+                    )
                 logger.debug(
                     "[download_video] success via %s for %s",
                     desc,
