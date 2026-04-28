@@ -1867,7 +1867,11 @@ class GrokClient(ResponseParser):
         """
         Navigate to a post and open its "..." menu.
 
-        This is a shared helper for all post menu operations.
+        Thin wrapper: navigate + 404 check, then delegate to the
+        resilient :func:`actions.post_menu.open_post_menu` (which handles
+        the multi-locale + structural-fallback locator strategy and
+        retries 3x). This is the shared helper for favorite / unfavorite
+        / delete / like / dislike etc.
 
         Args:
             post_id: The post UUID to navigate to
@@ -1880,6 +1884,8 @@ class GrokClient(ResponseParser):
         """
         import asyncio
 
+        from .actions.post_menu import open_post_menu
+
         d = self._ui_delay
 
         # Navigate to the post page
@@ -1891,60 +1897,7 @@ class GrokClient(ResponseParser):
         if "Page not found" in page_text or "404" in page_text:
             raise GrokAPIError(f"Post {post_id} not found (404)")
 
-        # Find and click the "..." menu button
-        # Note: aria-label varies by post type and language:
-        # - Image posts: "更多选项" / "More options"
-        # - Video posts: "Options"
-        menu_btn = None
-        selectors = [
-            'button[aria-label="更多选项"][aria-haspopup="menu"]',
-            'button[aria-label="More options"][aria-haspopup="menu"]',
-            'button[aria-label="Options"][aria-haspopup="menu"]',
-            'button[aria-label="Options"]',  # fallback without haspopup
-        ]
-        for _ in range(3):
-            for selector in selectors:
-                try:
-                    menu_btn = await self._tab.query_selector(selector)
-                    if menu_btn:
-                        break
-                except Exception:
-                    pass
-            if menu_btn:
-                break
-            await asyncio.sleep(2 * d)
-
-        if menu_btn is None:
-            raise GrokAPIError("Could not find '...' menu button (Options/更多选项)")
-
-        # Pause any playing video first (video overlay can intercept clicks)
-        await self._tab.evaluate('document.querySelectorAll("video").forEach(v => v.pause())')
-        await asyncio.sleep(0.3)
-
-        await menu_btn.scroll_into_view()
-        await asyncio.sleep(0.5 * d)
-        # Radix dropdown requires pointer events (not just click or mouse_click)
-        await self._tab.evaluate("""
-            (function() {
-                var selectors = [
-                    'button[aria-label="更多选项"]',
-                    'button[aria-label="More options"]',
-                    'button[aria-label="Options"]'
-                ];
-                for (var sel of selectors) {
-                    var btn = document.querySelector(sel);
-                    if (btn) {
-                        btn.dispatchEvent(new PointerEvent("pointerdown", {bubbles: true}));
-                        btn.dispatchEvent(new PointerEvent("pointerup", {bubbles: true}));
-                        btn.dispatchEvent(new MouseEvent("click", {bubbles: true}));
-                        return;
-                    }
-                }
-            })()
-        """)
-        await asyncio.sleep(1 * d)
-
-        return True
+        return await open_post_menu(self._tab, delay=d)
 
     async def _click_menu_item(self, *text_options: str) -> bool:
         """
