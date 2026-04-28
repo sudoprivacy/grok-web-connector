@@ -60,7 +60,11 @@ async def open_post_menu(tab, *, delay: float = 1.0) -> bool:
     for attempt in range(3):
         # Locate the trigger and report which strategy matched so the
         # Python side can hint about UI drift exactly once.
-        located = await tab.evaluate(
+        # NB: tab.evaluate returns nested objects in CDP wire format
+        # (e.g. [['key', {value: x}], ...]) rather than auto-unwrapped
+        # dicts. JSON.stringify on the JS side + json.loads here is the
+        # codebase's standard pattern (see _download_video_by_url).
+        located_raw = await tab.evaluate(
             r"""
             (() => {
                 const wanted = new Set(__WANTED__);
@@ -70,29 +74,34 @@ async def open_post_menu(tab, *, delay: float = 1.0) -> bool:
                         const r = b.getBoundingClientRect();
                         return r.width > 0 && r.height > 0;
                     });
+                let result;
                 if (all.length === 0) {
-                    return {strategy: 'none', count: 0};
+                    result = {strategy: 'none', count: 0};
+                } else {
+                    // Strategy 1: named match
+                    const named = all.find(b => wanted.has((b.getAttribute('aria-label') || '').trim()));
+                    if (named) {
+                        result = {strategy: 'named', count: all.length,
+                                  label: named.getAttribute('aria-label')};
+                    } else if (all.length === 1) {
+                        // Strategy 2: lone trigger on the page
+                        result = {strategy: 'lone', count: 1, label: ''};
+                    } else {
+                        // Strategy 3: first trigger NOT nested in [role=menu]
+                        const top = all.find(b => !b.closest('[role="menu"]'));
+                        result = top
+                            ? {strategy: 'top-level', count: all.length, label: ''}
+                            : {strategy: 'ambiguous', count: all.length};
+                    }
                 }
-                // Strategy 1: named match
-                const named = all.find(b => wanted.has((b.getAttribute('aria-label') || '').trim()));
-                if (named) {
-                    return {strategy: 'named', count: all.length,
-                            label: named.getAttribute('aria-label')};
-                }
-                // Strategy 2: lone trigger on the page
-                if (all.length === 1) {
-                    return {strategy: 'lone', count: 1, label: ''};
-                }
-                // Strategy 3: first trigger NOT nested in [role=menu]
-                // (excludes any submenu triggers when multiple are present)
-                const top = all.find(b => !b.closest('[role="menu"]'));
-                if (top) {
-                    return {strategy: 'top-level', count: all.length, label: ''};
-                }
-                return {strategy: 'ambiguous', count: all.length};
+                return JSON.stringify(result);
             })()
             """.replace("__WANTED__", wanted_names_literal)
         )
+        try:
+            located = _json.loads(located_raw) if isinstance(located_raw, str) else None
+        except (TypeError, ValueError):
+            located = None
 
         if located and located.get("strategy") not in ("none", "ambiguous"):
             # One-time hint when Grok ships a nameless trigger so callers
@@ -172,11 +181,11 @@ async def open_post_menu(tab, *, delay: float = 1.0) -> bool:
     # buttons with aria-haspopup OR a non-empty aria-label, since those
     # are the candidates a future strategy might match on.
     try:
-        visible = await tab.evaluate(
+        visible_raw = await tab.evaluate(
             r"""
             (() => {
                 const btns = Array.from(document.querySelectorAll('button'));
-                return btns
+                const items = btns
                     .filter(b => {
                         const r = b.getBoundingClientRect();
                         return r.width > 0 && r.height > 0;
@@ -192,9 +201,11 @@ async def open_post_menu(tab, *, delay: float = 1.0) -> bool:
                         text: (b.innerText || '').trim().slice(0, 40),
                     }))
                     .slice(0, 30);
+                return JSON.stringify(items);
             })()
             """
         )
+        visible = _json.loads(visible_raw) if isinstance(visible_raw, str) else None
     except Exception:
         visible = None
     raise GrokAPIError(
