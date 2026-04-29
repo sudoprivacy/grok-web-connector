@@ -3153,6 +3153,30 @@ class GrokClient(ResponseParser):
         # as well as the share-images path we'd otherwise construct.
         try:
             src_details = await self.get_post_details(post_id)
+        except GrokNotFoundError:
+            # REST get on this post 404'd — observed for edit_image-derived
+            # posts that are themselves video-chain roots, where Grok's
+            # REST media/post/get classifies them as transient even though
+            # the UI can navigate to them. Fall through to UI path (which
+            # uses URL navigation + select_post correctness) rather than
+            # fail. Architecture: this is the same REST→UI fallback
+            # ladder the no-statsig-id branch above already uses; we're
+            # just extending it to cover the next sub-step's failure.
+            logger.info(
+                "edit_image: get_post_details(%s) returned 404 — post "
+                "exists at the UI layer but REST media/post/get can't "
+                "resolve it (common for edit_image-derived chain-root "
+                "posts in 2026-04). Falling back to UI path; ~5-15s "
+                "slower than REST. If your workflow hits this often, "
+                "the UI path is fully supported.",
+                post_id,
+            )
+            try:
+                self._tab.remove_handler(cdp.network.ResponseReceived, handle_response)
+                self._tab.remove_handler(cdp.network.LoadingFinished, handle_loading_finished)
+            except Exception:
+                pass
+            return await self._edit_image_via_ui(post_id, edit_prompt, timeout)
         except Exception as e:
             raise GrokAPIError(
                 f"edit_image: could not fetch post details for {post_id}: {e}"
@@ -3238,20 +3262,27 @@ class GrokClient(ResponseParser):
             status = post_result.get("status")
             err = post_result.get("error", "unknown")
             body_preview = post_result.get("body", "")
-            # Rapid successive REST calls can trip Grok's anti-bot
-            # (status=403, body contains "Request rejected by anti-bot
-            # rules"). The sid is fine; it's call-rate that tripped the
-            # filter. Rather than surface it to the caller and ask them
-            # to back off, fall back to the UI path — it's slower but
-            # naturally paced by DOM interactions, so retry loops that
-            # legitimately call edit_image back-to-back just work.
-            # Invalidate the cached sid so a subsequent call re-captures
-            # a fresh one.
-            if status == 403 and "anti-bot" in body_preview.lower():
-                logger.warning(
-                    "edit_image REST path tripped anti-bot on this call "
-                    "(rapid successive edits?). Falling back to UI path. "
-                    f"body={body_preview!r}"
+            # Any 4xx from /rest/app-chat/conversations/new means Grok's
+            # REST validator rejected the request — observed reasons
+            # include anti-bot rules (rapid successive calls), lineage
+            # checks on certain post classes (chain-root edit_image
+            # outputs), or statsig drift between cache and server. All
+            # of these are recoverable via the UI path which Grok treats
+            # as higher-trust (DOM-paced, full session context). Drop
+            # the cached sid so the next call probes fresh, then fall
+            # through. 5xx is genuine server-side and not UI-recoverable
+            # so it still raises.
+            if isinstance(status, int) and 400 <= status < 500:
+                reason = (
+                    "anti-bot"
+                    if "anti-bot" in body_preview.lower()
+                    else f"validator-rejected ({status})"
+                )
+                logger.info(
+                    "edit_image REST path got HTTP %d (%s) — falling back to UI path. body=%r",
+                    status,
+                    reason,
+                    body_preview[:200],
                 )
                 if self._statsig_snitch is not None:
                     self._statsig_snitch._by_endpoint.pop("/rest/app-chat/conversations/new", None)
