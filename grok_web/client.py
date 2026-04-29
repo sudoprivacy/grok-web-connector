@@ -3423,14 +3423,27 @@ class GrokClient(ResponseParser):
         await asyncio.sleep(1 * d)
         await enable_focus_emulation(self._tab)
 
+        # 0. Switch viewport to image-view mode. select_post locks the
+        # URL onto the source image, but for chain-root images that have
+        # video descendants Grok's post page defaults the viewport to
+        # video-mode (showing the tail video player). The "..." menu
+        # tracks the visible viewport, so a video-mode viewport gives
+        # video-context items (扩展 / 删除视频) instead of the image
+        # items we need (Custom / Spicy / Normal). switch_to_image_view
+        # is a no-op when the post has no video children or the
+        # viewport is already image-mode, so it's safe to call
+        # unconditionally.
+        from .actions.post_media import switch_to_image_view
+        from .actions.post_menu import click_menu_item, open_post_menu
+
+        await switch_to_image_view(self._tab, delay=d)
+
         # 1. Open 更多选项 / More options / Options — use the resilient
         # post_menu helper rather than handwritten JS so a Grok-side
         # aria-label rename only needs to be patched in one place
         # (actions/post_menu.py::_MENU_BUTTON_NAMES). The helper retries
         # 3x, multi-locale, and verifies the menu actually opened by
         # checking that role=menuitem nodes appeared.
-        from .actions.post_menu import click_menu_item, open_post_menu
-
         await open_post_menu(self._tab, delay=d)
         await asyncio.sleep(0.2 * d)
 
@@ -3439,12 +3452,10 @@ class GrokClient(ResponseParser):
             await click_menu_item(self._tab, "Custom", "编辑图像", "Edit image", delay=d)
         except GrokAPIError as e:
             raise GrokAPIError(
-                "Could not find 'Custom' menuitem. This commonly happens when "
-                "the target image has video descendants and the page redirected "
-                "to the tail video (whose menu is video-context). Fix: warm the "
-                "x-statsig-id cache by running any other generation call in the "
-                "same session — edit_image will then use the direct REST path "
-                "which works on any chain depth."
+                "Could not find 'Custom' menuitem. The viewport may still "
+                "be in video-mode (chain-root image with video descendants); "
+                "check that switch_to_image_view succeeded. If you're seeing "
+                "this, please file an issue with the post UUID."
             ) from e
         await asyncio.sleep(2.5 * d)
 
