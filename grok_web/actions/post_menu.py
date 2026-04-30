@@ -299,6 +299,6 @@ async def get_menu_items(tab) -> list[dict]:
     result = await page_find(tab, interactable_only=True)
     return [
         {"name": el.get("name", ""), "role": el.get("role"), "ref": el.get("ref")}
-        for el in result.get("elements", [])
+        for el in result
         if el.get("role") == "menuitem"
     ]

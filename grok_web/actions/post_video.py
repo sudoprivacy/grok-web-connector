@@ -24,7 +24,7 @@ async def get_video_thumbnails(tab) -> list[dict]:
 
     result = await page_find(tab, text="Thumbnail", interactable_only=True)
     thumbnails = []
-    for el in result.get("elements", []):
+    for el in result:
         if el.get("role") == "button" and el.get("name", "").startswith("Thumbnail"):
             name = el["name"]
             try:
@@ -57,7 +57,7 @@ async def select_video_thumbnail(tab, index: int, *, delay: float = 1.0) -> bool
     target_name = f"Thumbnail {index}"
 
     result = await page_find(tab, text=target_name, interactable_only=True)
-    for el in result.get("elements", []):
+    for el in result:
         if el.get("role") == "button" and el.get("name") == target_name:
             await click_by_ref(tab, el["ref"])
             await asyncio.sleep(1 * delay)

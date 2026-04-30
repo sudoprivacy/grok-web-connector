@@ -175,9 +175,7 @@ def auto_favorite_first_n(
                 await asyncio.sleep(0.6)
                 r2 = await page_discover(tab, text="生成视频", interactable_only=True)
                 fresh = [
-                    el
-                    for el in r2.get("elements", [])
-                    if el.get("role") == "button" and el.get("name") == "生成视频"
+                    el for el in r2 if el.get("role") == "button" and el.get("name") == "生成视频"
                 ]
                 if index >= len(fresh):
                     _log.warning(f"auto_favorite_first_n: item {index} not in snapshot")

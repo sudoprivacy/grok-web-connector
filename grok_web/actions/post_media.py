@@ -28,7 +28,7 @@ async def get_media_view(tab) -> str | None:
     has_video_btn = False
     has_image_btn = False
 
-    for el in result.get("elements", []):
+    for el in result:
         name = el.get("name", "")
         if el.get("role") == "button":
             if name in ("播放", "暂停", "Play", "Pause"):
@@ -58,7 +58,7 @@ async def switch_to_image_view(tab, *, delay: float = 1.0) -> bool:
         return True  # Already on image view or no toggle
 
     result = await page_find(tab, text="图片", interactable_only=True)
-    for el in result.get("elements", []):
+    for el in result:
         if el.get("role") == "button" and el.get("name") in ("图片", "Image"):
             await click_by_ref(tab, el["ref"])
             await asyncio.sleep(1.5 * delay)
@@ -81,7 +81,7 @@ async def switch_to_video_view(tab, *, delay: float = 1.0) -> bool:
         return True  # Already on video view
 
     result = await page_find(tab, text="视频", interactable_only=True)
-    for el in result.get("elements", []):
+    for el in result:
         if el.get("role") == "button" and el.get("name") in ("视频", "Video"):
             await click_by_ref(tab, el["ref"])
             await asyncio.sleep(1.5 * delay)
