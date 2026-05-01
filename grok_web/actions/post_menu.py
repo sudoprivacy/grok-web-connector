@@ -375,7 +375,36 @@ async def click_menu_item(tab, *text_options: str, delay: float = 1.0) -> bool:
         if attempt < 2:
             await asyncio.sleep(1 * delay)
 
-    raise GrokAPIError(f"Could not find menu item: {text_options}")
+    # Dump what's actually in the menu so the next failure tells us
+    # whether (a) we opened the right menu but Grok renamed items, or
+    # (b) we opened the wrong menu (e.g. spatial selector picked
+    # video-context trigger when caller wanted image-context).
+    try:
+        actual_raw = await tab.evaluate(
+            r"""
+            (() => {
+                const items = Array.from(document.querySelectorAll('[role="menuitem"]'))
+                    .map(mi => ({
+                        text: (mi.innerText || '').trim().slice(0, 40),
+                        aria: (mi.getAttribute('aria-label') || '').trim(),
+                    }))
+                    .filter(it => it.text || it.aria);
+                return JSON.stringify(items);
+            })()
+            """
+        )
+        actual = _json.loads(actual_raw) if isinstance(actual_raw, str) else None
+    except Exception:
+        actual = None
+
+    raise GrokAPIError(
+        f"Could not find menu item matching {list(text_options)!r}. "
+        f"Menu was open but contained: {actual!r}. If these items look "
+        "like a different context than expected (e.g. video-context "
+        "扩展/删除视频 when caller wanted image-context Custom/Spicy), "
+        "the trigger picked by open_post_menu was the wrong one — "
+        "consider passing prefer_media= to anchor on the right card."
+    )
 
 
 async def get_menu_items(tab) -> list[dict]:

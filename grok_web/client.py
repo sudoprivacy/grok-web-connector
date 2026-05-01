@@ -3153,39 +3153,34 @@ class GrokClient(ResponseParser):
         # mediaUrl from post metadata handles user-uploaded images
         # (which live at a different CDN path than Grok-generated ones)
         # as well as the share-images path we'd otherwise construct.
+        #
+        # On GrokNotFoundError, we used to fall straight to UI (v0.19.5).
+        # That made the chain-root edit case dependent on the UI menu
+        # working — which it doesn't (the chain-root layout has both
+        # image-card and video-card menus and Grok's menu items reflect
+        # global viewport state, not which trigger we click). v0.19.10
+        # tries the constructed-URL pattern on 404 and stays in the REST
+        # path; if Grok rejects the request later (4xx), the existing
+        # 4xx-fallback-to-UI handler still kicks in.
+        constructed_media_url = f"https://imagine-public.x.ai/imagine-public/images/{post_id}.jpg"
         try:
             src_details = await self.get_post_details(post_id)
         except GrokNotFoundError:
-            # REST get on this post 404'd — observed for edit_image-derived
-            # posts that are themselves video-chain roots, where Grok's
-            # REST media/post/get classifies them as transient even though
-            # the UI can navigate to them. Fall through to UI path (which
-            # uses URL navigation + select_post correctness) rather than
-            # fail. Architecture: this is the same REST→UI fallback
-            # ladder the no-statsig-id branch above already uses; we're
-            # just extending it to cover the next sub-step's failure.
             logger.info(
                 "edit_image: get_post_details(%s) returned 404 — post "
                 "exists at the UI layer but REST media/post/get can't "
                 "resolve it (common for edit_image-derived chain-root "
-                "posts in 2026-04). Falling back to UI path; ~5-15s "
-                "slower than REST. If your workflow hits this often, "
-                "the UI path is fully supported.",
+                "posts in 2026-04). Trying the constructed-URL pattern "
+                "(%s) with REST; will fall through to UI on 4xx.",
                 post_id,
+                constructed_media_url,
             )
-            try:
-                self._tab.remove_handler(cdp.network.ResponseReceived, handle_response)
-                self._tab.remove_handler(cdp.network.LoadingFinished, handle_loading_finished)
-            except Exception:
-                pass
-            return await self._edit_image_via_ui(post_id, edit_prompt, timeout)
+            src_details = None
         except Exception as e:
             raise GrokAPIError(
                 f"edit_image: could not fetch post details for {post_id}: {e}"
             ) from e
-        src_media_url = src_details.media_url
-        if not src_media_url:
-            src_media_url = f"https://imagine-public.x.ai/imagine-public/images/{post_id}.jpg"
+        src_media_url = (src_details.media_url if src_details else None) or constructed_media_url
 
         # statsig_id already resolved at top of edit_image — reuse.
         # Build the exact request body Grok's own UI sends. Captured
