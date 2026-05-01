@@ -2943,6 +2943,17 @@ class GrokClient(ResponseParser):
         Returns:
             ImageEditResult with image URLs and moderation info.
 
+        Raises:
+            GrokAPIError(WKE=imagine:invalid-parent-post): The source post
+                ``images[0]`` is rejected by Grok's server-side lineage
+                validator. As of 2026-04 this fires for **chain-root
+                posts** — image posts that have video descendants. Such
+                posts can be viewed normally but Grok refuses them as an
+                edit_image source. Workarounds: (a) use a non-chain-root
+                image post as source, or (b) pass the chain-root post as
+                a *reference* image (``images=[<other_source>,
+                'post:<chain_root>']``) rather than as the source.
+
         Examples:
             # Single-source (no refs) — direct REST when sid available
             await client.edit_image({
@@ -3270,6 +3281,32 @@ class GrokClient(ResponseParser):
             # through. 5xx is genuine server-side and not UI-recoverable
             # so it still raises.
             if isinstance(status, int) and 400 <= status < 500:
+                # Fail-fast: Grok's server-side lineage validator rejects
+                # certain post classes as edit_image source. The signal
+                # is the WKE (well-known error) code in the response body.
+                # As of 2026-04, the relevant one is
+                # ``imagine:invalid-parent-post`` — emitted for chain-root
+                # posts (image posts with video descendants). Falling
+                # back to UI doesn't help (UI hits the same validator
+                # via /conversations/new), so save the round-trip and
+                # tell the caller exactly what happened + the workaround.
+                if "invalid-parent-post" in body_preview.lower():
+                    raise GrokAPIError(
+                        f"edit_image: post {post_id} cannot be used as an "
+                        f"edit_image source — Grok server-side validator "
+                        f"rejected it (WKE=imagine:invalid-parent-post). "
+                        f"This typically means the post is a chain root "
+                        f"(an image post that has video descendants) or "
+                        f"has lineage state that disqualifies it as an "
+                        f"edit source. The UI path also fails on these "
+                        f"posts, so the connector skips that fallback. "
+                        f"Workarounds: (a) use a non-chain-root image "
+                        f"post as the source; (b) pass this post as a "
+                        f"reference image instead of as the source "
+                        f"(``images=[<other-source>, 'post:{post_id}']``). "
+                        f"Original error body: {body_preview!r}"
+                    )
+
                 reason = (
                     "anti-bot"
                     if "anti-bot" in body_preview.lower()
@@ -3450,16 +3487,15 @@ class GrokClient(ResponseParser):
         await open_post_menu(self._tab, delay=d, prefer_media="image")
         await asyncio.sleep(0.2 * d)
 
-        # 3. Click Custom (or legacy 编辑图像 / Edit image)
-        try:
-            await click_menu_item(self._tab, "Custom", "编辑图像", "Edit image", delay=d)
-        except GrokAPIError as e:
-            raise GrokAPIError(
-                "Could not find 'Custom' menuitem. The viewport may still "
-                "be in video-mode (chain-root image with video descendants); "
-                "check that switch_to_image_view succeeded. If you're seeing "
-                "this, please file an issue with the post UUID."
-            ) from e
+        # 3. Click Custom (or legacy 编辑图像 / Edit image). Don't
+        # wrap click_menu_item's error — it already includes the
+        # actual menu items it found, which is the diagnostic info
+        # we need. (Earlier wrapper used to swallow that and add a
+        # speculative "viewport may still be in video-mode" hint;
+        # turned out chain-root failures are server-side lineage
+        # rejections, not viewport mode, so the inner dump is more
+        # actionable.)
+        await click_menu_item(self._tab, "Custom", "编辑图像", "Edit image", delay=d)
         await asyncio.sleep(2.5 * d)
 
         # 4. Switch to 图片 mode (panel defaults to 视频)
