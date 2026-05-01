@@ -61,7 +61,16 @@ class _ScriptedTab:
 
 def _classify_js(js: str) -> str:
     """Classify which helper sent this JS so the responder can answer
-    appropriately. The helpers in post_media.py are the main consumer."""
+    appropriately. The helpers in post_media.py are the main consumer;
+    post_menu.open_post_menu has its own classification on top."""
+    if "haspopup_menu_triggers" in js:
+        return "post_menu_diagnostic_dump"
+    if 'aria-haspopup="menu"' in js and "PointerEvent" in js:
+        return "post_menu_select_and_click"
+    if "querySelectorAll('[role=\"menuitem\"]')" in js or "menuitem" in js:
+        return "post_menu_verify_opened"
+    if 'document.querySelectorAll("video").forEach' in js:
+        return "pause_videos"
     if "buttons" in js and "media" in js and "JSON.stringify" in js:
         return "diagnostic_dump"
     if "'img, video'" in js:
@@ -245,3 +254,72 @@ def test_get_media_view_falls_back_to_page_discover_when_no_rendered_media(fake_
     # _FAKE_PAGE_DISCOVER_ELEMENTS includes Pause + 视频/图片 toggles
     # → Pause present → "video".
     assert asyncio.run(get_media_view(tab)) == "video"
+
+
+# ---------------------------------------------------------------------------
+# post_menu.open_post_menu — spatial-proximity disambiguation
+# ---------------------------------------------------------------------------
+def _post_menu_responder(*, click_response, opened=True):
+    """Build a responder for open_post_menu's evaluate sequence.
+
+    Args:
+        click_response: dict to return from select-and-click JS (e.g.
+            ``{"strategy": "spatial", "count": 2, "label": "...", ...}``)
+            or None for "no trigger found".
+        opened: bool to return from the verify-opened check.
+    """
+
+    def responder(js: str):
+        kind = _classify_js(js)
+        if kind == "pause_videos":
+            return None
+        if kind == "post_menu_select_and_click":
+            return (
+                _json.dumps(click_response)
+                if click_response
+                else _json.dumps({"strategy": "none", "count": 0})
+            )
+        if kind == "post_menu_verify_opened":
+            return opened
+        if kind == "post_menu_diagnostic_dump":
+            return _json.dumps({"buttons": [], "haspopup_menu_triggers": []})
+        return None
+
+    return responder
+
+
+def test_open_post_menu_spatial_strategy_succeeds():
+    """Chain-root case: 2 triggers, spatial strategy picks the right one."""
+    from grok_web.actions.post_menu import open_post_menu
+
+    click_response = {
+        "strategy": "spatial",
+        "count": 2,
+        "label": "<nameless>",
+        "target_tag": "IMG",
+        "distance": 80,
+    }
+    tab = _ScriptedTab(_post_menu_responder(click_response=click_response))
+    # prefer_media="image" exercises the IMG-targeting path.
+    assert asyncio.run(open_post_menu(tab, delay=0, prefer_media="image")) is True
+
+
+def test_open_post_menu_named_strategy_still_works():
+    """When a named trigger is present, spatial path is bypassed."""
+    from grok_web.actions.post_menu import open_post_menu
+
+    click_response = {"strategy": "named", "count": 1, "label": "更多选项"}
+    tab = _ScriptedTab(_post_menu_responder(click_response=click_response))
+    assert asyncio.run(open_post_menu(tab, delay=0)) is True
+
+
+def test_open_post_menu_no_trigger_raises_with_diagnostic():
+    """No triggers found → 3 attempts → raise with haspopup_menu_triggers dump."""
+    from grok_web.actions.post_menu import open_post_menu
+
+    tab = _ScriptedTab(_post_menu_responder(click_response=None))
+    with pytest.raises(GrokAPIError) as excinfo:
+        asyncio.run(open_post_menu(tab, delay=0))
+    msg = str(excinfo.value)
+    # The new dump format must surface the per-trigger media context.
+    assert "haspopup_menu_triggers" in msg

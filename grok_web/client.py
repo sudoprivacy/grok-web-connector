@@ -2380,8 +2380,10 @@ class GrokClient(ResponseParser):
             await asyncio.sleep(1 + random.uniform(0, 0.5))
 
             # 1. Open "..." and click 扩展. Keep legacy label names as
-            # fallbacks in case Grok reverts.
-            await open_post_menu(self._tab, delay=self._ui_delay)
+            # fallbacks in case Grok reverts. prefer_media="video" disambiguates
+            # on chain-root posts where both image and video cards render
+            # their own '...' triggers — extend wants the video-context one.
+            await open_post_menu(self._tab, delay=self._ui_delay, prefer_media="video")
             await click_menu_item(
                 self._tab,
                 "扩展",
@@ -3444,7 +3446,13 @@ class GrokClient(ResponseParser):
         # (actions/post_menu.py::_MENU_BUTTON_NAMES). The helper retries
         # 3x, multi-locale, and verifies the menu actually opened by
         # checking that role=menuitem nodes appeared.
-        await open_post_menu(self._tab, delay=d)
+        #
+        # prefer_media="image": chain-root posts render BOTH image and
+        # video cards (each with its own '...' trigger). We want the
+        # image-context menu (Custom / Spicy / Normal items), not the
+        # video-context one (扩展 / 删除视频). The helper picks the
+        # trigger spatially closest to the largest visible <img>.
+        await open_post_menu(self._tab, delay=d, prefer_media="image")
         await asyncio.sleep(0.2 * d)
 
         # 3. Click Custom (or legacy 编辑图像 / Edit image)

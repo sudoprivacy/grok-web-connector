@@ -21,7 +21,7 @@ _MENU_BUTTON_NAMES = {"更多选项", "More options", "Options"}
 _NAMELESS_TRIGGER_HINTED = False
 
 
-async def open_post_menu(tab, *, delay: float = 1.0) -> bool:
+async def open_post_menu(tab, *, delay: float = 1.0, prefer_media: str | None = None) -> bool:
     """Open the "..." post menu on the current page.
 
     Grok's menu is a Radix DropdownMenu — its Trigger listens to
@@ -37,15 +37,26 @@ async def open_post_menu(tab, *, delay: float = 1.0) -> bool:
       2. The lone ``button[aria-haspopup="menu"]`` on the page if
          exactly one exists (Radix DropdownMenu Trigger invariant —
          covers Grok's icon-only redesign that ships nameless).
-      3. The first ``button[aria-haspopup="menu"]`` not nested inside
-         a ``[role="menu"]`` container (excludes nested submenus when
-         multiple triggers happen to be present).
+      3. **Spatial proximity to preferred media** — when multiple
+         triggers exist (chain-root posts render BOTH the image card
+         and the tail video card, each with its own "..." menu), the
+         trigger whose center is closest to the largest visible
+         ``<img>`` (``prefer_media="image"``) or ``<video>``
+         (``prefer_media="video"``) or any media (``None``) wins.
+         Caller passes the hint based on what menu items it expects
+         to find — image-context vs video-context.
+      4. The first ``button[aria-haspopup="menu"]`` not nested inside
+         a ``[role="menu"]`` container (last resort when no media
+         element to anchor against).
 
     Assumes already navigated to a post page.
 
     Args:
         tab: browser Tab instance
         delay: UI delay multiplier
+        prefer_media: ``"image"`` or ``"video"`` to disambiguate when
+            multiple triggers exist on chain-root posts. ``None`` =
+            any visible media (largest wins).
 
     Returns:
         True if menu was opened
@@ -56,167 +67,248 @@ async def open_post_menu(tab, *, delay: float = 1.0) -> bool:
     import json as _json
 
     wanted_names_literal = _json.dumps(sorted(_MENU_BUTTON_NAMES))
+    if prefer_media == "image":
+        media_selector = "img"
+    elif prefer_media == "video":
+        media_selector = "video"
+    else:
+        media_selector = "img, video"
+    media_selector_literal = _json.dumps(media_selector)
 
-    for attempt in range(3):
-        # Locate the trigger and report which strategy matched so the
-        # Python side can hint about UI drift exactly once.
-        # NB: tab.evaluate returns nested objects in CDP wire format
-        # (e.g. [['key', {value: x}], ...]) rather than auto-unwrapped
-        # dicts. JSON.stringify on the JS side + json.loads here is the
-        # codebase's standard pattern (see _download_video_by_url).
-        located_raw = await tab.evaluate(
-            r"""
-            (() => {
-                const wanted = new Set(__WANTED__);
-                const all = Array.from(document.querySelectorAll('button[aria-haspopup="menu"]'))
-                    .filter(b => {
-                        // Visible only
-                        const r = b.getBoundingClientRect();
-                        return r.width > 0 && r.height > 0;
+    # Locate + click in a single JS call to avoid the DOM-mutates-between-
+    # locate-and-click race. Strategy chosen on the JS side; reported back
+    # so the Python side can log UI-drift hints exactly once.
+    select_and_click_js = r"""
+        (() => {
+            const wanted = new Set(__WANTED__);
+            const mediaSelector = __MEDIA_SELECTOR__;
+            const visible = el => {
+                const r = el.getBoundingClientRect();
+                return r.width > 0 && r.height > 0;
+            };
+            const all = Array.from(
+                document.querySelectorAll('button[aria-haspopup="menu"]')
+            ).filter(visible);
+
+            if (all.length === 0) {
+                return JSON.stringify({strategy: 'none', count: 0});
+            }
+
+            let btn = null;
+            let strategy = '';
+            let extra = {};
+
+            // Strategy 1: named match
+            const named = all.find(
+                b => wanted.has((b.getAttribute('aria-label') || '').trim())
+            );
+            if (named) {
+                btn = named;
+                strategy = 'named';
+                extra.label = named.getAttribute('aria-label');
+            } else if (all.length === 1) {
+                // Strategy 2: lone trigger
+                btn = all[0];
+                strategy = 'lone';
+            } else {
+                // Strategy 3: spatial proximity to largest preferred media.
+                // Chain-root posts render image card AND video card, each
+                // with its own '...' trigger; pick the one closest to the
+                // media element the caller cares about.
+                const media = Array.from(document.querySelectorAll(mediaSelector))
+                    .filter(el => {
+                        const r = el.getBoundingClientRect();
+                        return r.width > 200 && r.height > 200;
                     });
-                let result;
-                if (all.length === 0) {
-                    result = {strategy: 'none', count: 0};
+                if (media.length > 0) {
+                    media.sort((a, b) => {
+                        const ar = a.getBoundingClientRect();
+                        const br = b.getBoundingClientRect();
+                        return (br.width * br.height) - (ar.width * ar.height);
+                    });
+                    const target = media[0];
+                    const tr = target.getBoundingClientRect();
+                    const tx = tr.x + tr.width / 2;
+                    const ty = tr.y + tr.height / 2;
+                    const ranked = all.map(b => {
+                        const r = b.getBoundingClientRect();
+                        const dx = (r.x + r.width / 2) - tx;
+                        const dy = (r.y + r.height / 2) - ty;
+                        return {btn: b, dist: Math.sqrt(dx * dx + dy * dy)};
+                    }).sort((a, b) => a.dist - b.dist);
+                    btn = ranked[0].btn;
+                    strategy = 'spatial';
+                    extra.target_tag = target.tagName;
+                    extra.distance = Math.round(ranked[0].dist);
                 } else {
-                    // Strategy 1: named match
-                    const named = all.find(b => wanted.has((b.getAttribute('aria-label') || '').trim()));
-                    if (named) {
-                        result = {strategy: 'named', count: all.length,
-                                  label: named.getAttribute('aria-label')};
-                    } else if (all.length === 1) {
-                        // Strategy 2: lone trigger on the page
-                        result = {strategy: 'lone', count: 1, label: ''};
+                    // Strategy 4: first non-nested top-level trigger.
+                    btn = all.find(b => !b.closest('[role="menu"]'));
+                    if (btn) {
+                        strategy = 'top-level';
                     } else {
-                        // Strategy 3: first trigger NOT nested in [role=menu]
-                        const top = all.find(b => !b.closest('[role="menu"]'));
-                        result = top
-                            ? {strategy: 'top-level', count: all.length, label: ''}
-                            : {strategy: 'ambiguous', count: all.length};
+                        return JSON.stringify({
+                            strategy: 'ambiguous', count: all.length
+                        });
                     }
                 }
-                return JSON.stringify(result);
-            })()
-            """.replace("__WANTED__", wanted_names_literal)
-        )
-        try:
-            located = _json.loads(located_raw) if isinstance(located_raw, str) else None
-        except (TypeError, ValueError):
-            located = None
+            }
 
-        if located and located.get("strategy") not in ("none", "ambiguous"):
-            # One-time hint when Grok ships a nameless trigger so callers
-            # know UI drift happened and the structural fallback is in use.
+            // Click the chosen trigger via full pointer sequence.
+            const r = btn.getBoundingClientRect();
+            const x = r.x + r.width / 2;
+            const y = r.y + r.height / 2;
+            const o = {
+                bubbles: true, cancelable: true,
+                clientX: x, clientY: y,
+                pointerType: 'mouse', button: 0,
+                pointerId: 1, isPrimary: true,
+            };
+            btn.dispatchEvent(new PointerEvent('pointerover', o));
+            btn.dispatchEvent(new PointerEvent('pointerenter', o));
+            btn.dispatchEvent(new PointerEvent('pointermove', o));
+            btn.dispatchEvent(new PointerEvent('pointerdown', o));
+            btn.dispatchEvent(new MouseEvent('mousedown', o));
+            btn.dispatchEvent(new PointerEvent('pointerup', o));
+            btn.dispatchEvent(new MouseEvent('mouseup', o));
+            btn.dispatchEvent(new MouseEvent('click', o));
+
+            return JSON.stringify({
+                strategy,
+                count: all.length,
+                label: btn.getAttribute('aria-label') || '<nameless>',
+                ...extra,
+            });
+        })()
+        """.replace("__WANTED__", wanted_names_literal).replace(
+        "__MEDIA_SELECTOR__", media_selector_literal
+    )
+
+    for attempt in range(3):
+        # Pause any playing video so its overlay doesn't eat clicks anywhere
+        # on the page (including the trigger we're about to click).
+        await tab.evaluate('document.querySelectorAll("video").forEach(v => v.pause())')
+        await asyncio.sleep(0.2 * delay)
+
+        result_raw = await tab.evaluate(select_and_click_js)
+        try:
+            result = _json.loads(result_raw) if isinstance(result_raw, str) else None
+        except (TypeError, ValueError):
+            result = None
+
+        if result and result.get("strategy") not in (None, "none", "ambiguous"):
+            # One-time hint when we land on a non-named strategy so UI
+            # drift is observable. Spatial path is the chain-root case;
+            # lone/top-level are the icon-only-trigger redesign.
             global _NAMELESS_TRIGGER_HINTED
-            if located["strategy"] in ("lone", "top-level") and not _NAMELESS_TRIGGER_HINTED:
+            if (
+                result["strategy"] in ("lone", "top-level", "spatial")
+                and not _NAMELESS_TRIGGER_HINTED
+            ):
                 logger.info(
-                    "[post_menu] Grok appears to ship an icon-only '...' "
-                    "trigger (no aria-label); using structural "
-                    "aria-haspopup='menu' fallback. Strategy=%s, count=%d. "
-                    "If this is the only trigger candidate the connector "
-                    "needed, no action is required — bumping connector "
-                    "later will pick up an explicit aria-label if Grok "
-                    "adds one.",
-                    located["strategy"],
-                    located["count"],
+                    "[post_menu] using structural aria-haspopup='menu' "
+                    "fallback. Strategy=%s, count=%d, prefer_media=%r. "
+                    "If this matches the menu items the caller expected, "
+                    "no action needed; if not, file an issue with the "
+                    "post UUID.",
+                    result["strategy"],
+                    result["count"],
+                    prefer_media,
                 )
                 _NAMELESS_TRIGGER_HINTED = True
 
-            # Pause any playing video so its overlay doesn't eat the click
-            await tab.evaluate('document.querySelectorAll("video").forEach(v => v.pause())')
-            await asyncio.sleep(0.2 * delay)
-
-            # Fire a full pointer sequence on the same trigger we located.
-            # Re-use the same selection logic on the JS side to avoid a
-            # races where the DOM mutates between locate and click.
-            fired = await tab.evaluate(
-                r"""
-                (() => {
-                    const wanted = new Set(__WANTED__);
-                    const all = Array.from(document.querySelectorAll('button[aria-haspopup="menu"]'))
-                        .filter(b => {
-                            const r = b.getBoundingClientRect();
-                            return r.width > 0 && r.height > 0;
-                        });
-                    if (all.length === 0) return null;
-                    let btn =
-                        all.find(b => wanted.has((b.getAttribute('aria-label') || '').trim()))
-                        || (all.length === 1 ? all[0] : null)
-                        || all.find(b => !b.closest('[role="menu"]'));
-                    if (!btn) return null;
-                    const r = btn.getBoundingClientRect();
-                    const x = r.x + r.width/2, y = r.y + r.height/2;
-                    const o = {bubbles: true, cancelable: true,
-                               clientX: x, clientY: y,
-                               pointerType: 'mouse', button: 0,
-                               pointerId: 1, isPrimary: true};
-                    btn.dispatchEvent(new PointerEvent('pointerover', o));
-                    btn.dispatchEvent(new PointerEvent('pointerenter', o));
-                    btn.dispatchEvent(new PointerEvent('pointermove', o));
-                    btn.dispatchEvent(new PointerEvent('pointerdown', o));
-                    btn.dispatchEvent(new MouseEvent('mousedown', o));
-                    btn.dispatchEvent(new PointerEvent('pointerup', o));
-                    btn.dispatchEvent(new MouseEvent('mouseup', o));
-                    btn.dispatchEvent(new MouseEvent('click', o));
-                    return btn.getAttribute('aria-label') || '<nameless>';
-                })()
-                """.replace("__WANTED__", wanted_names_literal)
+            await asyncio.sleep(1 * delay)
+            # Verify menu actually opened (role=menuitem nodes appear).
+            opened = await tab.evaluate(
+                """document.querySelectorAll('[role="menuitem"]').length > 0"""
             )
-            if fired:
-                await asyncio.sleep(1 * delay)
-                # Verify menu opened by checking that role=menuitem
-                # nodes appeared (Radix renders these only when open).
-                opened = await tab.evaluate(
-                    """
-                    document.querySelectorAll('[role="menuitem"]').length > 0
-                    """
-                )
-                if opened:
-                    return True
+            if opened:
+                return True
+
         if attempt < 2:
             await asyncio.sleep(2 * delay)
 
-    # Diagnostic: dump visible buttons that COULD be menu triggers so
-    # the next UI change is actionable without a live browser. Filter
-    # out plain text-only tiles (e.g. template carousel) — keep only
-    # buttons with aria-haspopup OR a non-empty aria-label, since those
-    # are the candidates a future strategy might match on.
+    # Diagnostic: dump (a) candidate buttons and (b) for each
+    # aria-haspopup="menu" trigger, its nearest media element. The
+    # second piece is what disambiguates "two triggers on the page
+    # which one is image-context vs video-context" without a separate
+    # probe.
     try:
         visible_raw = await tab.evaluate(
             r"""
             (() => {
-                const btns = Array.from(document.querySelectorAll('button'));
-                const items = btns
-                    .filter(b => {
-                        const r = b.getBoundingClientRect();
-                        return r.width > 0 && r.height > 0;
-                    })
+                const visible = el => {
+                    const r = el.getBoundingClientRect();
+                    return r.width > 0 && r.height > 0;
+                };
+                const btns = Array.from(document.querySelectorAll('button'))
+                    .filter(visible)
                     .filter(b => {
                         const aria = (b.getAttribute('aria-label') || '').trim();
                         const haspopup = (b.getAttribute('aria-haspopup') || '').trim();
                         return aria || haspopup;
-                    })
+                    });
+                const items = btns
                     .map(b => ({
                         aria: b.getAttribute('aria-label') || '',
                         haspopup: b.getAttribute('aria-haspopup') || '',
                         text: (b.innerText || '').trim().slice(0, 40),
                     }))
                     .slice(0, 30);
-                return JSON.stringify(items);
+                // For each haspopup="menu" trigger, find the nearest
+                // visible large media element so the failure log says
+                // which media each trigger pairs with.
+                const triggers = btns.filter(
+                    b => (b.getAttribute('aria-haspopup') || '') === 'menu'
+                );
+                const media = Array.from(document.querySelectorAll('img, video'))
+                    .filter(el => {
+                        const r = el.getBoundingClientRect();
+                        return r.width > 200 && r.height > 200;
+                    });
+                const triggerMediaPairs = triggers.map(t => {
+                    const tr = t.getBoundingClientRect();
+                    const tx = tr.x + tr.width/2;
+                    const ty = tr.y + tr.height/2;
+                    let best = null;
+                    let bestDist = Infinity;
+                    for (const m of media) {
+                        const r = m.getBoundingClientRect();
+                        const dx = (r.x + r.width/2) - tx;
+                        const dy = (r.y + r.height/2) - ty;
+                        const d = Math.sqrt(dx*dx + dy*dy);
+                        if (d < bestDist) {
+                            bestDist = d;
+                            best = m;
+                        }
+                    }
+                    return {
+                        trigger_aria: t.getAttribute('aria-label') || '',
+                        trigger_pos: {x: Math.round(tx), y: Math.round(ty)},
+                        nearest_media: best ? {
+                            tag: best.tagName,
+                            distance: Math.round(bestDist),
+                        } : null,
+                    };
+                });
+                return JSON.stringify({
+                    buttons: items,
+                    haspopup_menu_triggers: triggerMediaPairs,
+                });
             })()
             """
         )
-        visible = _json.loads(visible_raw) if isinstance(visible_raw, str) else None
+        diag = _json.loads(visible_raw) if isinstance(visible_raw, str) else None
     except Exception:
-        visible = None
+        diag = None
     raise GrokAPIError(
         "Could not open '...' post menu (no aria-haspopup='menu' button "
         f"located, or Radix trigger isn't firing). Tried aria-labels: "
-        f"{sorted(_MENU_BUTTON_NAMES)} + structural fallback. "
-        f"Candidate buttons (filtered to aria-label or aria-haspopup): "
-        f"{visible!r}. "
-        "If this list contains a button that IS the '...' trigger, please "
-        "open an issue with the dump so the locator strategy can be "
-        "extended."
+        f"{sorted(_MENU_BUTTON_NAMES)} + spatial-proximity + top-level "
+        f"fallback. Diagnostic dump: {diag!r}. "
+        "haspopup_menu_triggers shows each candidate trigger paired "
+        "with its nearest media element — useful when chain-root posts "
+        "have separate image-context and video-context triggers and "
+        "we're picking the wrong one."
     )
 
 
