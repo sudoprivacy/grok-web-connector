@@ -8,6 +8,7 @@ Public API:
     Use get_client() from grok_web package — returns GrokClient.
 """
 
+import json
 import logging
 import random
 from collections.abc import Awaitable, Callable
@@ -150,6 +151,13 @@ class GrokClient(ResponseParser):
         # Same for create_video / extend_video's "Grok auto-favorited
         # the source" nudge.
         self._favorite_pollution_hinted = False
+        # 2026-05: Grok's frontend now clears the create_image gallery
+        # state immediately after the last image lands (previously the
+        # gallery stayed visible for hours of user browsing). Hint once
+        # per client when create_image finishes without auto_favorite,
+        # so callers who relied on manual browse + heart-button workflow
+        # know to switch to auto_favorite=N.
+        self._gallery_ephemeral_hinted = False
 
         # Snitch for x-statsig-id (populated passively from any grok.com request
         # seen on this tab). Used by direct REST submit to pass anti-bot check.
@@ -4467,11 +4475,15 @@ class GrokClient(ResponseParser):
             "square": "1:1",
         }
         aspect_label = _aspect_aliases.get(aspect_ratio, aspect_ratio)
-        await self._tab.evaluate(
+        # Step 2: open 宽高比 popup. Multi-locale aria-label list (Grok
+        # 2026-05 sometimes ships English-only on certain account locales
+        # / experiments).
+        open_result = await self._tab.evaluate(
             r"""
             (() => {
+                const wanted = ['宽高比', 'Aspect ratio', 'Aspect Ratio', 'Ratio'];
                 const b = Array.from(document.querySelectorAll('button'))
-                    .find(x => (x.getAttribute('aria-label')||'') === '宽高比');
+                    .find(x => wanted.includes((x.getAttribute('aria-label')||'').trim()));
                 if (!b) return 'no-btn';
                 const r = b.getBoundingClientRect();
                 const x = r.x + r.width/2, y = r.y + r.height/2;
@@ -4486,35 +4498,96 @@ class GrokClient(ResponseParser):
             })()
             """
         )
-        await asyncio.sleep(0.5 * d)
-        # Click the matching menuitem — best-effort; if the label isn't
-        # found, leave the default aspect ratio (Grok's UI persists the
-        # last choice).
-        await self._tab.evaluate(
-            r"""
-            (() => {
-                const want = "__LABEL__";
-                const mi = Array.from(document.querySelectorAll('[role="menuitem"]'))
-                    .find(x => (x.innerText||'').trim() === want);
-                if (!mi) {
-                    // close menu by clicking body
-                    document.body.click();
-                    return 'aspect-not-found';
-                }
-                const r = mi.getBoundingClientRect();
-                const x = r.x + r.width/2, y = r.y + r.height/2;
-                const o = {bubbles:true, cancelable:true, clientX:x, clientY:y,
-                           pointerType:'mouse', button:0, pointerId:1, isPrimary:true};
-                mi.dispatchEvent(new PointerEvent('pointerdown', o));
-                mi.dispatchEvent(new MouseEvent('mousedown', o));
-                mi.dispatchEvent(new PointerEvent('pointerup', o));
-                mi.dispatchEvent(new MouseEvent('mouseup', o));
-                mi.dispatchEvent(new MouseEvent('click', o));
-                return 'ok';
-            })()
-            """.replace("__LABEL__", aspect_label)
-        )
-        await asyncio.sleep(0.5 * d)
+        if open_result != "ok":
+            # 2026-05 reproduce: Grok renamed/restructured the aspect
+            # button on some locales. Silent fallback meant users got
+            # Grok's default landscape and didn't know why. Now: dump
+            # candidate buttons so the next failure is debuggable, log
+            # a clear warning so caller knows aspect_ratio was ignored.
+            candidates = await self._tab.evaluate(
+                r"""
+                (() => {
+                    const out = Array.from(document.querySelectorAll('button'))
+                        .filter(b => {
+                            const r = b.getBoundingClientRect();
+                            return r.width > 0 && r.height > 0;
+                        })
+                        .map(b => ({
+                            aria: (b.getAttribute('aria-label')||'').trim(),
+                            text: (b.innerText||'').trim().slice(0, 30),
+                        }))
+                        .filter(d => d.aria || d.text)
+                        .slice(0, 25);
+                    return JSON.stringify(out);
+                })()
+                """
+            )
+            try:
+                cand = json.loads(candidates) if isinstance(candidates, str) else None
+            except Exception:
+                cand = None
+            logger.warning(
+                "[create_image] aspect_ratio button (宽高比/Aspect ratio) "
+                "not found — generation will use Grok's default aspect "
+                "(typically landscape). Requested aspect=%r was IGNORED. "
+                "Visible button candidates: %r. If the button has been "
+                "renamed, file an issue with this list.",
+                aspect_label,
+                cand,
+            )
+        else:
+            await asyncio.sleep(0.5 * d)
+            # Click the matching menuitem.
+            # Match on the FIRST LINE of innerText (Grok 2026-05 added an
+            # orientation suffix on a newline, so '9:16' became
+            # '9:16\nVertical'). The ratio is still on the first line.
+            # Falls back to exact-match for older UI variants.
+            click_result = await self._tab.evaluate(
+                r"""
+                (() => {
+                    const want = "__LABEL__";
+                    const items = Array.from(document.querySelectorAll('[role="menuitem"]'));
+                    const firstLine = el => (el.innerText || '')
+                        .trim()
+                        .split(/[\n\r]/)[0]
+                        .trim();
+                    const mi = items.find(x => firstLine(x) === want)
+                        || items.find(x => (x.innerText||'').trim() === want);
+                    if (!mi) {
+                        document.body.click();
+                        return JSON.stringify({
+                            ok: false,
+                            available: items.map(it => (it.innerText||'').trim()).slice(0, 12),
+                        });
+                    }
+                    const r = mi.getBoundingClientRect();
+                    const x = r.x + r.width/2, y = r.y + r.height/2;
+                    const o = {bubbles:true, cancelable:true, clientX:x, clientY:y,
+                               pointerType:'mouse', button:0, pointerId:1, isPrimary:true};
+                    mi.dispatchEvent(new PointerEvent('pointerdown', o));
+                    mi.dispatchEvent(new MouseEvent('mousedown', o));
+                    mi.dispatchEvent(new PointerEvent('pointerup', o));
+                    mi.dispatchEvent(new MouseEvent('mouseup', o));
+                    mi.dispatchEvent(new MouseEvent('click', o));
+                    return JSON.stringify({ok: true});
+                })()
+                """.replace("__LABEL__", aspect_label)
+            )
+            try:
+                cr = json.loads(click_result) if isinstance(click_result, str) else {}
+            except Exception:
+                cr = {}
+            if not cr.get("ok"):
+                logger.warning(
+                    "[create_image] aspect_ratio menuitem %r not found in "
+                    "popup. Available menuitems: %r. Generation will use "
+                    "Grok's currently-selected aspect (NOT what was "
+                    "requested). Common cause: Grok renamed the labels "
+                    "(e.g. '9:16' → '9:16 (portrait)').",
+                    aspect_label,
+                    cr.get("available"),
+                )
+            await asyncio.sleep(0.5 * d)
 
         # Step 2.5: Upload reference images (if any). One setFileInputFiles
         # call for ALL refs — calling it multiple times REPLACES rather
@@ -4947,12 +5020,142 @@ class GrokClient(ResponseParser):
             # Use captured post_ids from /rest/media/post/like requests
             selected_post_ids = captured_like_ids
 
+        # Post-generation aspect-ratio verification. Probe the natural
+        # dimensions of the first non-moderated image and compare to the
+        # ratio implied by `aspect_label`. Mismatch >5% → loud warning.
+        # Two known causes: (a) UI manipulation silently failed (caught
+        # above by no-btn / aspect-not-found), (b) Grok backend chose to
+        # override (visual-layout-driven, observed for multi-actor scenes).
+        try:
+            await self._verify_aspect_ratio(images, requested=aspect_label)
+        except Exception as _e:
+            logger.debug(f"[create_image] aspect verification skipped: {_e}")
+
+        # Gallery is ephemeral as of 2026-05 — clears immediately after
+        # generation. Callers that rely on the post-gen browse-and-heart
+        # human workflow need to use auto_favorite= or thumbnail_selector=
+        # instead. Hint once per client.
+        if not auto_favorite and thumbnail_selector is None and not self._gallery_ephemeral_hinted:
+            logger.info(
+                "[create_image] Generation complete. NOTE: Grok's frontend "
+                "now clears the gallery DOM state immediately after the "
+                "last image lands (regression observed 2026-05). The "
+                "image_url fields in the result remain durable on Grok's "
+                "CDN for hours, so post-process flows (download + filter) "
+                "still work. But the manual 'browse the gallery in the "
+                "browser and click hearts' workflow no longer works — "
+                "pass auto_favorite=N to persist the first N images "
+                "as posts, or thumbnail_selector=signal_file_selector(...) "
+                "for human-in-the-loop. Hint fires once per client."
+            )
+            self._gallery_ephemeral_hinted = True
+
         return ImageGenerationResult(
             prompt=prompt,
             images=images,
             conversation_id=None,  # Not available via WebSocket
             selected_post_ids=selected_post_ids,
         )
+
+    async def _verify_aspect_ratio(self, images, *, requested: str) -> None:
+        """Compare returned image dims to the requested aspect ratio.
+
+        Probes the first non-moderated image via in-browser ``Image()``
+        loader (no extra fetch — uses Grok's CDN cache), parses the
+        requested label (e.g. ``"9:16"``, ``"2:3"``, ``"portrait"``),
+        and emits a ``logger.warning`` when the actual ratio diverges
+        from requested by more than 5%. No-op on missing images or
+        unparsable label.
+        """
+        # Parse requested ratio into a float (w/h).
+        ratio_aliases = {
+            "portrait": 2 / 3,
+            "landscape": 3 / 2,
+            "square": 1.0,
+        }
+        if requested in ratio_aliases:
+            target_ratio = ratio_aliases[requested]
+        elif ":" in (requested or ""):
+            try:
+                w, h = requested.split(":")
+                target_ratio = float(w) / float(h)
+            except (ValueError, ZeroDivisionError):
+                return
+        else:
+            return  # Unknown / unparsable
+
+        first_url = None
+        for img in images:
+            if hasattr(img, "moderated") and getattr(img, "moderated", False):
+                continue
+            if isinstance(img, dict) and img.get("moderated"):
+                continue
+            url = (
+                getattr(img, "image_url", None)
+                if hasattr(img, "image_url")
+                else img.get("image_url")
+                if isinstance(img, dict)
+                else None
+            )
+            if url:
+                first_url = url
+                break
+        if not first_url:
+            return
+
+        dims_raw = await self._tab.evaluate(
+            r"""
+            (async (url) => {
+                return new Promise((resolve) => {
+                    const img = new Image();
+                    img.onload = () => resolve(JSON.stringify({
+                        w: img.naturalWidth, h: img.naturalHeight,
+                    }));
+                    img.onerror = () => resolve(JSON.stringify({}));
+                    img.src = url;
+                    setTimeout(() => resolve(JSON.stringify({})), 6000);
+                })
+            })(__URL__)
+            """.replace("__URL__", json.dumps(first_url)),
+            await_promise=True,
+        )
+        try:
+            dims = json.loads(dims_raw) if isinstance(dims_raw, str) else {}
+        except Exception:
+            dims = {}
+        w, h = dims.get("w"), dims.get("h")
+        if not w or not h:
+            return
+        actual_ratio = w / h
+        # 5% tolerance — covers Grok's slight per-pixel rounding without
+        # masking real orientation flips (1.49 vs 0.67 is >100% off).
+        if abs(actual_ratio - target_ratio) / target_ratio > 0.05:
+            actual_orient = (
+                "landscape" if actual_ratio > 1 else "portrait" if actual_ratio < 1 else "square"
+            )
+            req_orient = (
+                "landscape" if target_ratio > 1 else "portrait" if target_ratio < 1 else "square"
+            )
+            logger.warning(
+                "[create_image] aspect_ratio mismatch: requested %r "
+                "(target ratio=%.3f, %s) but received %dx%d (actual "
+                "ratio=%.3f, %s). Common causes: "
+                "(1) the aspect-ratio UI button silently failed (check "
+                "for earlier '宽高比 not found' warnings); "
+                "(2) Grok backend overrode the request (visual-layout-"
+                "driven for multi-actor / horizontal-composition prompts). "
+                "If (2), Grok may not honor aspect_ratio for this prompt; "
+                "rephrase or accept the override. Connector did pass the "
+                "requested value via UI; check connector logs above to "
+                "confirm UI step succeeded.",
+                requested,
+                target_ratio,
+                req_orient,
+                w,
+                h,
+                actual_ratio,
+                actual_orient,
+            )
 
     async def _create_video_from_text(
         self,
