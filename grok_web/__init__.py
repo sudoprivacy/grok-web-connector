@@ -74,6 +74,7 @@ def get_client(
     headless: bool = False,
     profile: str | None = None,
     startup_timeout: float = 30.0,
+    extra_chrome_args: list[str] | None = None,
 ) -> GrokClient:
     """
     Get the Grok API client.
@@ -90,6 +91,11 @@ def get_client(
         startup_timeout: Seconds to wait for Chrome to bind its debug port on
             auto-launch (default: 30.0). Raise on slow / crowded Windows
             machines or first-time profile init.
+        extra_chrome_args: Additional Chrome command-line flags appended after
+            ai-dev-browser's defaults and the connector's own
+            ``--disable-logging`` / ``--log-file=NUL`` defaults (which silence
+            Chrome's stderr so it doesn't fill the Popen pipe buffer and hang
+            after a few minutes of CDP-heavy activity on Windows).
 
     Returns:
         GrokClient instance with all API methods.
@@ -108,6 +114,7 @@ def get_client(
         headless=headless,
         profile=profile,
         startup_timeout=startup_timeout,
+        extra_chrome_args=extra_chrome_args,
     )
 
 

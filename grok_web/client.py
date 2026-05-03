@@ -110,6 +110,7 @@ class GrokClient(ResponseParser):
         force_new_chrome: bool = False,
         profile: str | None = None,
         startup_timeout: float = 30.0,
+        extra_chrome_args: list[str] | None = None,
     ):
         """
         Initialize GrokClient.
@@ -132,6 +133,13 @@ class GrokClient(ResponseParser):
             startup_timeout: Seconds to wait for Chrome to bind the debug port
                      on auto-launch (default: 30.0). Raise on slow/crowded
                      Windows machines or first-time profile init.
+            extra_chrome_args: Additional Chrome command-line flags appended
+                     to ai-dev-browser's defaults + the connector's
+                     ``--disable-logging`` / ``--log-file=NUL`` defaults
+                     (which silence Chrome's stderr to prevent the
+                     long-running pipe-buffer-fill hang on Windows). Use
+                     this only if you need Chrome flags beyond what
+                     ai-dev-browser and connector already supply.
         """
         # Store for deferred loading in __aenter__
         self._provided_cookies = cookies
@@ -170,6 +178,7 @@ class GrokClient(ResponseParser):
         self._force_new_chrome = force_new_chrome
         self._profile = profile
         self._startup_timeout = startup_timeout
+        self._extra_chrome_args = list(extra_chrome_args) if extra_chrome_args else None
 
     async def _load_or_setup_cookies(self) -> GrokCookies:
         """Load cookies from config, or trigger interactive setup if missing."""
@@ -216,6 +225,23 @@ class GrokClient(ResponseParser):
                     "headless": self._headless,
                     "profile": profile_name,
                     "startup_timeout": self._startup_timeout,
+                    # ai-dev-browser's launch_chrome on Windows uses
+                    # subprocess.Popen(stderr=PIPE) but never drains it.
+                    # Chrome's stderr fills the kernel pipe buffer
+                    # (~4-8KB) within minutes of CDP-heavy activity →
+                    # Chrome's writes block → process eventually
+                    # hangs/aborts. The "exactly ~5 minutes after a
+                    # fanout starts" symptom is this. --disable-logging
+                    # silences Chrome's stderr emission entirely so the
+                    # pipe never fills. Combine with --log-file=NUL
+                    # (Windows nul device) as a belt-and-suspenders for
+                    # any subsystems that ignore --disable-logging.
+                    # Caller-provided extra_args win — they're appended.
+                    "extra_args": [
+                        "--disable-logging",
+                        "--log-file=NUL",
+                        *(self._extra_chrome_args or []),
+                    ],
                 }
                 if self._remote_port is not None:
                     kwargs["port"] = self._remote_port
