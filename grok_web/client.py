@@ -5121,10 +5121,18 @@ class GrokClient(ResponseParser):
                         f"server-side block (preflight content moderation, "
                         f"account flag, or limit hit with a banner the "
                         f"connector doesn't recognize). The connector is "
-                        f"failing fast rather than scrolling indefinitely. "
-                        f"If candidate_messages includes Grok's rate-limit "
-                        f"or quota text, send it to the connector "
-                        f"maintainer to extend the keyword dictionaries."
+                        f"failing fast rather than scrolling indefinitely.\n\n"
+                        f"=== HELP US IMPROVE ===\n"
+                        f"If you saw a rate-limit / quota / wait banner in "
+                        f"the browser, please don't close the chrome window, "
+                        f"then run from the connector repo:\n"
+                        f"    python -m scripts.dump_grok_banner\n"
+                        f"and forward workbench/grok_banner_dump.txt to the "
+                        f"connector maintainer. The dump includes the actual "
+                        f"banner text + selectors so the next release can "
+                        f"classify this state as a typed "
+                        f"GrokRateLimitError / GrokQuotaExceededError "
+                        f"automatically."
                     )
 
                 # Submit is still active → genuine rate-limit, just slow.
