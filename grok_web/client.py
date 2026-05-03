@@ -68,6 +68,67 @@ DEFAULT_STATSIG_ID = (
 
 
 # =============================================================================
+# ai-dev-browser launch_chrome stderr patch
+# =============================================================================
+# ai-dev-browser's launch_chrome calls subprocess.Popen with stderr=PIPE on
+# Windows but never drains the pipe. Chrome's stderr (GPU process logs,
+# Crashpad/Breakpad chatter, V8 errors, CSP violations, sandbox warnings —
+# subsystems NOT covered by --disable-logging / --log-file=NUL) fills the
+# kernel pipe buffer (~4-8KB) within a few minutes of CDP-heavy activity →
+# Chrome's stderr write blocks → process hangs / aborts. v0.19.13 cut most
+# of stderr via Chrome flags (3x lifespan improvement reported in the wild)
+# but didn't fully close the gap — the only definitive fix is to redirect
+# stderr to DEVNULL at the OS level so Chrome's writes go to the bit bucket
+# regardless of which subsystem emits them.
+#
+# Approach: monkey-patch subprocess.Popen as seen from ai_dev_browser's
+# chrome.py module so that any kwargs with stderr=PIPE get rewritten to
+# stderr=DEVNULL. Other Popen calls in the process are unaffected (we patch
+# the binding inside chrome.py's namespace, not the global subprocess module).
+# Idempotent — installed once per process.
+
+_AI_DEV_BROWSER_STDERR_PATCHED = False
+
+
+def _patch_ai_dev_browser_chrome_stderr() -> None:
+    global _AI_DEV_BROWSER_STDERR_PATCHED
+    if _AI_DEV_BROWSER_STDERR_PATCHED:
+        return
+    try:
+        import subprocess as _sp
+
+        from ai_dev_browser.core import chrome as _chrome_mod
+    except Exception:
+        # ai-dev-browser layout changed — bail; v0.19.13 flag-based cut
+        # is still in effect via extra_args, so we degrade gracefully.
+        return
+
+    _OriginalPopen = _chrome_mod.subprocess.Popen
+
+    class _StderrDevnullPopen(_OriginalPopen):
+        def __init__(self, *args, **kwargs):
+            if kwargs.get("stderr") is _sp.PIPE:
+                kwargs["stderr"] = _sp.DEVNULL
+            super().__init__(*args, **kwargs)
+
+    # Replace subprocess.Popen as seen from chrome.py only. The launch_chrome
+    # function does ``subprocess.Popen(args, **popen_kwargs)`` against this
+    # name, so reassigning here intercepts that call without globally
+    # affecting the user's other subprocess.Popen usage.
+    class _SubprocessShim:
+        def __getattr__(self, name):
+            if name == "Popen":
+                return _StderrDevnullPopen
+            return getattr(_sp, name)
+
+    _chrome_mod.subprocess = _SubprocessShim()  # type: ignore[assignment]
+    _AI_DEV_BROWSER_STDERR_PATCHED = True
+    logger.debug(
+        "[chrome-stderr-patch] subprocess.Popen wrapped to force stderr=DEVNULL on Chrome launch"
+    )
+
+
+# =============================================================================
 # GrokClient - Browser automation via ai-dev-browser/CDP
 # =============================================================================
 
@@ -209,6 +270,10 @@ class GrokClient(ResponseParser):
         from ai_dev_browser import cdp
         from ai_dev_browser.core import browser_start
         from ai_dev_browser.core.connection import connect_browser
+
+        # Ensure Chrome's stderr is redirected to DEVNULL (not PIPE).
+        # Idempotent — installs once per process.
+        _patch_ai_dev_browser_chrome_stderr()
 
         # Load cookies (deferred from __init__)
         if self._provided_cookies is not None:
