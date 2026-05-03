@@ -5021,12 +5021,77 @@ class GrokClient(ResponseParser):
                 consecutive_no_new_jobs = 0  # Reset when new jobs appear
             jobs_before_scroll = len(completed)
 
-            # Exponential backoff when scroll doesn't generate new jobs
-            # Grok rate-limits generation, new batches appear every 2-3 minutes
+            # When no new jobs after 3 scroll cycles, two possibilities:
+            #   (a) Grok is rate-limiting generation but submit still works
+            #       — new batches will eventually appear; backoff and retry.
+            #   (b) Grok server-side disabled the submit button (hourly limit,
+            #       quota exhausted, preflight content moderation block,
+            #       account flag). No new jobs will EVER appear no matter
+            #       how long we wait. Used to silently loop until
+            #       max_scroll abort, wasting 10-30 min per call.
+            #
+            # Probe submit-button state + nearby banners to distinguish.
+            # The probe is cheap (one JS evaluate) and only fires when
+            # we'd otherwise be sleeping anyway.
             if consecutive_no_new_jobs >= 3:
-                # Wait longer before next scroll (15s, then 30s, capped at 60s)
+                from .exceptions import GrokQuotaExceededError, GrokRateLimitError
+
+                submit_state = await self._probe_submit_state()
+                if submit_state.get("submit_disabled"):
+                    banners = submit_state.get("banners") or []
+                    banner_text = " | ".join(banners).lower()
+                    # Quota: daily / billing-period exhaustion
+                    if any(
+                        s in banner_text
+                        for s in ("quota", "daily limit", "已达", "上限", "超出今日")
+                    ):
+                        raise GrokQuotaExceededError(
+                            f"create_image: submit button is disabled and "
+                            f"the banner indicates quota exhaustion. Stop "
+                            f"generating until quota resets. "
+                            f"Banner: {banners!r}"
+                        )
+                    # Rate-limit: hourly / temporary throttle (resets in minutes)
+                    if any(
+                        s in banner_text
+                        for s in (
+                            "rate limit",
+                            "try again",
+                            "too many",
+                            "稍后再试",
+                            "请稍候",
+                            "频率",
+                            "limit reached",
+                        )
+                    ):
+                        raise GrokRateLimitError(
+                            f"create_image: submit button is disabled "
+                            f"(rate-limited). Banner: {banners!r}. Wait "
+                            f"several minutes before retrying."
+                        )
+                    # Submit disabled with no recognizable banner — preflight
+                    # content moderation, account flag, or unknown server
+                    # signal. Fail fast; don't burn another 30s of backoff.
+                    raise GrokAPIError(
+                        f"create_image: submit button is disabled and no "
+                        f"new generation jobs are arriving. Probe state: "
+                        f"submit_aria={submit_state.get('submit_aria')!r}, "
+                        f"submit_text={submit_state.get('submit_text')!r}, "
+                        f"banners={banners!r}. Generation cannot proceed — "
+                        f"this is usually a server-side block (preflight "
+                        f"content moderation, account flag, or limit hit). "
+                        f"The connector is failing fast rather than "
+                        f"scrolling indefinitely; caller should treat this "
+                        f"as non-recoverable for this prompt."
+                    )
+
+                # Submit is still active → genuine rate-limit, just slow.
+                # Wait longer before next scroll (15s, 30s, capped at 60s).
                 backoff_wait = min(15 * (2 ** (consecutive_no_new_jobs - 3)), 60)
-                logger.info(f"[scroll] rate-limited, waiting {backoff_wait}s before next scroll")
+                logger.info(
+                    f"[scroll] rate-limited but submit still enabled, "
+                    f"waiting {backoff_wait}s before next scroll"
+                )
                 await asyncio.sleep(backoff_wait)
 
             # Scroll down to trigger more generation.
@@ -5252,6 +5317,73 @@ class GrokClient(ResponseParser):
             conversation_id=None,  # Not available via WebSocket
             selected_post_ids=selected_post_ids,
         )
+
+    async def _probe_submit_state(self) -> dict:
+        """Snapshot the Imagine composer's submit button + nearby banners.
+
+        Used by ``create_image``'s scroll loop to distinguish "Grok is
+        rate-limiting but submit still works" (worth backing off) from
+        "Grok server-side disabled the submit button" (no new jobs ever
+        coming — fail fast).
+
+        Returns dict with keys:
+          - ``submit_found`` (bool)
+          - ``submit_disabled`` (bool | None) — None if no candidate found
+          - ``submit_aria`` / ``submit_text`` — for diagnostics
+          - ``banners`` (list[str]) — visible alert/toast/banner text
+        """
+        raw = await self._tab.evaluate(
+            r"""
+            (() => {
+                // Find submit-ish button: aria-label / text contains
+                // submit / 提交 / generate / 生成 / send / 发送 (the
+                // Imagine composer's primary action across UI revisions).
+                const buttons = Array.from(document.querySelectorAll('button'));
+                const re = /submit|提交|generate|生成|send|发送/i;
+                const candidates = buttons.filter(b => {
+                    const al = (b.getAttribute('aria-label') || '').trim();
+                    const tx = (b.innerText || '').trim();
+                    return re.test(al + ' ' + tx);
+                });
+                const visible = candidates.filter(b => {
+                    const r = b.getBoundingClientRect();
+                    return r.width > 0 && r.height > 0;
+                });
+                const submit = visible[0] || candidates[0] || null;
+
+                // Nearby banner / toast / alert text. Grok shows
+                // rate-limit / quota messages here.
+                const banners = Array.from(document.querySelectorAll(
+                    '[role="alert"], [role="status"], '
+                    + '[class*="toast" i], [class*="banner" i], '
+                    + '[class*="notification" i], [class*="error" i]'
+                ))
+                .filter(el => {
+                    const r = el.getBoundingClientRect();
+                    return r.width > 0 && r.height > 0;
+                })
+                .map(el => (el.innerText || '').trim())
+                .filter(t => t && t.length > 0 && t.length < 300)
+                .slice(0, 5);
+
+                return JSON.stringify({
+                    submit_found: !!submit,
+                    submit_disabled: submit ? !!submit.disabled : null,
+                    submit_aria: submit
+                        ? (submit.getAttribute('aria-label') || '').trim()
+                        : null,
+                    submit_text: submit
+                        ? (submit.innerText || '').trim().slice(0, 40)
+                        : null,
+                    banners,
+                });
+            })()
+            """
+        )
+        try:
+            return json.loads(raw) if isinstance(raw, str) else {}
+        except (TypeError, ValueError):
+            return {}
 
     async def _verify_aspect_ratio(self, images, *, requested: str) -> None:
         """Compare returned image dims to the requested aspect ratio.
