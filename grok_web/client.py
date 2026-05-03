@@ -5039,39 +5039,75 @@ class GrokClient(ResponseParser):
                 submit_state = await self._probe_submit_state()
                 if submit_state.get("submit_disabled"):
                     banners = submit_state.get("banners") or []
-                    banner_text = " | ".join(banners).lower()
-                    # Quota: daily / billing-period exhaustion
-                    if any(
-                        s in banner_text
-                        for s in ("quota", "daily limit", "已达", "上限", "超出今日")
-                    ):
+                    candidate_messages = submit_state.get("candidate_messages") or []
+                    # Combine both pools so wide-net text catches what the
+                    # narrow banner-selector misses. Grok sometimes renders
+                    # rate-limit messages in plain <div>s with no
+                    # alert/banner/role hint.
+                    all_text_pool = list(banners) + [
+                        cm.get("text", "") for cm in candidate_messages
+                    ]
+                    combined_text = " | ".join(all_text_pool).lower()
+                    # Quota: daily / billing-period / subscription exhaustion
+                    QUOTA_HINTS = (
+                        "quota",
+                        "daily limit",
+                        "subscription",
+                        "upgrade to",
+                        "exhausted",
+                        "已达",
+                        "上限",
+                        "超出今日",
+                        "今日上限",
+                        "配额",
+                        "用完",
+                        "用尽",
+                    )
+                    # Rate-limit: hourly / temporary throttle (resets in minutes)
+                    RATE_HINTS = (
+                        "rate limit",
+                        "rate-limit",
+                        "try again",
+                        "too many",
+                        "throttle",
+                        "wait a moment",
+                        "wait a few",
+                        "limit reached",
+                        "minute",
+                        "稍后再试",
+                        "请稍候",
+                        "请稍后",
+                        "请等待",
+                        "频率",
+                        "频次",
+                        "太多",
+                        "限次",
+                        "稍候",
+                        "稍后",
+                        "分钟",
+                    )
+                    if any(s in combined_text for s in QUOTA_HINTS):
                         raise GrokQuotaExceededError(
                             f"create_image: submit button is disabled and "
-                            f"the banner indicates quota exhaustion. Stop "
+                            f"the page indicates quota exhaustion. Stop "
                             f"generating until quota resets. "
-                            f"Banner: {banners!r}"
+                            f"banners={banners!r}, "
+                            f"candidate_messages={candidate_messages!r}"
                         )
-                    # Rate-limit: hourly / temporary throttle (resets in minutes)
-                    if any(
-                        s in banner_text
-                        for s in (
-                            "rate limit",
-                            "try again",
-                            "too many",
-                            "稍后再试",
-                            "请稍候",
-                            "频率",
-                            "limit reached",
-                        )
-                    ):
+                    if any(s in combined_text for s in RATE_HINTS):
                         raise GrokRateLimitError(
                             f"create_image: submit button is disabled "
-                            f"(rate-limited). Banner: {banners!r}. Wait "
-                            f"several minutes before retrying."
+                            f"(rate-limited). banners={banners!r}, "
+                            f"candidate_messages={candidate_messages!r}. "
+                            f"Wait several minutes before retrying."
                         )
-                    # Submit disabled with no recognizable banner — preflight
-                    # content moderation, account flag, or unknown server
-                    # signal. Fail fast; don't burn another 30s of backoff.
+                    # Submit disabled with no matching keyword in either
+                    # the narrow banners pool or the wide candidate_messages
+                    # pool — preflight content moderation, account flag,
+                    # or a Grok message wording we don't recognize yet.
+                    # Surface BOTH pools so the maintainer can extend the
+                    # hint dictionaries without instrumenting a separate
+                    # probe script.
                     raise GrokAPIError(
                         f"create_image: submit button is disabled and no "
                         f"new generation jobs are arriving. Probe state: "
@@ -5079,12 +5115,16 @@ class GrokClient(ResponseParser):
                         f"submit_text={submit_state.get('submit_text')!r}, "
                         f"rejected_candidates="
                         f"{submit_state.get('rejected_candidates')!r}, "
-                        f"banners={banners!r}. Generation cannot proceed — "
-                        f"this is usually a server-side block (preflight "
-                        f"content moderation, account flag, or limit hit). "
-                        f"The connector is failing fast rather than "
-                        f"scrolling indefinitely; caller should treat this "
-                        f"as non-recoverable for this prompt."
+                        f"banners={banners!r}, "
+                        f"candidate_messages={candidate_messages!r}. "
+                        f"Generation cannot proceed — this is usually a "
+                        f"server-side block (preflight content moderation, "
+                        f"account flag, or limit hit with a banner the "
+                        f"connector doesn't recognize). The connector is "
+                        f"failing fast rather than scrolling indefinitely. "
+                        f"If candidate_messages includes Grok's rate-limit "
+                        f"or quota text, send it to the connector "
+                        f"maintainer to extend the keyword dictionaries."
                     )
 
                 # Submit is still active → genuine rate-limit, just slow.
@@ -5384,11 +5424,21 @@ class GrokClient(ResponseParser):
                     .slice(0, 5);
 
                 // Nearby banner / toast / alert text. Grok shows
-                // rate-limit / quota messages here.
+                // rate-limit / quota messages here. Wide selector net —
+                // we can't predict which class/role Grok uses for each
+                // type of message, so try every plausible attachment.
+                const BANNER_SELECTORS = [
+                    '[role="alert"]', '[role="status"]', '[role="tooltip"]',
+                    '[role="dialog"]', '[role="banner"]',
+                    '[class*="toast" i]', '[class*="banner" i]',
+                    '[class*="notification" i]', '[class*="error" i]',
+                    '[class*="alert" i]', '[class*="message" i]',
+                    '[class*="popover" i]', '[class*="warning" i]',
+                    '[class*="hint" i]', '[class*="dialog" i]',
+                    '[class*="tooltip" i]',
+                ];
                 const banners = Array.from(document.querySelectorAll(
-                    '[role="alert"], [role="status"], '
-                    + '[class*="toast" i], [class*="banner" i], '
-                    + '[class*="notification" i], [class*="error" i]'
+                    BANNER_SELECTORS.join(', ')
                 ))
                 .filter(el => {
                     const r = el.getBoundingClientRect();
@@ -5396,7 +5446,58 @@ class GrokClient(ResponseParser):
                 })
                 .map(el => (el.innerText || '').trim())
                 .filter(t => t && t.length > 0 && t.length < 300)
-                .slice(0, 5);
+                .slice(0, 8);
+
+                // Last-resort wide net: ANY visible text node containing
+                // a rate-limit / quota / wait keyword. Catches the case
+                // where Grok shows the message via a plain <div> with no
+                // semantic class. The match keys here MUST be a strict
+                // superset of what the Python side then classifies on,
+                // so we never silently miss text the classifier would
+                // recognize. Surfaced into GrokAPIError when fail-fast
+                // triggers — caller (or maintainer) can read what Grok
+                // actually said without separate instrumentation.
+                const KEYWORDS = [
+                    'rate', 'limit', 'quota', 'try again', 'too many',
+                    'wait', 'throttle', 'exhaust', 'exceed', 'retry',
+                    'reach', 'maximum', 'upgrade', 'subscription',
+                    '稍后', '稍候', '请等', '请稍', '频率', '频次',
+                    '限制', '限次', '上限', '已达', '太多', '超出',
+                    '用完', '用尽', '配额', '额度', '分钟', '小时',
+                    'minute', 'minutes', 'hour', 'hours', 'second',
+                ];
+                const kw_re = new RegExp(
+                    KEYWORDS.map(k =>
+                        k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+                    ).join('|'),
+                    'i'
+                );
+                const candidate_messages = [];
+                try {
+                    const walker = document.createTreeWalker(
+                        document.body,
+                        NodeFilter.SHOW_TEXT,
+                        null
+                    );
+                    let n;
+                    let count = 0;
+                    while ((n = walker.nextNode()) && count < 12) {
+                        const t = (n.textContent || '').trim();
+                        if (t.length < 4 || t.length > 220) continue;
+                        if (!kw_re.test(t)) continue;
+                        const parent = n.parentElement;
+                        if (!parent) continue;
+                        const r = parent.getBoundingClientRect();
+                        if (r.width === 0 || r.height === 0) continue;
+                        candidate_messages.push({
+                            text: t.slice(0, 200),
+                            tag: parent.tagName,
+                            cls: (parent.className || '').toString().slice(0, 60),
+                            role: parent.getAttribute('role') || '',
+                        });
+                        count++;
+                    }
+                } catch (e) { /* ignore walker errors */ }
 
                 return JSON.stringify({
                     submit_found: !!submit,
@@ -5409,6 +5510,7 @@ class GrokClient(ResponseParser):
                         : null,
                     rejected_candidates,
                     banners,
+                    candidate_messages,
                 });
             })()
             """
