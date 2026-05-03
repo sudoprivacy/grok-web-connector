@@ -172,6 +172,7 @@ class GrokClient(ResponseParser):
         profile: str | None = None,
         startup_timeout: float = 30.0,
         extra_chrome_args: list[str] | None = None,
+        user_data_dir: str | Path | None = None,
     ):
         """
         Initialize GrokClient.
@@ -201,6 +202,15 @@ class GrokClient(ResponseParser):
                      long-running pipe-buffer-fill hang on Windows). Use
                      this only if you need Chrome flags beyond what
                      ai-dev-browser and connector already supply.
+            user_data_dir: Absolute path for Chrome's ``--user-data-dir``.
+                     Default: ``~/.grok-web-connector/profiles/<profile>/``
+                     — DELIBERATELY OUTSIDE ai-dev-browser's managed namespace
+                     (``~/.ai-dev-browser/profiles/...``) so other agents'
+                     ``browser_cleanup()`` calls cannot classify our Chrome
+                     as an "orphan" and kill it. Persistent across runs by
+                     profile name; safe under multi-agent concurrent use.
+                     Pass an explicit path only if you want a specific
+                     location for backups / inspection.
         """
         # Store for deferred loading in __aenter__
         self._provided_cookies = cookies
@@ -240,6 +250,9 @@ class GrokClient(ResponseParser):
         self._profile = profile
         self._startup_timeout = startup_timeout
         self._extra_chrome_args = list(extra_chrome_args) if extra_chrome_args else None
+        # Resolved later in __aenter__ when profile_name is finalized; storing
+        # the user's literal value (or None for "auto") here.
+        self._user_data_dir = Path(user_data_dir).resolve() if user_data_dir else None
 
     async def _load_or_setup_cookies(self) -> GrokCookies:
         """Load cookies from config, or trigger interactive setup if missing."""
@@ -264,11 +277,99 @@ class GrokClient(ResponseParser):
             config = load_config(self._config_path)
             return config["cookies"]
 
+    def _launch_or_reuse_chrome(
+        self,
+        *,
+        user_data_dir: Path,
+        requested_port: int | None,
+        headless: bool,
+        extra_args: list[str],
+        force_new: bool,
+        startup_timeout: float,
+    ) -> tuple[int, bool]:
+        """Launch a Chrome with explicit user_data_dir, or reuse one already
+        listening on requested_port.
+
+        Replaces ai-dev-browser's `browser_start` so we can control
+        ``--user-data-dir`` (which browser_start hardcodes inside its managed
+        namespace). Returns ``(port, reused_bool)``.
+
+        Reuse rule: only reuse when caller explicitly pinned a port AND that
+        port is already accepting CDP connections AND we're not in
+        force_new mode. We don't try to verify the listening Chrome's
+        user_data_dir — if you point us at a port, we trust the port.
+        """
+        import time as _time
+
+        from ai_dev_browser import (
+            get_available_port,
+            is_port_in_use,
+            launch_chrome,
+        )
+
+        if requested_port is not None and is_port_in_use(port=requested_port) and not force_new:
+            return requested_port, True
+
+        port = requested_port if requested_port is not None else get_available_port(reuse=False)
+
+        # If the requested port is taken by something we don't recognize and
+        # caller asked for force_new, that's a hard error — don't silently
+        # pick a different port.
+        if requested_port is not None and is_port_in_use(port=requested_port):
+            raise RuntimeError(
+                f"Port {requested_port} is already in use. Cannot launch a "
+                f"new Chrome on that port (force_new_chrome=True). Either "
+                f"choose a different port or call browser_stop(port="
+                f"{requested_port}) on whatever owns it."
+            )
+
+        process = launch_chrome(
+            port=port,
+            headless=headless,
+            user_data_dir=str(user_data_dir),
+            extra_args=extra_args,
+        )
+
+        # Wait for the debug port to bind. Mirror browser_start's polling
+        # cadence so user-perceived behaviour is identical.
+        deadline = _time.time() + startup_timeout
+        while _time.time() < deadline:
+            if is_port_in_use(port=port):
+                # Briefly track the process handle so __aexit__ can decide
+                # whether to leave it running (current default — same as
+                # ai-dev-browser's "keep-alive after disconnect").
+                self._chrome_process = process
+                return port, False
+            if process.poll() is not None:
+                raise RuntimeError(
+                    f"Chrome (PID {process.pid}) exited before binding port "
+                    f"{port}. Likely causes: profile dir locked by another "
+                    f"chrome.exe, insufficient permissions on {user_data_dir}, "
+                    f"or Chrome rejected one of the launch flags."
+                )
+            _time.sleep(0.2)
+
+        # Timed out — kill the process so its profile lockfile releases.
+        import contextlib
+
+        try:
+            process.terminate()
+            process.wait(timeout=5)
+        except Exception:
+            with contextlib.suppress(Exception):
+                process.kill()
+        raise RuntimeError(
+            f"Chrome started (PID {process.pid}) but port {port} not "
+            f"listening after {startup_timeout}s — process killed to "
+            f"release profile lockfile. Retry with startup_timeout=<larger> "
+            f"if your environment is slow (Windows + main Chrome running, "
+            f"first-time profile init, AV scanning, etc.)."
+        )
+
     async def __aenter__(self):
         import asyncio
 
         from ai_dev_browser import cdp
-        from ai_dev_browser.core import browser_start
         from ai_dev_browser.core.connection import connect_browser
 
         # Ensure Chrome's stderr is redirected to DEVNULL (not PIPE).
@@ -281,48 +382,52 @@ class GrokClient(ResponseParser):
         else:
             self.cookies = await self._load_or_setup_cookies()
 
-        # Ensure Chrome is running (auto-launch if needed)
+        # Ensure Chrome is running (auto-launch if needed).
+        #
+        # We BYPASS ai-dev-browser's `browser_start` here. browser_start places
+        # Chrome under `~/.ai-dev-browser/profiles/...` (the "managed
+        # namespace"); any other agent in the same OS account that calls
+        # `browser_cleanup()` will scan that namespace, probe each Chrome's
+        # debug port, and `_kill_process_tree` anything whose probe fails to
+        # come back alive. Our long-running Chrome under fanout load can
+        # easily miss a single probe — friendly fire kills it. Reproduced by
+        # an expert workflow on 2026-05.
+        #
+        # Workaround: launch Chrome ourselves with `--user-data-dir` pointing
+        # OUTSIDE the managed namespace (default: ~/.grok-web-connector/
+        # profiles/<profile>). `_is_managed_profile()` returns False for our
+        # path → `browser_cleanup()` skips us → cross-agent safe by default.
+        # Caller doesn't need to change anything.
         actual_port = self._remote_port  # Default to requested port
         if self._auto_launch:
             try:
                 profile_name = self._profile or GROK_CHROME_PROFILE
-                kwargs = {
-                    "headless": self._headless,
-                    "profile": profile_name,
-                    "startup_timeout": self._startup_timeout,
-                    # ai-dev-browser's launch_chrome on Windows uses
-                    # subprocess.Popen(stderr=PIPE) but never drains it.
-                    # Chrome's stderr fills the kernel pipe buffer
-                    # (~4-8KB) within minutes of CDP-heavy activity →
-                    # Chrome's writes block → process eventually
-                    # hangs/aborts. The "exactly ~5 minutes after a
-                    # fanout starts" symptom is this. --disable-logging
-                    # silences Chrome's stderr emission entirely so the
-                    # pipe never fills. Combine with --log-file=NUL
-                    # (Windows nul device) as a belt-and-suspenders for
-                    # any subsystems that ignore --disable-logging.
-                    # Caller-provided extra_args win — they're appended.
-                    "extra_args": [
+                user_data_dir = self._user_data_dir or (
+                    Path.home() / ".grok-web-connector" / "profiles" / profile_name
+                )
+                user_data_dir.mkdir(parents=True, exist_ok=True)
+
+                actual_port, reused = self._launch_or_reuse_chrome(
+                    user_data_dir=user_data_dir,
+                    requested_port=self._remote_port,
+                    headless=self._headless,
+                    extra_args=[
                         "--disable-logging",
                         "--log-file=NUL",
                         *(self._extra_chrome_args or []),
                     ],
-                }
-                if self._remote_port is not None:
-                    kwargs["port"] = self._remote_port
-                if self._force_new_chrome:
-                    kwargs["reuse"] = "none"
-
-                result = browser_start(**kwargs)
-                if "error" in result:
-                    raise RuntimeError(result["error"])
-
-                actual_port = result["port"]
-                if result.get("reused"):
-                    logger.info(f"Reusing Chrome on port {actual_port} (profile: {profile_name})")
+                    force_new=self._force_new_chrome,
+                    startup_timeout=self._startup_timeout,
+                )
+                if reused:
+                    logger.info(
+                        f"Reusing Chrome on port {actual_port} "
+                        f"(profile: {profile_name}, dir: {user_data_dir})"
+                    )
                 else:
                     logger.info(
-                        f"Started new Chrome on port {actual_port} (profile: {profile_name})"
+                        f"Started new Chrome on port {actual_port} "
+                        f"(profile: {profile_name}, dir: {user_data_dir})"
                     )
             except FileNotFoundError as e:
                 raise GrokAPIError(str(e)) from e

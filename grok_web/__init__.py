@@ -75,6 +75,7 @@ def get_client(
     profile: str | None = None,
     startup_timeout: float = 30.0,
     extra_chrome_args: list[str] | None = None,
+    user_data_dir: "str | Path | None" = None,
 ) -> GrokClient:
     """
     Get the Grok API client.
@@ -96,6 +97,11 @@ def get_client(
             ``--disable-logging`` / ``--log-file=NUL`` defaults (which silence
             Chrome's stderr so it doesn't fill the Popen pipe buffer and hang
             after a few minutes of CDP-heavy activity on Windows).
+        user_data_dir: Absolute path for Chrome's ``--user-data-dir``.
+            Default: ``~/.grok-web-connector/profiles/<profile>/`` —
+            DELIBERATELY OUTSIDE ai-dev-browser's managed namespace so other
+            agents' ``browser_cleanup()`` calls cannot misclassify our Chrome
+            as an orphan and kill it. Cross-agent safe by default.
 
     Returns:
         GrokClient instance with all API methods.
@@ -115,6 +121,7 @@ def get_client(
         profile=profile,
         startup_timeout=startup_timeout,
         extra_chrome_args=extra_chrome_args,
+        user_data_dir=user_data_dir,
     )
 
 
