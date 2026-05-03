@@ -5077,6 +5077,8 @@ class GrokClient(ResponseParser):
                         f"new generation jobs are arriving. Probe state: "
                         f"submit_aria={submit_state.get('submit_aria')!r}, "
                         f"submit_text={submit_state.get('submit_text')!r}, "
+                        f"rejected_candidates="
+                        f"{submit_state.get('rejected_candidates')!r}, "
                         f"banners={banners!r}. Generation cannot proceed — "
                         f"this is usually a server-side block (preflight "
                         f"content moderation, account flag, or limit hit). "
@@ -5326,30 +5328,60 @@ class GrokClient(ResponseParser):
         "Grok server-side disabled the submit button" (no new jobs ever
         coming — fail fast).
 
+        Strict-only matcher: the button's aria-label OR innerText must
+        be one of {submit, 提交, send, 发送} (case-insensitive, exact).
+        ``generate`` / ``生成`` are explicitly NOT matched — those label
+        mode-toggle buttons (e.g. 生成视频 = switch-to-video-mode toggle)
+        which have independent disabled state from the actual submit
+        action. v0.19.16 used a loose regex and got false-matched onto
+        the mode toggle, missing the real submit button. If strict
+        matching finds nothing, ``submit_found=False`` is returned — the
+        caller's backoff path then runs as before (safer than guessing).
+
         Returns dict with keys:
           - ``submit_found`` (bool)
           - ``submit_disabled`` (bool | None) — None if no candidate found
           - ``submit_aria`` / ``submit_text`` — for diagnostics
           - ``banners`` (list[str]) — visible alert/toast/banner text
+          - ``rejected_candidates`` (list) — visible non-submit buttons
+            whose label fell into the looser pool, for diagnostics if
+            Grok renames the submit button.
         """
         raw = await self._tab.evaluate(
             r"""
             (() => {
-                // Find submit-ish button: aria-label / text contains
-                // submit / 提交 / generate / 生成 / send / 发送 (the
-                // Imagine composer's primary action across UI revisions).
+                // Strict actual-submit-action names (case-insensitive
+                // exact match on aria-label OR innerText). NEVER match
+                // "generate"/"生成" — those are mode toggles
+                // (e.g. 生成视频 = "switch to video-gen mode"), not the
+                // composer's submit action.
+                const STRICT = new Set(['submit', '提交', 'send', '发送']);
+                const norm = s => (s || '').trim().toLowerCase();
                 const buttons = Array.from(document.querySelectorAll('button'));
-                const re = /submit|提交|generate|生成|send|发送/i;
-                const candidates = buttons.filter(b => {
-                    const al = (b.getAttribute('aria-label') || '').trim();
-                    const tx = (b.innerText || '').trim();
-                    return re.test(al + ' ' + tx);
-                });
-                const visible = candidates.filter(b => {
+                const visible = buttons.filter(b => {
                     const r = b.getBoundingClientRect();
                     return r.width > 0 && r.height > 0;
                 });
-                const submit = visible[0] || candidates[0] || null;
+                const isSubmit = b => STRICT.has(norm(b.getAttribute('aria-label')))
+                                   || STRICT.has(norm(b.innerText));
+                const submit = visible.find(isSubmit) || null;
+                // Diagnostic: list visible buttons whose label MIGHT have
+                // been a submit candidate under a looser matcher, so we
+                // can spot Grok UI renames (e.g. 提交 → 发送提交).
+                const looseRe = /submit|提交|send|发送|generate|生成/i;
+                const rejected_candidates = visible
+                    .filter(b => b !== submit)
+                    .filter(b => {
+                        const al = b.getAttribute('aria-label') || '';
+                        const tx = b.innerText || '';
+                        return looseRe.test(al + ' ' + tx);
+                    })
+                    .map(b => ({
+                        aria: (b.getAttribute('aria-label') || '').trim(),
+                        text: (b.innerText || '').trim().slice(0, 30),
+                        disabled: !!b.disabled,
+                    }))
+                    .slice(0, 5);
 
                 // Nearby banner / toast / alert text. Grok shows
                 // rate-limit / quota messages here.
@@ -5375,6 +5407,7 @@ class GrokClient(ResponseParser):
                     submit_text: submit
                         ? (submit.innerText || '').trim().slice(0, 40)
                         : null,
+                    rejected_candidates,
                     banners,
                 });
             })()
