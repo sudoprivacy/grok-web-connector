@@ -202,6 +202,21 @@ class GrokClient(ResponseParser):
                      long-running pipe-buffer-fill hang on Windows). Use
                      this only if you need Chrome flags beyond what
                      ai-dev-browser and connector already supply.
+
+                     **Proxy users (China / restricted networks)**: Chrome
+                     launched by ai-dev-browser passes ``--enable-automation``
+                     which suppresses Chrome's auto-inheritance of the
+                     Windows system proxy registry settings. If grok.com
+                     gets ``ERR_CONNECTION_CLOSED`` even though
+                     ``curl https://grok.com`` works (because Clash / V2Ray /
+                     Surge is bound to a local HTTP proxy port), pass
+                     the proxy via this kwarg::
+
+                         get_client(extra_chrome_args=[
+                             "--proxy-server=http://127.0.0.1:7897",
+                         ])
+
+                     Replace ``7897`` with your proxy's actual port.
             user_data_dir: Absolute path for Chrome's ``--user-data-dir``.
                      Default: ``~/.grok-web-connector/profiles/<profile>/``
                      — DELIBERATELY OUTSIDE ai-dev-browser's managed namespace
@@ -1447,6 +1462,53 @@ class GrokClient(ResponseParser):
             raise GrokAPIError(f"Unrecognized image ref form: {spec!r}")
         return resolved
 
+    async def _reclassify_or_return(self, gen_result):
+        """Apply rate-limit / quota banner reclassification to a video-gen result.
+
+        Grok's NDJSON frequently reports ``moderated=true`` with no
+        rate-limit error code when the actual failure is anti-abuse
+        throttle or daily quota — and the UI surfaces a toast banner.
+        A rate-limit / quota signal is strictly more severe than
+        moderation (affects the whole session, not one prompt), so
+        raise regardless of the parsed moderated state.
+
+        Centralised so every video-gen path (extend_current +
+        _create_video_from_file_ids + _create_video_from_upload +
+        _create_video_from_text) gets the same safety net. v0.19.20
+        wired the three create_video paths through this — previously
+        only extend_current had it, so a fanout that hit a per-session
+        rate limit would return a flood of moderated=true results
+        instead of a typed GrokRateLimitError.
+
+        Returns ``gen_result`` unchanged when no banner; raises on
+        quota / rate-limit banner. False-positive risk (stale toast
+        from an earlier call while THIS one succeeded) exists but is
+        low — Grok toasts auto-dismiss quickly — and the recoverable
+        cost is a retry that re-finds the video via
+        /rest/media/post/get.
+        """
+        banner = await self._scan_for_rate_limit_banner()
+        if banner is None:
+            return gen_result
+        category, banner_text = banner
+        from .exceptions import GrokQuotaExceededError, GrokRateLimitError
+
+        if category == "quota_exceeded":
+            raise GrokQuotaExceededError(
+                f"Grok reports quota exceeded for this session "
+                f"(visible UI banner: {banner_text!r}). Stop retrying — "
+                f"quota typically resets every 24h. NDJSON-level "
+                f"moderated={gen_result.moderated}; ignore that field, "
+                f"the throttle classification takes precedence."
+            )
+        raise GrokRateLimitError(
+            f"Grok rate-limited this session (visible UI banner: "
+            f"{banner_text!r}). Back off 5-10 min and retry, or reduce "
+            f"concurrent worker count. NDJSON-level "
+            f"moderated={gen_result.moderated}; ignore that field, the "
+            f"throttle classification takes precedence."
+        )
+
     async def _scan_for_rate_limit_banner(self) -> tuple[str, str] | None:
         """Scan visible toasts / alerts for Grok rate-limit or quota text.
 
@@ -2659,39 +2721,10 @@ class GrokClient(ResponseParser):
             monitor.body, parent_post_id="", statsig_id=monitor.statsig_id
         )
 
-        # Rate-limit / quota reclassification. Grok's NDJSON frequently
-        # reports moderated=true with no rate-limit error code when the
-        # actual failure is anti-abuse throttle or daily quota — and the
-        # UI surfaces a toast banner. A rate-limit / quota signal is
-        # strictly more severe than moderation (affects the whole
-        # session, not one prompt), so raise regardless of the parsed
-        # moderated state: even if the current generation happened to
-        # produce a real video, the caller needs to know the session is
-        # now throttled so they can back off. False-positive risk
-        # (stale toast from an earlier call while this one succeeded)
-        # exists but is low — Grok toasts auto-dismiss quickly — and
-        # the recoverable cost is a retry that will re-find the video
-        # via /rest/media/post/get.
-        banner = await self._scan_for_rate_limit_banner()
-        if banner is not None:
-            category, banner_text = banner
-            from .exceptions import GrokQuotaExceededError, GrokRateLimitError
-
-            if category == "quota_exceeded":
-                raise GrokQuotaExceededError(
-                    f"Grok reports quota exceeded for this session "
-                    f"(visible UI banner: {banner_text!r}). Stop retrying — "
-                    f"quota typically resets every 24h. NDJSON-level "
-                    f"moderated={gen_result.moderated}; ignore that field, "
-                    f"the throttle classification takes precedence."
-                )
-            raise GrokRateLimitError(
-                f"Grok rate-limited this session (visible UI banner: "
-                f"{banner_text!r}). Back off 5-10 min and retry, or reduce "
-                f"concurrent worker count. NDJSON-level "
-                f"moderated={gen_result.moderated}; ignore that field, the "
-                f"throttle classification takes precedence."
-            )
+        # Rate-limit / quota reclassification — see _reclassify_or_return
+        # docstring for the design intent. Raises if a quota/rate-limit
+        # toast is visible; otherwise returns gen_result unchanged.
+        gen_result = await self._reclassify_or_return(gen_result)
 
         # Stash drag metadata on private fields so the wrapper can
         # surface it on VideoExtendResult without another round-trip.
@@ -4047,9 +4080,14 @@ class GrokClient(ResponseParser):
                 ) from e
             raise
 
-        return parse_video_ndjson_response(
+        gen_result = parse_video_ndjson_response(
             response_text, parent_post_id=parent_post_id, statsig_id=conv_sid
         )
+        # Rate-limit / quota reclassification — see _reclassify_or_return.
+        # Previously only extend_current ran this; v0.19.20 wires it into
+        # every video-gen path so a fanout that hits per-session limit
+        # no longer returns a flood of moderated=true.
+        return await self._reclassify_or_return(gen_result)
 
     async def _create_video_from_upload(
         self,
@@ -4391,7 +4429,9 @@ class GrokClient(ResponseParser):
         # create_video() installs its own closure-scoped sniffer; without
         # this, repeated calls accumulate dead handlers.
         sniff_state["active"] = False
-        return result
+        # Rate-limit / quota reclassification — see _reclassify_or_return.
+        # Covers both NDJSON-body path and REST-recovery path.
+        return await self._reclassify_or_return(result)
 
     async def _scan_favorited_indices(self) -> list[int]:
         """Scan gallery DOM to find which items have been favorited.
@@ -6651,9 +6691,11 @@ class GrokClient(ResponseParser):
             await asyncio.sleep(0.5)
 
         # Parse response using shared utility (statsig_id captured from request)
-        return parse_video_ndjson_response(
+        gen_result = parse_video_ndjson_response(
             captured_response["body"], parent_post_id, statsig_id=captured_response["statsig_id"]
         )
+        # Rate-limit / quota reclassification — see _reclassify_or_return.
+        return await self._reclassify_or_return(gen_result)
 
     # =========================================================================
     # Video download

@@ -97,6 +97,13 @@ def get_client(
             ``--disable-logging`` / ``--log-file=NUL`` defaults (which silence
             Chrome's stderr so it doesn't fill the Popen pipe buffer and hang
             after a few minutes of CDP-heavy activity on Windows).
+
+            Proxy users (China / restricted networks): Chrome launched by
+            ai-dev-browser doesn't auto-inherit the Windows system proxy. If
+            you get ``ERR_CONNECTION_CLOSED`` on grok.com even though
+            ``curl https://grok.com`` works through Clash/V2Ray/Surge, pass
+            the local proxy port here, e.g.
+            ``extra_chrome_args=["--proxy-server=http://127.0.0.1:7897"]``.
         user_data_dir: Absolute path for Chrome's ``--user-data-dir``.
             Default: ``~/.grok-web-connector/profiles/<profile>/`` —
             DELIBERATELY OUTSIDE ai-dev-browser's managed namespace so other

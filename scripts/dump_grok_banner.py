@@ -22,7 +22,7 @@ import asyncio
 import json as _json
 from pathlib import Path
 
-from ai_dev_browser import connect_browser, find_debug_chromes
+from ai_dev_browser import connect_browser, find_debug_chromes, is_port_in_use
 
 WORKBENCH = Path("workbench")
 WORKBENCH.mkdir(exist_ok=True)
@@ -180,18 +180,69 @@ def format_dump(port: int, ws: str | None, data: dict) -> str:
     return "".join(lines)
 
 
-async def main(port_filter: int | None = None) -> None:
-    chromes = find_debug_chromes()
+def _enumerate_debug_ports(
+    port_filter: int | None,
+    extra_scan_range: tuple[int, int],
+) -> list[tuple[int, int | None, str | None]]:
+    """Find debug-ready Chromes across BOTH namespaces.
+
+    ``find_debug_chromes()`` filters to ai-dev-browser's managed
+    namespace (``~/.ai-dev-browser/profiles/...``), which excludes
+    connector's own default Chrome since v0.19.15 (default profile
+    lives at ``~/.grok-web-connector/profiles/<profile>/`` to dodge
+    cross-agent ``browser_cleanup()`` friendly fire). So we ALSO
+    probe the workspace port range directly via
+    ``is_port_in_use`` — any listening port whose connect_browser
+    handshake succeeds is treated as a candidate.
+
+    De-duplicates by port. Workspace tag string returned from
+    find_debug_chromes is preserved when available; bare-port
+    probes get ``ws=None``.
+    """
+    seen: dict[int, tuple[int, int | None, str | None]] = {}
+
+    # 1. Managed namespace (fastest, returns workspace tag).
+    try:
+        for port, pid, ws in find_debug_chromes():
+            seen[port] = (port, pid, ws)
+    except Exception:
+        pass
+
+    # 2. Direct port scan over ai-dev-browser default port range.
+    low, high = extra_scan_range
+    for port in range(low, high + 1):
+        if port in seen:
+            continue
+        if is_port_in_use(port=port):
+            seen[port] = (port, None, None)
+
+    chromes = sorted(seen.values(), key=lambda c: c[0])
     if port_filter is not None:
         chromes = [c for c in chromes if c[0] == port_filter]
+    return chromes
+
+
+async def main(
+    port_filter: int | None = None,
+    scan_range: tuple[int, int] = (9350, 9450),
+) -> None:
+    chromes = _enumerate_debug_ports(port_filter, scan_range)
     if not chromes:
         print("No debug-ready Chrome found.")
         if port_filter is not None:
             print(f"  (filtered to port={port_filter})")
-        print("Make sure your Grok Chrome is running with --remote-debugging-port.")
+        print(
+            "Make sure your Grok Chrome is running with --remote-debugging-port.\n"
+            "Note: this script scans BOTH ai-dev-browser managed namespace "
+            "AND the workspace port range (9350-9450 by default). If your "
+            "Chrome is on a port outside that range, pass --port=<N>."
+        )
         return
 
-    print(f"Found {len(chromes)} debug-ready chrome(s); scanning grok.com tabs...")
+    print(
+        f"Found {len(chromes)} debug-ready chrome(s) "
+        f"(includes non-managed namespace); scanning grok.com tabs..."
+    )
     all_dumps: list[str] = []
     grok_tab_count = 0
 
@@ -239,7 +290,32 @@ if __name__ == "__main__":
         "--port",
         type=int,
         default=None,
-        help="Restrict scan to this debug port. Default: all debug-ready chromes.",
+        help=(
+            "Restrict scan to this debug port. Default: scan all "
+            "debug-ready chromes across BOTH ai-dev-browser managed "
+            "namespace AND the workspace port range. Pass --port=<N> "
+            "if your Chrome listens outside the default scan range."
+        ),
+    )
+    parser.add_argument(
+        "--scan-range",
+        type=str,
+        default="9350-9450",
+        help="Port range to scan directly (format: low-high). Default: 9350-9450.",
     )
     args = parser.parse_args()
-    asyncio.run(main(args.port))
+    try:
+        low_s, high_s = args.scan_range.split("-")
+        scan_range = (int(low_s), int(high_s))
+    except (ValueError, AttributeError) as e:
+        print(f"Invalid --scan-range: {args.scan_range!r} (expected 'low-high')")
+        raise SystemExit(2) from e
+    # If user explicitly pinned --port, include it in the direct scan
+    # range so non-default ports (e.g. 9202 per the v0.19.19 bug report)
+    # are also probed.
+    if args.port is not None:
+        scan_range = (
+            min(scan_range[0], args.port),
+            max(scan_range[1], args.port),
+        )
+    asyncio.run(main(args.port, scan_range))
