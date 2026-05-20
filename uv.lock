@@ -4,7 +4,7 @@ requires-python = ">=3.10"
 
 [[package]]
 name = "ai-dev-browser"
-version = "0.5.4"
+version = "0.9.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "deprecated" },
@@ -12,9 +12,9 @@ dependencies = [
     { name = "websocket-client" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/b4/96/4931a07534709aaa8c59562af9363a9a1cdf571f51ca438ac4d837bdcd53/ai_dev_browser-0.5.4.tar.gz", hash = "sha256:b32952477f3b76f7f8bf137d174afdcaf88d9e43839a3f4166c29b6ddaf2cbce", size = 429457, upload-time = "2026-04-18T14:46:06.32Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a9/ab/7ab77e4d51d2b597a9e21e31de61e1d7feb60d3a45242bd5a41e227055de/ai_dev_browser-0.9.4.tar.gz", hash = "sha256:c067cd43cc2e7125a203e239209acd36a30467a93484281df0fe426bf4251cdc", size = 421991, upload-time = "2026-05-15T19:09:05.44Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/4f/5d/408df9eadbf8e7a0fb48f8e9d2b522c12129477c256d902bdc242dba4787/ai_dev_browser-0.5.4-py3-none-any.whl", hash = "sha256:3e27148d8de3265f3c394108d05245748e0bc4ff438420a0b904f24e8649637e", size = 414092, upload-time = "2026-04-18T14:46:04.222Z" },
+    { url = "https://files.pythonhosted.org/packages/d3/10/4a5be89beb00da6749ecb88f46d1162e8296512fb184f61aa5198726b528/ai_dev_browser-0.9.4-py3-none-any.whl", hash = "sha256:c657012bf64ea21da8811f7e79717a8e5f5b90ce7e0837951e40a84e4861a08e", size = 420005, upload-time = "2026-05-15T19:09:03.66Z" },
 ]
 
 [[package]]
@@ -113,7 +113,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "ai-dev-browser", specifier = ">=0.5.3,<0.6" },
+    { name = "ai-dev-browser", specifier = ">=0.9.3,<1.0" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.6.0" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4.0" },

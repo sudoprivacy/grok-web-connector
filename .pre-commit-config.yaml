@@ -4,8 +4,12 @@
 
 repos:
   # Ruff - extremely fast Python linter and formatter (written in Rust)
+  # rev MUST track the ruff version pinned in pyproject.toml's dev extra
+  # (ruff>=0.14.0 → uv resolves 0.15.x). A mismatch makes the hook and a
+  # standalone `ruff format` disagree on multi-line assert wrapping, which
+  # ping-pongs files dirty on every commit. Bump both together.
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.8.4
+    rev: v0.15.0
     hooks:
       # Linting (runs in ~100ms for entire codebase)
       - id: ruff
@@ -24,12 +28,16 @@ repos:
         args: ['--maxkb=1000']
       - id: check-merge-conflict
 
-  # Run pytest (only on staged test files for speed)
+  # Run pytest. entry uses `uv run` (not bare `python -m pytest`) so the
+  # hook resolves pytest from the project's own .venv regardless of what
+  # `python` happens to be first on PATH — bare `python` broke after an
+  # SSD swap left the system interpreter without pytest installed.
+  # --frozen: use uv.lock as-is, no re-resolve (fast, non-mutating).
   - repo: local
     hooks:
       - id: pytest
         name: pytest
-        entry: python -m pytest tests/ -x -q --tb=short
+        entry: uv run --frozen pytest tests/ -x -q --tb=short
         language: system
         pass_filenames: false
         always_run: true

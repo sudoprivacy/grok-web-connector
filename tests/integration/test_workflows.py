@@ -117,9 +117,9 @@ async def test_browse_favorite_unfavorite(client):
 
     try:
         favs = await client.list_posts(limit=50, source="favorites")
-        assert post_id in {
-            p.id for p in favs
-        }, f"{post_id} missing from favorites list after favorite_post"
+        assert post_id in {p.id for p in favs}, (
+            f"{post_id} missing from favorites list after favorite_post"
+        )
     finally:
         await client.unfavorite_post(post_id)
 
@@ -144,9 +144,9 @@ async def test_img2vid_roundtrip(client):
     try:
         parent = await client.get_post_details(TEST_SOURCE_POST_ID)
         child_ids = {c.id for c in parent.children}
-        assert (
-            result.video_id in child_ids
-        ), f"video {result.video_id} should appear under {TEST_SOURCE_POST_ID}"
+        assert result.video_id in child_ids, (
+            f"video {result.video_id} should appear under {TEST_SOURCE_POST_ID}"
+        )
     finally:
         if result.video_id:
             await client.delete_video(result.video_id)
@@ -171,9 +171,9 @@ async def test_upload2vid_retry_without_reupload(client):
     )
     assert isinstance(first, VideoGenerationResult)
     assert first.video_id
-    assert (
-        first.image_file_ids
-    ), "first pass must expose image_file_ids so the retry path can reuse them"
+    assert first.image_file_ids, (
+        "first pass must expose image_file_ids so the retry path can reuse them"
+    )
 
     refs = [f"file:{fid}" for fid in first.image_file_ids]
     second = await client.create_video(
@@ -187,9 +187,9 @@ async def test_upload2vid_retry_without_reupload(client):
     )
     assert isinstance(second, VideoGenerationResult)
     assert second.video_id
-    assert (
-        second.video_id != first.video_id
-    ), "second call must create a distinct video, not return the first one"
+    assert second.video_id != first.video_id, (
+        "second call must create a distinct video, not return the first one"
+    )
 
     try:
         pass  # actual success asserted above
