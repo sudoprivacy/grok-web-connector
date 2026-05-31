@@ -1,7 +1,9 @@
 """BrowserWorkerPool - Grok-specific BrowserPool subclass.
 
 Thin wrapper around ai-dev-browser's BrowserPool that adds:
-- Per-worker Chrome profiles (grok-chrome-w0, w1, ...)
+- Per-worker Chrome profiles (``<profile_prefix>-w0``, w1, ... — default
+  ``grok-chrome``; pass ``profile_prefix=`` per pool for cross-agent
+  isolation when multiple AIs drive Grok on the same OS account)
 - Clean CDP shutdown via browser_stop()
 - Consecutive failure detection with browser health check
 """
@@ -125,6 +127,7 @@ class BrowserWorkerPool(BrowserPool[GrokClient]):
         close_chrome: bool = True,
         fail_condition: Callable[[dict], bool] | None = None,
         requeue_position: Literal["front", "back"] = "back",
+        profile_prefix: str | None = None,
     ):
         """
         Initialize BrowserWorkerPool.
@@ -145,6 +148,26 @@ class BrowserWorkerPool(BrowserPool[GrokClient]):
                 Example: `lambda r: r.get("moderated", False)` to fail moderated videos.
             requeue_position: Where to put failed jobs for retry: "front" (high priority)
                 or "back" (normal priority). Default "back".
+            profile_prefix: Per-pool Chrome profile prefix. Each worker's profile
+                is ``f"{profile_prefix}-w{worker_id}"``. Default ``None`` uses the
+                package-level ``GROK_CHROME_PROFILE`` (``"grok-chrome"``) for
+                backward compatibility.
+
+                **Multi-AI / cross-agent coordination**: when several agents on
+                the same OS account drive their own pools concurrently, set
+                distinct ``profile_prefix`` per agent so per-worker profile
+                directories (``~/.grok-web-connector/profiles/<prefix>-w0/`` …)
+                don't collide. E.g. one agent uses ``profile_prefix="grok-chrome"``
+                (default), another uses ``profile_prefix="jailbreak-chrome"`` →
+                profiles fully isolated, no friendly-fire on Chrome lockfiles.
+                Combine with v0.19.15's non-managed-namespace default
+                (``~/.grok-web-connector/profiles/...``) and you get end-to-end
+                safety from cross-agent ``browser_cleanup()`` as well.
+
+                Monkey-patching ``grok_web.client.GROK_CHROME_PROFILE`` from the
+                caller does NOT work — this module captures the constant at
+                import time via ``from ..client import GROK_CHROME_PROFILE``.
+                Use this kwarg.
 
         Port Allocation:
             Ports are allocated automatically. The pool first reuses existing
@@ -154,6 +177,8 @@ class BrowserWorkerPool(BrowserPool[GrokClient]):
         # Grok-specific params (not in base class)
         self._config_path = config_path
         self._cookies = cookies
+        # Resolve at __init__ (not import) so caller-supplied override wins.
+        self._profile_prefix = profile_prefix or GROK_CHROME_PROFILE
 
         super().__init__(
             client_class=GrokClient,
@@ -174,8 +199,10 @@ class BrowserWorkerPool(BrowserPool[GrokClient]):
     async def add_worker(self) -> int:
         """Add a new worker to the pool.
 
-        Each worker gets a named profile (e.g., "grok-chrome-w0") for Chrome
-        reuse across runs. Port allocation is handled by browser_start().
+        Each worker gets a named profile (e.g., ``"grok-chrome-w0"``, or
+        whatever ``profile_prefix`` the pool was constructed with) for
+        Chrome reuse across runs. Port allocation is handled by
+        browser_start().
 
         Returns:
             worker_id of the new worker
@@ -183,8 +210,12 @@ class BrowserWorkerPool(BrowserPool[GrokClient]):
         worker_id = self._next_worker_id
         self._next_worker_id += 1
 
-        # Each worker gets its own named profile for Chrome reuse
-        profile = f"{GROK_CHROME_PROFILE}-w{worker_id}"
+        # Each worker gets its own named profile for Chrome reuse.
+        # _profile_prefix was resolved in __init__ from caller kwarg
+        # (falling back to the package default) — capturing it here
+        # instead of reading the module-level constant means runtime
+        # overrides actually take effect.
+        profile = f"{self._profile_prefix}-w{worker_id}"
 
         # Initialize browser client with per-worker profile.
         # force_new_chrome=True -> pass reuse="none" to browser_start. This
