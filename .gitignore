@@ -31,6 +31,10 @@ env/
 .vscode/
 *.swp
 *.swo
+# AI coding assistant per-project state (permission allowlist,
+# scheduled tasks). Same shape as .idea/ / .vscode/ — tool-state,
+# never belongs in version control.
+.claude/
 
 # Testing
 .pytest_cache/
