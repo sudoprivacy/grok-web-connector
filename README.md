@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 
-Python client for [Grok Imagine](https://grok.com/imagine) — browser automation via Chrome DevTools Protocol (CDP).
+Python client for [Grok Imagine](https://grok.com/imagine) — browser automation powered by [ai-dev-browser](https://github.com/sudoprivacy/ai-dev-browser).
 
 > **Note**: This is an unofficial community project. It is not affiliated with or endorsed by xAI.
 
