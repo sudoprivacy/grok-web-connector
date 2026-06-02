@@ -5,7 +5,7 @@ Python client for [Grok Imagine](https://grok.com/imagine) — browser automatio
 ## Install
 
 ```bash
-pip install git+https://github.com/elfenlieds7/grok-web-connector.git
+pip install git+https://github.com/sudoprivacy/grok-web-connector.git
 ```
 
 ## Quick Start
