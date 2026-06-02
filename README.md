@@ -43,6 +43,10 @@ async with get_client() as client:
     await client.create_video({"images": ["post:" + pid], "prompt": "zoom in"})  # img2vid
     await client.create_video({"images": ["./frame.jpg"], "prompt": "orbit @1"}) # upload2vid
 
+    # Extend / upgrade existing video
+    await client.extend_video({"video_id": vid, "prompt": "continue the motion"})
+    await client.upgrade_video(vid)                                          # upscale to HD
+
     # Image
     await client.create_image({"prompt": "sunset over mountains"})
     await client.edit_image({"post_id": pid, "edit_prompt": "add wings"})
