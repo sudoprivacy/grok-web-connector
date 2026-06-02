@@ -1,6 +1,26 @@
 # Grok Web Connector
 
-Python client for [Grok Imagine](https://grok.com/imagine) — browser automation via CDP.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+
+Python client for [Grok Imagine](https://grok.com/imagine) — browser automation via Chrome DevTools Protocol (CDP).
+
+> **Note**: This is an unofficial community project. It is not affiliated with or endorsed by xAI.
+
+## Features
+
+- **Image generation** — txt2img, image editing
+- **Video generation** — txt2vid, img2vid, upload2vid, extend, upgrade
+- **Post management** — list, read, favorite, delete
+- **Batch processing** — parallel workers via `BrowserWorkerPool`
+- **Auto-auth** — browser-driven login, cookie persistence
+- **Moderation detection** — rate-limit & quota banner recognition
+
+## Requirements
+
+- Python 3.10+
+- Chrome / Chromium browser
+- A [Grok](https://grok.com) account
 
 ## Install
 
@@ -69,8 +89,19 @@ grok_web/
     schema.py          # SSOT param definitions (add new Grok params here)
     prompt_parser.py   # @N image reference parsing
     models.py          # Pydantic response models
+    exceptions.py      # GrokError hierarchy (auth, rate-limit, quota, etc.)
     actions/           # Atomic UI operations (ax_tree-first)
     pool/              # BrowserWorkerPool
+```
+
+## Contributing
+
+```bash
+git clone https://github.com/sudoprivacy/grok-web-connector.git
+cd grok-web-connector
+pip install -e ".[dev]"
+pre-commit install
+pytest
 ```
 
 ## License
