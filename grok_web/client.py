@@ -4772,17 +4772,25 @@ class GrokClient(ResponseParser):
                 cand,
             )
         else:
-            await asyncio.sleep(0.5 * d)
-            # Click the matching menuitem.
-            # Match on the FIRST LINE of innerText (Grok 2026-05 added an
+            # Poll for menuitems to mount, then click the matching one.
+            # Grok 2026-06: ai-dev-browser 0.10.0's webdriver-hiding changed
+            # the page-load timing enough that the popup is now opened
+            # before React mounts its menuitems → previous single-evaluate
+            # got `available: []` and silently fell back to Grok's default
+            # aspect. Reporter on 0.10.0 lost a full batch to this race
+            # before noticing.
+            #
+            # Label match: FIRST LINE of innerText (Grok 2026-05 added an
             # orientation suffix on a newline, so '9:16' became
-            # '9:16\nVertical'). The ratio is still on the first line.
-            # Falls back to exact-match for older UI variants.
-            click_result = await self._tab.evaluate(
-                r"""
+            # '9:16\nVertical' — ratio still on line 1). Exact-match
+            # fallback for older UI variants.
+            click_js = r"""
                 (() => {
                     const want = "__LABEL__";
                     const items = Array.from(document.querySelectorAll('[role="menuitem"]'));
+                    if (items.length === 0) {
+                        return JSON.stringify({ok: false, populated: false, available: []});
+                    }
                     const firstLine = el => (el.innerText || '')
                         .trim()
                         .split(/[\n\r]/)[0]
@@ -4790,9 +4798,9 @@ class GrokClient(ResponseParser):
                     const mi = items.find(x => firstLine(x) === want)
                         || items.find(x => (x.innerText||'').trim() === want);
                     if (!mi) {
-                        document.body.click();
                         return JSON.stringify({
                             ok: false,
+                            populated: true,
                             available: items.map(it => (it.innerText||'').trim()).slice(0, 12),
                         });
                     }
@@ -4805,23 +4813,48 @@ class GrokClient(ResponseParser):
                     mi.dispatchEvent(new PointerEvent('pointerup', o));
                     mi.dispatchEvent(new MouseEvent('mouseup', o));
                     mi.dispatchEvent(new MouseEvent('click', o));
-                    return JSON.stringify({ok: true});
+                    return JSON.stringify({ok: true, populated: true});
                 })()
-                """.replace("__LABEL__", aspect_label)
-            )
-            try:
-                cr = json.loads(click_result) if isinstance(click_result, str) else {}
-            except Exception:
-                cr = {}
+            """.replace("__LABEL__", aspect_label)
+
+            cr: dict = {}
+            deadline = asyncio.get_event_loop().time() + 2.0
+            while asyncio.get_event_loop().time() < deadline:
+                click_result_raw = await self._tab.evaluate(click_js)
+                try:
+                    cr = json.loads(click_result_raw) if isinstance(click_result_raw, str) else {}
+                except Exception:
+                    cr = {}
+                if cr.get("ok"):
+                    break
+                # If popup populated but our label isn't in it, no point
+                # polling — it's a real rename, not a mount race.
+                if cr.get("populated"):
+                    break
+                await asyncio.sleep(0.1)
+
             if not cr.get("ok"):
-                logger.warning(
-                    "[create_image] aspect_ratio menuitem %r not found in "
-                    "popup. Available menuitems: %r. Generation will use "
-                    "Grok's currently-selected aspect (NOT what was "
-                    "requested). Common cause: Grok renamed the labels "
-                    "(e.g. '9:16' → '9:16 (portrait)').",
-                    aspect_label,
-                    cr.get("available"),
+                # Close popup so we don't leave the UI in a broken state
+                # for the next step.
+                await self._tab.evaluate("document.body.click()")
+                if cr.get("populated"):
+                    raise GrokAPIError(
+                        f"create_image: aspect_ratio menuitem {aspect_label!r} "
+                        f"not found in popup. Available menuitems: "
+                        f"{cr.get('available')!r}. Likely Grok renamed the "
+                        f"labels (e.g. '9:16' → '9:16 (portrait)'). aspect_ratio "
+                        f"is an explicit caller intent — failing fast rather "
+                        f"than silently falling back to Grok's default "
+                        f"(which would produce images with the WRONG aspect)."
+                    )
+                raise GrokAPIError(
+                    f"create_image: aspect_ratio popup never populated any "
+                    f"menuitems within 2s of opening — Grok's lazy mount "
+                    f"didn't complete. Likely a page-load timing race "
+                    f"(ai-dev-browser 0.10.0+ changes are known to widen "
+                    f"the window). aspect_ratio={aspect_label!r} requested; "
+                    f"failing fast rather than silently falling back to "
+                    f"Grok's default."
                 )
             await asyncio.sleep(0.5 * d)
 
