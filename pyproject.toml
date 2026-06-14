@@ -16,12 +16,16 @@ authors = [
 ]
 dependencies = [
     "pydantic>=2.0.0",
+    # 0.10.1 fixes get_pid_on_port's UnicodeDecodeError on Chinese-locale
+    # Windows (cp936): lsof/netstat subprocess now pins utf-8 + errors=ignore
+    # and is None-safe on empty stdout. Required for downstream callers on
+    # zh-CN Windows Server — older versions crash in connect_browser().
     # 0.9.0 exposes `startup_timeout` on browser_start (default 30s) — we
     # pass it through from GrokClient so callers can raise it on slow /
     # crowded Windows machines where the old 10s hardcode timed out.
     # cloudflare_verify was removed in 0.8.0; client.py handles its
     # absence with a minimal in-tree detector.
-    "ai-dev-browser>=0.9.3,<1.0",
+    "ai-dev-browser>=0.10.1,<1.0",
 ]
 
 [project.scripts]
