@@ -3735,26 +3735,70 @@ class GrokClient(ResponseParser):
         await click_menu_item(self._tab, "Custom", "编辑图像", "Edit image", delay=d)
         await asyncio.sleep(2.5 * d)
 
-        # 4. Switch to 图片 mode (panel defaults to 视频)
-        await self._tab.evaluate(
-            r"""
-            (() => {
-                const b = Array.from(document.querySelectorAll('button'))
-                    .find(x => (x.getAttribute('aria-label')||'')==='图片');
-                if (!b) return;
-                const r = b.getBoundingClientRect();
+        # 4. Switch to 图片 mode (panel defaults to 视频) and verify.
+        # Chain-root image posts can land in a panel state where the 图片
+        # tab is missing entirely, leaving the panel locked to video-gen
+        # mode. Without verification, step 6 below would silently click
+        # 生成视频 and create an unintended video using the edit prompt
+        # (account mutation + the caller waits 300s for an image NDJSON
+        # response that never arrives). Verify the switch produced a
+        # 编辑 submit button; raise loudly if not.
+        switch_js = r"""
+        (() => {
+            const labels = ['图片', 'Image'];
+            const tab = Array.from(document.querySelectorAll('button'))
+                .find(x => labels.includes((x.getAttribute('aria-label')||'')));
+            if (tab) {
+                const r = tab.getBoundingClientRect();
                 const x = r.x + r.width/2, y = r.y + r.height/2;
                 const o = {bubbles:true, cancelable:true, clientX:x, clientY:y,
                            pointerType:'mouse', button:0, pointerId:1, isPrimary:true};
-                b.dispatchEvent(new PointerEvent('pointerdown', o));
-                b.dispatchEvent(new MouseEvent('mousedown', o));
-                b.dispatchEvent(new PointerEvent('pointerup', o));
-                b.dispatchEvent(new MouseEvent('mouseup', o));
-                b.dispatchEvent(new MouseEvent('click', o));
+                tab.dispatchEvent(new PointerEvent('pointerdown', o));
+                tab.dispatchEvent(new MouseEvent('mousedown', o));
+                tab.dispatchEvent(new PointerEvent('pointerup', o));
+                tab.dispatchEvent(new MouseEvent('mouseup', o));
+                tab.dispatchEvent(new MouseEvent('click', o));
+            }
+            return tab ? 'clicked' : 'no-tab';
+        })()
+        """
+        await self._tab.evaluate(switch_js)
+        await asyncio.sleep(1.0 * d)
+
+        mode_state_raw = await self._tab.evaluate(
+            r"""
+            (() => {
+                const has = lbls => Array.from(document.querySelectorAll('button'))
+                    .some(x => lbls.includes((x.getAttribute('aria-label')||'')));
+                const visibleButtons = Array.from(document.querySelectorAll('button'))
+                    .map(b => b.getAttribute('aria-label')
+                              || (b.textContent || '').trim().slice(0, 20))
+                    .filter(Boolean).slice(0, 40);
+                return JSON.stringify({
+                    has_edit: has(['编辑', 'Edit']),
+                    has_genvid: has(['生成视频', 'Generate Video']),
+                    has_img_tab: has(['图片', 'Image']),
+                    visible_buttons: visibleButtons,
+                });
             })()
             """
         )
-        await asyncio.sleep(1.0 * d)
+        try:
+            mode_state = json_mod.loads(mode_state_raw) if isinstance(mode_state_raw, str) else {}
+        except Exception:
+            mode_state = {}
+        if not mode_state.get("has_edit"):
+            raise GrokAPIError(
+                f"edit_current: panel opened in video-generation mode and "
+                f"the 图片/Image tab switch failed to surface a 编辑/Edit "
+                f"submit button. Proceeding would silently click 生成视频 "
+                f"and create an unintended video using the edit prompt. "
+                f"This typically happens on chain-root image posts (image "
+                f"posts that have video descendants) where Grok's panel "
+                f"locks to video-context. Workaround for callers of "
+                f"edit_image: pass this post as a reference image instead "
+                f"of as the source. Panel state: {mode_state!r}"
+            )
 
         # 4b. Upload reference images (if any). One setFileInputFiles call
         # for ALL refs — calling it multiple times REPLACES rather than
@@ -3843,16 +3887,18 @@ class GrokClient(ResponseParser):
                 raise GrokAPIError("Could not find prompt editor (ProseMirror)")
             await asyncio.sleep(1 * d)
 
-        # 6. Click 编辑 submit (fall back to 生成视频 if mode flip failed)
+        # 6. Click 编辑 / Edit submit. We deliberately do NOT fall back
+        # to 生成视频 if 编辑 is missing — that would silently generate
+        # a video using the edit prompt (wrong API semantics and an
+        # unintended account mutation). The mode_state check above
+        # already raises in that case; this is the belt-and-suspenders
+        # in case the panel state changed between check and click.
         submit_clicked = await self._tab.evaluate(
             r"""
             (() => {
-                let b = Array.from(document.querySelectorAll('button'))
-                    .find(x => (x.getAttribute('aria-label')||'')==='编辑');
-                if (!b) {
-                    b = Array.from(document.querySelectorAll('button'))
-                        .find(x => (x.getAttribute('aria-label')||'')==='生成视频');
-                }
+                const labels = ['编辑', 'Edit'];
+                const b = Array.from(document.querySelectorAll('button'))
+                    .find(x => labels.includes((x.getAttribute('aria-label')||'')));
                 if (!b) return false;
                 const r = b.getBoundingClientRect();
                 const x = r.x + r.width/2, y = r.y + r.height/2;
@@ -3868,7 +3914,12 @@ class GrokClient(ResponseParser):
             """
         )
         if not submit_clicked:
-            raise GrokAPIError("Could not find 编辑 submit button")
+            raise GrokAPIError(
+                "edit_current: 编辑/Edit submit button disappeared between "
+                "the panel-mode verification and the click — likely a race "
+                "with Grok's UI rehydration. Retry; if persistent, report "
+                "the post id."
+            )
 
         # Wait for response with timeout
         start_time = asyncio.get_event_loop().time()
@@ -3899,6 +3950,29 @@ class GrokClient(ResponseParser):
         descendant. See :meth:`edit_image` for the public entry point.
         """
         await self.select_post({"post_id": post_id})
+        # Defense in depth: select_post is supposed to land us on post_id,
+        # but on some chain-root posts Grok's SPA re-redirects after the
+        # sidebar-thumbnail click (or the thumbnail click lands on a
+        # cosmetic match without updating the route). Running edit_current
+        # in that state silently drives the WRONG post — and worse, the
+        # video-fallback at submit-time would mutate the user's account.
+        # Fail loud here so callers get a typed error within seconds.
+        landed_url = await self._tab.evaluate("location.href")
+        if post_id not in str(landed_url):
+            raise GrokAPIError(
+                f"edit_image: could not stay on source post {post_id} after "
+                f"select_post — Grok redirected to {landed_url!r}. This "
+                f"typically means the post is a chain-root image with video "
+                f"descendants; Grok's lineage validator rejects these as "
+                f"edit sources. Suggested workarounds (in order of "
+                f"reliability): (a) use a different image post as the "
+                f"source — chain-root posts can't be edited even after "
+                f"this code-path defense lands; (b) pass this post as a "
+                f"reference image (images=[<other-source>, "
+                f"'post:{post_id}']) — works for benign content but Grok "
+                f"may moderate the reference image's content server-side "
+                f"and return no images."
+            )
         return await self.edit_current(edit_prompt, timeout=timeout, source_post_id=post_id)
 
     async def _upload_image(self, image_path: str | Path, timeout: int = 15) -> int:

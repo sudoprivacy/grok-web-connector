@@ -55,3 +55,7 @@ debug_*.png
 
 # Claude Code local settings
 .claude/settings.local.json
+
+# Workbench: local repro / debug scripts, never committed.
+# Same shape as .claude/ — per-session scratch, not version-controlled.
+workbench/
