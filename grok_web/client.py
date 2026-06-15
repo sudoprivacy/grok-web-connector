@@ -5075,15 +5075,33 @@ class GrokClient(ResponseParser):
                 break
             await asyncio.sleep(0.5)
         if len(captured_data["jobs"]) == 0:
+            # Probe submit-button state first. Reporter pattern (2026-06,
+            # ~3000 generations into a session): Grok's hourly anti-abuse
+            # throttle disables the submit button right around our click
+            # without rendering any banner / dialog / Turnstile. Without
+            # this probe the connector raised a generic "overlay
+            # intercepted" error, which (a) misled users into chasing a
+            # non-existent overlay and (b) didn't trip downstream pools'
+            # ``matches_exception(r, GrokRateLimitError)`` early-exit —
+            # so the pool kept retrying, escalating the hourly throttle
+            # into a multi-hour Turnstile hard-flag. Classify first;
+            # only fall through to the overlay hint when submit is
+            # genuinely still enabled.
+            typed = await self._classify_submit_block(action="create_image")
+            if typed is not None:
+                raise typed
             raise GrokAPIError(
-                f"Submit click fired but no WebSocket generation frames "
-                f"received within {wait_first}s. Most likely cause: an "
-                "overlay (cookie banner, auth modal, etc.) intercepted "
-                "the click via z-index/hit-test. The connector auto-kills "
-                "Grok's OneTrust banner on __aenter__, so if you see this "
-                "there's a new overlay — inspect the tab for "
-                "[role='dialog'] or high-z-index elements covering the "
-                "提交 button coords."
+                f"create_image: submit click fired but no WebSocket "
+                f"generation frames received within {wait_first}s, "
+                f"AND the submit button is still enabled with no "
+                f"banner/dialog text indicating throttle. Most likely "
+                f"cause: an overlay (cookie banner, auth modal, "
+                f"high-z-index dialog) intercepted the click via "
+                f"hit-test. The connector auto-kills Grok's OneTrust "
+                f"banner on __aenter__, so if you see this there's a "
+                f"new overlay — inspect the tab for [role='dialog'] "
+                f"or high-z-index elements covering the 提交 button "
+                f"coords."
             )
 
         # Step 6: Wait for initial batch of images via WebSocket
@@ -5181,106 +5199,13 @@ class GrokClient(ResponseParser):
             # The probe is cheap (one JS evaluate) and only fires when
             # we'd otherwise be sleeping anyway.
             if consecutive_no_new_jobs >= 3:
-                from .exceptions import GrokQuotaExceededError, GrokRateLimitError
-
-                submit_state = await self._probe_submit_state()
-                if submit_state.get("submit_disabled"):
-                    banners = submit_state.get("banners") or []
-                    candidate_messages = submit_state.get("candidate_messages") or []
-                    # Combine both pools so wide-net text catches what the
-                    # narrow banner-selector misses. Grok sometimes renders
-                    # rate-limit messages in plain <div>s with no
-                    # alert/banner/role hint.
-                    all_text_pool = list(banners) + [
-                        cm.get("text", "") for cm in candidate_messages
-                    ]
-                    combined_text = " | ".join(all_text_pool).lower()
-                    # Quota: daily / billing-period / subscription exhaustion
-                    QUOTA_HINTS = (
-                        "quota",
-                        "daily limit",
-                        "subscription",
-                        "upgrade to",
-                        "exhausted",
-                        "已达",
-                        "上限",
-                        "超出今日",
-                        "今日上限",
-                        "配额",
-                        "用完",
-                        "用尽",
-                    )
-                    # Rate-limit: hourly / temporary throttle (resets in minutes)
-                    RATE_HINTS = (
-                        "rate limit",
-                        "rate-limit",
-                        "try again",
-                        "too many",
-                        "throttle",
-                        "wait a moment",
-                        "wait a few",
-                        "limit reached",
-                        "minute",
-                        "稍后再试",
-                        "请稍候",
-                        "请稍后",
-                        "请等待",
-                        "频率",
-                        "频次",
-                        "太多",
-                        "限次",
-                        "稍候",
-                        "稍后",
-                        "分钟",
-                    )
-                    if any(s in combined_text for s in QUOTA_HINTS):
-                        raise GrokQuotaExceededError(
-                            f"create_image: submit button is disabled and "
-                            f"the page indicates quota exhaustion. Stop "
-                            f"generating until quota resets. "
-                            f"banners={banners!r}, "
-                            f"candidate_messages={candidate_messages!r}"
-                        )
-                    if any(s in combined_text for s in RATE_HINTS):
-                        raise GrokRateLimitError(
-                            f"create_image: submit button is disabled "
-                            f"(rate-limited). banners={banners!r}, "
-                            f"candidate_messages={candidate_messages!r}. "
-                            f"Wait several minutes before retrying."
-                        )
-                    # Submit disabled with no matching keyword in either
-                    # the narrow banners pool or the wide candidate_messages
-                    # pool — preflight content moderation, account flag,
-                    # or a Grok message wording we don't recognize yet.
-                    # Surface BOTH pools so the maintainer can extend the
-                    # hint dictionaries without instrumenting a separate
-                    # probe script.
-                    raise GrokAPIError(
-                        f"create_image: submit button is disabled and no "
-                        f"new generation jobs are arriving. Probe state: "
-                        f"submit_aria={submit_state.get('submit_aria')!r}, "
-                        f"submit_text={submit_state.get('submit_text')!r}, "
-                        f"rejected_candidates="
-                        f"{submit_state.get('rejected_candidates')!r}, "
-                        f"banners={banners!r}, "
-                        f"candidate_messages={candidate_messages!r}. "
-                        f"Generation cannot proceed — this is usually a "
-                        f"server-side block (preflight content moderation, "
-                        f"account flag, or limit hit with a banner the "
-                        f"connector doesn't recognize). The connector is "
-                        f"failing fast rather than scrolling indefinitely.\n\n"
-                        f"=== HELP US IMPROVE ===\n"
-                        f"If you saw a rate-limit / quota / wait banner in "
-                        f"the browser, please don't close the chrome window, "
-                        f"then run from the connector repo:\n"
-                        f"    python -m scripts.dump_grok_banner\n"
-                        f"and forward workbench/grok_banner_dump.txt to the "
-                        f"connector maintainer. The dump includes the actual "
-                        f"banner text + selectors so the next release can "
-                        f"classify this state as a typed "
-                        f"GrokRateLimitError / GrokQuotaExceededError "
-                        f"automatically."
-                    )
+                # Same classifier as the submit-click-fail site —
+                # silent-disabled-no-banner now resolves to
+                # GrokRateLimitError so downstream pools early-exit
+                # instead of escalating the throttle via retry.
+                typed = await self._classify_submit_block(action="create_image")
+                if typed is not None:
+                    raise typed
 
                 # Submit is still active → genuine rate-limit, just slow.
                 # Wait longer before next scroll (15s, 30s, capped at 60s).
@@ -5513,6 +5438,137 @@ class GrokClient(ResponseParser):
             images=images,
             conversation_id=None,  # Not available via WebSocket
             selected_post_ids=selected_post_ids,
+        )
+
+    # Keyword pools for classifying probe text into typed exceptions.
+    # SSOT used by ``_classify_submit_block``; the JS-side KEYWORDS list
+    # in ``_probe_submit_state`` is intentionally a superset so the
+    # candidate_messages pool never strips text the classifier would
+    # have matched.
+    _QUOTA_HINTS = (
+        "quota",
+        "daily limit",
+        "subscription",
+        "upgrade to",
+        "exhausted",
+        "已达",
+        "上限",
+        "超出今日",
+        "今日上限",
+        "配额",
+        "用完",
+        "用尽",
+    )
+    _RATE_HINTS = (
+        "rate limit",
+        "rate-limit",
+        "try again",
+        "too many",
+        "throttle",
+        "wait a moment",
+        "wait a few",
+        "limit reached",
+        "minute",
+        "稍后再试",
+        "请稍候",
+        "请稍后",
+        "请等待",
+        "频率",
+        "频次",
+        "太多",
+        "限次",
+        "稍候",
+        "稍后",
+        "分钟",
+    )
+
+    async def _classify_submit_block(self, *, action: str):
+        """Probe submit state + nearby banners; return the most-specific
+        typed exception describing why the composer is blocked.
+
+        Returns:
+            * :class:`GrokQuotaExceededError` — banner / candidate text
+              matches a quota keyword (account is done for the cycle).
+            * :class:`GrokRateLimitError` — banner / candidate text
+              matches a rate-limit keyword, OR submit is silently
+              disabled with NO visible banner / dialog text. The second
+              case is critical: as of 2026-06 Grok's hourly anti-abuse
+              throttle simply disables the submit button without
+              rendering any banner, so the only signal callers get is
+              a state change on the button itself. Misclassifying that
+              as a generic error invites retry-driven escalation to a
+              multi-hour Turnstile hard-flag (see reporter's
+              ``rate_limit_escalates_on_retry`` incident pattern), so
+              we default to RateLimit and let
+              :class:`grok_web.pool.BrowserWorkerPool` early-exit.
+            * :class:`GrokAPIError` — never returned; if classification
+              cannot find a clear signal we still return RateLimit per
+              the safety argument above. (Generic GrokAPIError is the
+              caller's fallback when this method returns ``None``.)
+            * ``None`` — submit is NOT in a blocked state (button is
+              present and enabled). Caller should fall through to its
+              own scenario-specific error (e.g. "overlay intercepted
+              click", "rendering bug").
+
+        Args:
+            action: Name of the calling method (e.g. ``"create_image"``)
+                surfaced in the error message so multi-source stacks
+                are diagnosable.
+        """
+        from .exceptions import GrokQuotaExceededError, GrokRateLimitError
+
+        submit_state = await self._probe_submit_state()
+        if not submit_state.get("submit_disabled"):
+            return None  # submit is enabled — not a server-side block
+
+        banners = submit_state.get("banners") or []
+        candidate_messages = submit_state.get("candidate_messages") or []
+        combined_text = " | ".join(
+            list(banners) + [cm.get("text", "") for cm in candidate_messages]
+        ).lower()
+
+        if any(s in combined_text for s in self._QUOTA_HINTS):
+            return GrokQuotaExceededError(
+                f"{action}: submit button is disabled and the page "
+                f"indicates quota exhaustion. Stop generating until "
+                f"quota resets. banners={banners!r}, "
+                f"candidate_messages={candidate_messages!r}"
+            )
+        if any(s in combined_text for s in self._RATE_HINTS):
+            return GrokRateLimitError(
+                f"{action}: submit button is disabled (rate-limited). "
+                f"banners={banners!r}, "
+                f"candidate_messages={candidate_messages!r}. "
+                f"Wait several minutes before retrying."
+            )
+        # Silently disabled — no banner / dialog text recognised. Most
+        # common cause as of 2026-06 is Grok's hourly anti-abuse
+        # throttle, which disables the submit button without rendering
+        # any banner. Retrying during cooldown ESCALATES to a multi-hour
+        # Turnstile hard-flag, so we MUST type this as RateLimit even
+        # though the signal is ambiguous (could theoretically be
+        # preflight content-mod or account flag). The diagnostic dump
+        # below lets a maintainer extend the keyword pools when a
+        # genuine non-throttle case surfaces.
+        return GrokRateLimitError(
+            f"{action}: submit button became disabled with no visible "
+            f"banner or dialog text. Almost certainly server-side "
+            f"hourly anti-abuse throttle (Grok silently disables submit "
+            f"instead of rendering a banner). DO NOT retry — retry "
+            f"during cooldown escalates the throttle to a multi-hour "
+            f"hard-flag. Stop workers and wait 1+ hour. Probe state: "
+            f"submit_aria={submit_state.get('submit_aria')!r}, "
+            f"submit_text={submit_state.get('submit_text')!r}, "
+            f"rejected_candidates="
+            f"{submit_state.get('rejected_candidates')!r}, "
+            f"banners={banners!r}, "
+            f"candidate_messages={candidate_messages!r}.\n\n"
+            f"If you actually saw a banner (rate-limit / quota / wait) "
+            f"in the browser, run from the connector repo:\n"
+            f"    python -m scripts.dump_grok_banner\n"
+            f"and forward workbench/grok_banner_dump.txt to the "
+            f"maintainer so the next release can recognise that "
+            f"wording explicitly."
         )
 
     async def _probe_submit_state(self) -> dict:
