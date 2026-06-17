@@ -15,6 +15,7 @@ Python client for [Grok Imagine](https://grok.com/imagine) — browser automatio
 - **Batch processing** — parallel workers via `BrowserWorkerPool`
 - **Auto-auth** — browser-driven login, cookie persistence
 - **Moderation detection** — rate-limit & quota banner recognition
+- **xAI REST API backend** — direct API access without a browser via `XAIClient`
 
 ## Requirements
 
@@ -85,11 +86,41 @@ async with BrowserWorkerPool(num_workers=3) as pool:
     results = await pool.wait()
 ```
 
+## REST API Backend
+
+For direct API access without a browser (requires [xAI API key](https://console.x.ai)):
+
+```python
+from grok_web import get_api_client
+
+async with get_api_client() as client:
+    result = await client.create_image({
+        "prompt": "a cat",
+        "model": "grok-imagine-image",
+    })
+    video = await client.create_video({
+        "prompt": "a cat dancing",
+        "model": "grok-imagine-video",
+    })
+```
+
+Set `XAI_API_KEY` as an environment variable, or add `"xai_api_key"` to `~/.grok-config.json`.
+
+Both backends return the same result types, enabling A/B comparison:
+
+```python
+async with get_client() as browser, get_api_client() as api:
+    b = await browser.create_image({"prompt": p})
+    a = await api.create_image({"prompt": p, "model": "grok-imagine-image"})
+    print(f"Browser moderated: {b.moderated_count}, API moderated: {a.moderated_count}")
+```
+
 ## Project Structure
 
 ```
 grok_web/
-    client.py          # GrokClient — all API methods
+    client.py          # GrokClient — browser-based API methods
+    xai_client.py      # XAIClient — xAI REST API backend (no browser)
     schema.py          # SSOT param definitions (add new Grok params here)
     prompt_parser.py   # @N image reference parsing
     models.py          # Pydantic response models

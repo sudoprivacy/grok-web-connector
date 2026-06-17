@@ -105,6 +105,40 @@ def load_cookies(config_path: Path | str | None = None) -> GrokCookies:
         raise GrokConfigError(f"Invalid cookie configuration: {e}") from e
 
 
+def load_api_key(config_path: Path | str | None = None) -> str | None:
+    """Load xAI API key from environment or config file.
+
+    Resolution order: $XAI_API_KEY env var → "xai_api_key" in config file.
+
+    Args:
+        config_path: Path to config file. Defaults to ~/.grok-config.json
+
+    Returns:
+        API key string, or None if not configured.
+    """
+    import os
+
+    key = os.environ.get("XAI_API_KEY")
+    if key:
+        return key
+
+    if config_path is None:
+        config_path = DEFAULT_CONFIG_PATH
+    else:
+        config_path = Path(config_path)
+
+    if not config_path.exists():
+        return None
+
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            config = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+    return config.get("xai_api_key")
+
+
 def save_cookies(cookies: GrokCookies, config_path: Path | str | None = None) -> None:
     """
     Save authentication cookies to config file.

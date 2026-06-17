@@ -13,7 +13,7 @@ For parallel processing, see BrowserWorkerPool (grok_web/pool/).
 
 from pathlib import Path
 
-from .auth import load_cookies, save_cookies
+from .auth import load_api_key, load_cookies, save_cookies
 from .client import GrokClient
 from .exceptions import (
     GrokAPIError,
@@ -45,6 +45,9 @@ from .models import (
 from .pool import BrowserWorkerPool
 from .prompt_parser import classify_image_source, parse_prompt
 from .schema import (
+    API_EDIT_KEYS,
+    API_IMAGE_KEYS,
+    API_VIDEO_KEYS,
     EDIT_KEYS,
     EXTEND_KEYS,
     IMAGE_KEYS,
@@ -57,6 +60,7 @@ from .schema import (
     validate_params,
 )
 from .selectors import auto_favorite_first_n, select_all, signal_file_selector, timeout_selector
+from .xai_client import XAIClient
 
 try:
     from importlib.metadata import version
@@ -132,11 +136,38 @@ def get_client(
     )
 
 
+def get_api_client(
+    api_key: str | None = None,
+    config_path: Path | str | None = None,
+) -> XAIClient:
+    """Get the xAI REST API client for Grok Imagine.
+
+    Use when you want image/video generation via xAI's official API
+    without launching a browser. Requires XAI_API_KEY.
+
+    API key resolution: api_key param → $XAI_API_KEY env var →
+    "xai_api_key" in ~/.grok-config.json.
+
+    Returns the same result types as get_client() (browser-based),
+    enabling A/B comparison of moderation rates.
+
+    Example:
+        async with get_api_client() as client:
+            result = await client.create_image({
+                "prompt": "a cat",
+                "model": "grok-imagine-image",
+            })
+    """
+    return XAIClient(api_key=api_key, config_path=config_path)
+
+
 __all__ = [
-    # Factory function (main entry point)
+    # Factory functions (main entry points)
     "get_client",
-    # Client class
+    "get_api_client",
+    # Client classes
     "GrokClient",
+    "XAIClient",
     # Worker Pool (for parallel processing)
     "BrowserWorkerPool",
     # Schema (SSOT for params)
@@ -146,6 +177,9 @@ __all__ = [
     "EDIT_KEYS",
     "EXTEND_KEYS",
     "UPLOAD_KEYS",
+    "API_IMAGE_KEYS",
+    "API_VIDEO_KEYS",
+    "API_EDIT_KEYS",
     "schema_to_docstring",
     "schema_to_help",
     "splice_schema_into_docstring",
@@ -182,6 +216,7 @@ __all__ = [
     # Auth utilities
     "load_cookies",
     "save_cookies",
+    "load_api_key",
     # Thumbnail selectors (for create_image)
     "select_all",
     "timeout_selector",

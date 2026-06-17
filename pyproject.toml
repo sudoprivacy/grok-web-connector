@@ -26,6 +26,7 @@ dependencies = [
     # cloudflare_verify was removed in 0.8.0; client.py handles its
     # absence with a minimal in-tree detector.
     "ai-dev-browser>=0.10.1,<1.0",
+    "httpx>=0.27.0",
 ]
 
 [project.scripts]

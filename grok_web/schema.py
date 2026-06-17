@@ -230,6 +230,25 @@ PARAMS: dict[str, dict[str, Any]] = {
         "type": "float",
         "default": 5.0,
     },
+    # --- xAI REST API params (used by XAIClient, not GrokClient) ---
+    "model": {
+        "desc": (
+            "xAI model name. Image: 'grok-imagine-image' ($0.02) or "
+            "'grok-imagine-image-quality' ($0.05). Video: 'grok-imagine-video' "
+            "($0.05/s) or 'grok-imagine-video-1.5' ($0.08/s)."
+        ),
+        "type": "str",
+    },
+    "output_count": {
+        "desc": "Number of images to generate per request (1-10).",
+        "type": "int",
+        "default": 4,
+    },
+    "response_format": {
+        "desc": "Image response format: 'url' (CDN link) or 'b64_json' (base64-encoded).",
+        "type": "str",
+        "default": "url",
+    },
 }
 
 # =============================================================================
@@ -306,6 +325,34 @@ WAIT_FOR_COMPLETION_KEYS = [
     "video_id",
     "timeout",
     "poll_interval",
+]
+
+# --- xAI REST API key groups (used by XAIClient) ---
+
+API_IMAGE_KEYS = [
+    "prompt",
+    "model",
+    "output_count",
+    "aspect_ratio",
+    "response_format",
+    "timeout",
+]
+
+API_VIDEO_KEYS = [
+    "prompt",
+    "model",
+    "images",
+    "duration",
+    "timeout",
+    "poll_interval",
+]
+
+API_EDIT_KEYS = [
+    "prompt",
+    "model",
+    "images",
+    "response_format",
+    "timeout",
 ]
 
 # =============================================================================
