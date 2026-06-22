@@ -3600,41 +3600,55 @@ class GrokClient(ResponseParser):
         source_post_id: str | None = None,
         reference_images: list[Path] | None = None,
     ) -> ImageEditResult:
-        """Edit the image post currently selected on the tab.
+        """Use when: source image already selected on tab; edit via inline composer.
 
-        Lower-level primitive: opens 更多选项 → Custom → 图片 mode,
-        optionally uploads additional reference images, fills the
-        prompt, clicks 编辑, and waits for the NDJSON response. Does
-        NOT navigate. Caller is responsible for selecting the source
-        image first via :meth:`select_post`.
+        Lower-level primitive of :meth:`edit_image`. Drives the
+        post-page inline edit composer that Grok added in the 2026-06
+        UI redesign (the legacy "..." → Custom → 图片 menu flow no
+        longer exists). Switches viewport to image-mode, verifies the
+        composer is present, types the prompt (clearing any pre-fill
+        from a prior 编辑提示 click), uploads optional reference
+        images, clicks 编辑/Edit, and waits for the NDJSON image
+        responses. Does NOT navigate — caller selects the source via
+        :meth:`select_post` first.
 
-        Reference images: the source post (the one being edited) is
-        always available as ``@1`` in the prompt — it's the implicit
-        "Image 1" in Grok's @ popup with zero uploads needed. Each
-        path in ``reference_images`` is uploaded into the panel and
-        becomes ``@2, @3, ...`` in order. So a 2-ref edit_current
-        with ``edit_prompt = "edit @1 to add ropes from @2 colored
-        like @3"`` and ``reference_images=[ref_a, ref_b]`` resolves
-        as: @1 = source (current selection), @2 = ref_a, @3 = ref_b.
+        Reference images: the source post is always implicit ``@1``
+        in the prompt. Each path in ``reference_images`` becomes
+        ``@2, @3, ...`` in order. So a 2-ref edit with
+        ``edit_prompt = "edit @1 to add ropes from @2 colored like @3"``
+        and ``reference_images=[ref_a, ref_b]`` resolves as:
+        @1 = source (current selection), @2 = ref_a, @3 = ref_b.
 
         ``source_post_id`` is used only for result metadata
-        (``ImageEditResult.post_id``).
+        (``ImageEditResult.post_id``); it does not affect the UI walk.
 
         Args:
             edit_prompt: The edit instruction text. May contain
                 ``@N`` markers (1 = source, 2..N = reference_images).
-            timeout: Max seconds to wait for both candidate images
-                to reach progress=100 (default 300).
-            source_post_id: Optional label for the result. Does not
-                influence the UI interaction.
-            reference_images: Optional local file paths to upload as
-                additional refs. Up to ~6 (Grok's UI cap). Use
+            timeout: Max seconds to wait for both candidate images to
+                reach progress=100 (default 300). Returns early on
+                any typed server error.
+            source_post_id: Optional label for the result.
+            reference_images: Optional local file paths uploaded as
+                additional refs. Up to ~6 (Grok UI cap). Use
                 :meth:`edit_image` if you want the connector to
                 resolve ``post:<uuid>`` / file paths for you.
 
         Returns:
-            ImageEditResult. The ``post_id`` field reflects
-            ``source_post_id`` (or empty if omitted).
+            ImageEditResult. ``post_id`` reflects ``source_post_id``
+            (or empty). ``images`` is empty when Grok moderates the
+            output server-side or rejects the request.
+
+        Failure:
+            * Inline composer not present on the post page → typed
+              GrokAPIError with the visible-button dump for triage
+              (post may not be an editable surface).
+            * Server returns ``Failed to download image from GCS``
+              (a 2026-06 Grok-side URL inconsistency between display
+              and edit CDN paths) → typed GrokAPIError with the
+              REST-primary warmup workaround spelled out.
+            * Reference-image upload didn't reach the expected count
+              within 15s → typed GrokAPIError.
         """
         import asyncio
         import json as json_mod
@@ -3647,46 +3661,71 @@ class GrokClient(ResponseParser):
 
         await self._tab.send(cdp.network.enable())
 
-        captured_data: dict[str, Any] = {"conversation_id": None, "images": {}}
+        # request_ids is a SET (not single value) — Grok's 2026-06 UI
+        # fires the /conversations/new POST multiple times per submit
+        # click (observed: 1–3 calls per click; auto-like + edit + retry
+        # internal). The pre-2026-06 single-id capture overwrote and
+        # missed the real image-edit response in that race. Track all.
+        captured_data: dict[str, Any] = {
+            "conversation_id": None,
+            "images": {},
+            "request_ids": set(),
+            "server_error": None,  # e.g. "Failed to download image from GCS"
+        }
 
         async def handle_response(event: cdp.network.ResponseReceived):
             url = event.response.url
             if "/app-chat/conversations/new" in url:
-                captured_data["request_id"] = event.request_id
+                captured_data["request_ids"].add(event.request_id)
 
         async def handle_loading_finished(event: cdp.network.LoadingFinished):
-            if captured_data.get("request_id") == event.request_id:
-                try:
-                    body_result = await self._tab.send(
-                        cdp.network.get_response_body(request_id=event.request_id)
-                    )
-                    body = body_result[0] if isinstance(body_result, tuple) else str(body_result)
-                    for line in body.strip().split("\n"):
-                        if not line:
-                            continue
-                        try:
-                            data = json_mod.loads(line)
-                            result = data.get("result", {})
-                            if "conversation" in result:
-                                captured_data["conversation_id"] = result["conversation"].get(
-                                    "conversationId"
-                                )
-                            response = result.get("response", {})
-                            if "streamingImageGenerationResponse" in response:
-                                img_resp = response["streamingImageGenerationResponse"]
-                                image_id = img_resp.get("imageId")
-                                if image_id:
-                                    captured_data["images"][image_id] = {
-                                        "image_id": image_id,
-                                        "post_id": image_id,
-                                        "image_url": img_resp.get("imageUrl", ""),
-                                        "moderated": img_resp.get("moderated", False),
-                                        "progress": img_resp.get("progress", 0),
-                                    }
-                        except json_mod.JSONDecodeError:
-                            continue
-                except Exception:
-                    pass
+            if event.request_id not in captured_data["request_ids"]:
+                return
+            try:
+                body_result = await self._tab.send(
+                    cdp.network.get_response_body(request_id=event.request_id)
+                )
+                body = body_result[0] if isinstance(body_result, tuple) else str(body_result)
+                # 2026-06: short non-NDJSON error bodies surface server-side
+                # rejections (e.g. ``{"error":{"code":13,"message":"Failed
+                # to download image from GCS"}}``). Capture the message so
+                # the wait-loop expiry can surface a typed error instead of
+                # an empty ImageEditResult silently.
+                stripped = body.strip()
+                if stripped.startswith("{") and '"error"' in stripped[:50]:
+                    try:
+                        err_obj = json_mod.loads(stripped)
+                        err = err_obj.get("error") if isinstance(err_obj, dict) else None
+                        if isinstance(err, dict):
+                            captured_data["server_error"] = err.get("message") or str(err)
+                    except json_mod.JSONDecodeError:
+                        pass
+                for line in body.strip().split("\n"):
+                    if not line:
+                        continue
+                    try:
+                        data = json_mod.loads(line)
+                        result = data.get("result", {})
+                        if "conversation" in result:
+                            captured_data["conversation_id"] = result["conversation"].get(
+                                "conversationId"
+                            )
+                        response = result.get("response", {})
+                        if "streamingImageGenerationResponse" in response:
+                            img_resp = response["streamingImageGenerationResponse"]
+                            image_id = img_resp.get("imageId")
+                            if image_id:
+                                captured_data["images"][image_id] = {
+                                    "image_id": image_id,
+                                    "post_id": image_id,
+                                    "image_url": img_resp.get("imageUrl", ""),
+                                    "moderated": img_resp.get("moderated", False),
+                                    "progress": img_resp.get("progress", 0),
+                                }
+                    except json_mod.JSONDecodeError:
+                        continue
+            except Exception:
+                pass
 
         self._tab.add_handler(cdp.network.ResponseReceived, handle_response)
         self._tab.add_handler(cdp.network.LoadingFinished, handle_loading_finished)
@@ -3694,110 +3733,75 @@ class GrokClient(ResponseParser):
         await asyncio.sleep(1 * d)
         await enable_focus_emulation(self._tab)
 
-        # 0. Switch viewport to image-view mode. select_post locks the
-        # URL onto the source image, but for chain-root images that have
-        # video descendants Grok's post page defaults the viewport to
-        # video-mode (showing the tail video player). The "..." menu
-        # tracks the visible viewport, so a video-mode viewport gives
-        # video-context items (扩展 / 删除视频) instead of the image
-        # items we need (Custom / Spicy / Normal). switch_to_image_view
-        # is a no-op when the post has no video children or the
-        # viewport is already image-mode, so it's safe to call
-        # unconditionally.
+        # 0. Switch viewport to image mode. select_post locks the URL
+        # onto the source image, but on posts with video descendants
+        # Grok's viewport defaults to the tail video — and the inline
+        # 编辑/Edit submit binds to the *visible* media, so a
+        # video-mode viewport would route our edit prompt into 动画
+        # (animate / img2vid) instead of image-edit. switch_to_image_view
+        # is a no-op when the viewport is already image-mode.
         from .actions.post_media import switch_to_image_view
-        from .actions.post_menu import click_menu_item, open_post_menu
 
         await switch_to_image_view(self._tab, delay=d)
 
-        # 1. Open 更多选项 / More options / Options — use the resilient
-        # post_menu helper rather than handwritten JS so a Grok-side
-        # aria-label rename only needs to be patched in one place
-        # (actions/post_menu.py::_MENU_BUTTON_NAMES). The helper retries
-        # 3x, multi-locale, and verifies the menu actually opened by
-        # checking that role=menuitem nodes appeared.
-        #
-        # prefer_media="image": chain-root posts render BOTH image and
-        # video cards (each with its own '...' trigger). We want the
-        # image-context menu (Custom / Spicy / Normal items), not the
-        # video-context one (扩展 / 删除视频). The helper picks the
-        # trigger spatially closest to the largest visible <img>.
-        await open_post_menu(self._tab, delay=d, prefer_media="image")
-        await asyncio.sleep(0.2 * d)
-
-        # 3. Click Custom (or legacy 编辑图像 / Edit image). Don't
-        # wrap click_menu_item's error — it already includes the
-        # actual menu items it found, which is the diagnostic info
-        # we need. (Earlier wrapper used to swallow that and add a
-        # speculative "viewport may still be in video-mode" hint;
-        # turned out chain-root failures are server-side lineage
-        # rejections, not viewport mode, so the inner dump is more
-        # actionable.)
-        await click_menu_item(self._tab, "Custom", "编辑图像", "Edit image", delay=d)
-        await asyncio.sleep(2.5 * d)
-
-        # 4. Switch to 图片 mode (panel defaults to 视频) and verify.
-        # Chain-root image posts can land in a panel state where the 图片
-        # tab is missing entirely, leaving the panel locked to video-gen
-        # mode. Without verification, step 6 below would silently click
-        # 生成视频 and create an unintended video using the edit prompt
-        # (account mutation + the caller waits 300s for an image NDJSON
-        # response that never arrives). Verify the switch produced a
-        # 编辑 submit button; raise loudly if not.
-        switch_js = r"""
-        (() => {
-            const labels = ['图片', 'Image'];
-            const tab = Array.from(document.querySelectorAll('button'))
-                .find(x => labels.includes((x.getAttribute('aria-label')||'')));
-            if (tab) {
-                const r = tab.getBoundingClientRect();
-                const x = r.x + r.width/2, y = r.y + r.height/2;
-                const o = {bubbles:true, cancelable:true, clientX:x, clientY:y,
-                           pointerType:'mouse', button:0, pointerId:1, isPrimary:true};
-                tab.dispatchEvent(new PointerEvent('pointerdown', o));
-                tab.dispatchEvent(new MouseEvent('mousedown', o));
-                tab.dispatchEvent(new PointerEvent('pointerup', o));
-                tab.dispatchEvent(new MouseEvent('mouseup', o));
-                tab.dispatchEvent(new MouseEvent('click', o));
-            }
-            return tab ? 'clicked' : 'no-tab';
-        })()
-        """
-        await self._tab.evaluate(switch_js)
-        await asyncio.sleep(1.0 * d)
-
-        mode_state_raw = await self._tab.evaluate(
+        # 1. Verify the post-page edit composer is present. As of
+        # 2026-06 Grok flattened the post-page UI: the old "..." menu
+        # (Custom / Spicy / Normal / 编辑图像) now holds only 报告问题
+        # (Report Issue), and every action moved to inline buttons.
+        # The image-edit composer is always rendered on the post page
+        # — a ProseMirror editor at the bottom plus an 编辑/Edit submit
+        # button next to it. Submit stays disabled until the editor
+        # has text. Note: 编辑提示/Edit-prompt is a separate convenience
+        # button that *pre-fills* the editor with the source post's
+        # original prompt — we deliberately skip it because the caller
+        # supplies their own edit_prompt and a source-prompt pre-fill
+        # would race our subsequent insertText.
+        composer_ready_raw = await self._tab.evaluate(
             r"""
             (() => {
-                const has = lbls => Array.from(document.querySelectorAll('button'))
-                    .some(x => lbls.includes((x.getAttribute('aria-label')||'')));
-                const visibleButtons = Array.from(document.querySelectorAll('button'))
-                    .map(b => b.getAttribute('aria-label')
-                              || (b.textContent || '').trim().slice(0, 20))
-                    .filter(Boolean).slice(0, 40);
+                const norm = s => (s || '').trim();
+                const visible = el => {
+                    const r = el.getBoundingClientRect();
+                    return r.width > 0 && r.height > 0;
+                };
+                const ed = document.querySelector('.tiptap.ProseMirror')
+                        || document.querySelector('[contenteditable="true"]');
+                const buttons = Array.from(document.querySelectorAll('button'))
+                    .filter(visible);
+                const editBtn = buttons.find(b =>
+                    ['编辑', 'Edit'].includes(norm(b.getAttribute('aria-label')))
+                );
+                const visibleLabels = buttons.map(b =>
+                    norm(b.getAttribute('aria-label'))
+                    || norm(b.innerText).split('\n')[0].slice(0, 20)
+                ).filter(t => t).slice(0, 40);
                 return JSON.stringify({
-                    has_edit: has(['编辑', 'Edit']),
-                    has_genvid: has(['生成视频', 'Generate Video']),
-                    has_img_tab: has(['图片', 'Image']),
-                    visible_buttons: visibleButtons,
+                    has_editor: !!ed,
+                    has_edit_submit: !!editBtn,
+                    visible_labels: visibleLabels,
                 });
             })()
             """
         )
         try:
-            mode_state = json_mod.loads(mode_state_raw) if isinstance(mode_state_raw, str) else {}
+            composer_ready = (
+                json_mod.loads(composer_ready_raw) if isinstance(composer_ready_raw, str) else {}
+            )
         except Exception:
-            mode_state = {}
-        if not mode_state.get("has_edit"):
+            composer_ready = {}
+        if not composer_ready.get("has_editor") or not composer_ready.get("has_edit_submit"):
             raise GrokAPIError(
-                f"edit_current: panel opened in video-generation mode and "
-                f"the 图片/Image tab switch failed to surface a 编辑/Edit "
-                f"submit button. Proceeding would silently click 生成视频 "
-                f"and create an unintended video using the edit prompt. "
-                f"This typically happens on chain-root image posts (image "
-                f"posts that have video descendants) where Grok's panel "
-                f"locks to video-context. Workaround for callers of "
-                f"edit_image: pass this post as a reference image instead "
-                f"of as the source. Panel state: {mode_state!r}"
+                f"edit_current: post-page image-edit composer not present "
+                f"(editor={composer_ready.get('has_editor')!r}, "
+                f"编辑/Edit button="
+                f"{composer_ready.get('has_edit_submit')!r}). The post "
+                f"may not be an editable surface (e.g. moderated content, "
+                f"chain-root images with video-only descendants where "
+                f"Grok routes to the 动画 / animate panel instead). "
+                f"Workaround: pass this post as a reference image via "
+                f"edit_image(images=[<other-source>, 'post:<this>']). "
+                f"Visible inline labels: "
+                f"{composer_ready.get('visible_labels', [])!r}."
             )
 
         # 4b. Upload reference images (if any). One setFileInputFiles call
@@ -3921,9 +3925,14 @@ class GrokClient(ResponseParser):
                 "the post id."
             )
 
-        # Wait for response with timeout
+        # Wait for response with timeout. Exit early if (a) we have 2
+        # completed images, or (b) the server returned a typed error
+        # — silently waiting the full timeout on a known error is the
+        # exact silent-hang bug callers were hitting.
         start_time = asyncio.get_event_loop().time()
         while asyncio.get_event_loop().time() - start_time < timeout:
+            if captured_data.get("server_error"):
+                break
             completed = [
                 img for img in captured_data["images"].values() if img.get("progress") == 100
             ]
@@ -3931,7 +3940,35 @@ class GrokClient(ResponseParser):
                 break
             await asyncio.sleep(1)
 
+        server_error = captured_data.get("server_error")
         images = list(captured_data["images"].values())
+        if server_error and not images:
+            # 2026-06 observed: ``Failed to download image from GCS`` —
+            # Grok's UI sends the source-image URL as
+            # ``images-public.x.ai/xai-images-public/...`` but the
+            # actual image is hosted at
+            # ``imagine-public.x.ai/imagine-public/...``. The two
+            # subdomains diverged in the redesign and Grok's own
+            # submit handler now constructs a URL that doesn't resolve.
+            # No connector-side fix possible — the UI fires the request,
+            # we just observe it. REST primary path (statsig-cached)
+            # constructs the URL correctly from get_post_details and
+            # works around this. Type the error so the caller can
+            # branch on it rather than guessing why images=[] came back.
+            raise GrokAPIError(
+                f"edit_current: Grok server rejected the edit request: "
+                f"{server_error!r}. As of 2026-06 the post-page inline "
+                f"edit composer sometimes constructs an incorrect "
+                f"source-image URL (wrong CDN subdomain) — a Grok-side "
+                f"bug we can observe but not fix from the client. "
+                f"Workaround: ensure a previous /conversations/new "
+                f"request has warmed the statsig snitch so edit_image "
+                f"takes the REST primary path (which constructs the "
+                f"correct URL via get_post_details), e.g. run a single "
+                f"create_image call before the first edit_image of the "
+                f"session."
+            )
+
         return ImageEditResult(
             post_id=source_post_id or "",
             edit_prompt=edit_prompt,

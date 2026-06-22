@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 from unittest.mock import patch
 
 import httpx
@@ -403,17 +402,16 @@ class TestAuthConfigResolution:
         with patch.dict(os.environ, {"XAI_API_KEY": "xai-from-env"}):
             assert load_api_key() == "xai-from-env"
 
-    def test_api_key_from_config_file(self):
+    def test_api_key_from_config_file(self, tmp_path):
         """Step 2: fallback to config file when env var absent."""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump({"cookies": {}, "xai_api_key": "xai-from-file"}, f)
-            f.flush()
-            try:
-                with patch.dict(os.environ, {}, clear=False):
-                    os.environ.pop("XAI_API_KEY", None)
-                    assert load_api_key(f.name) == "xai-from-file"
-            finally:
-                os.unlink(f.name)
+        # tmp_path (pytest fixture) → no manual NamedTemporaryFile +
+        # unlink race that fails on Windows where the file handle is
+        # still held when unlink is called.
+        config_path = tmp_path / "grok-config.json"
+        config_path.write_text(json.dumps({"cookies": {}, "xai_api_key": "xai-from-file"}))
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("XAI_API_KEY", None)
+            assert load_api_key(str(config_path)) == "xai-from-file"
 
     def test_api_key_missing_returns_none(self):
         """Step 3: no env var + no config → None (not an error)."""
@@ -427,7 +425,7 @@ class TestAuthConfigResolution:
             with pytest.raises(GrokConfigError, match="XAI_API_KEY"):
                 XAIClient()
 
-    def test_cookie_roundtrip(self):
+    def test_cookie_roundtrip(self, tmp_path):
         """Workflow: save cookies → load cookies → verify roundtrip.
 
         Data flow:
@@ -443,17 +441,13 @@ class TestAuthConfigResolution:
             cf_clearance="test-cf",
             x_userid="test-uid",
         )
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            path = f.name
-        try:
-            save_cookies(cookies, path)
-            loaded = load_cookies(path)
-            assert loaded.sso == "test-sso"
-            assert loaded.sso_rw == "test-sso-rw"
-            assert loaded.cf_clearance == "test-cf"
-            assert loaded.x_userid == "test-uid"
-        finally:
-            os.unlink(path)
+        path = str(tmp_path / "cookie-roundtrip.json")
+        save_cookies(cookies, path)
+        loaded = load_cookies(path)
+        assert loaded.sso == "test-sso"
+        assert loaded.sso_rw == "test-sso-rw"
+        assert loaded.cf_clearance == "test-cf"
+        assert loaded.x_userid == "test-uid"
 
     def test_missing_config_raises_clear_error(self):
         """Missing config file raises GrokConfigError with path in message."""
@@ -572,6 +566,87 @@ class TestSchemaCrossGroupConsistency:
         assert cleaned["output_count"] == 4
         assert cleaned["response_format"] == "url"
         assert cleaned["timeout"] == 300
+
+
+# ---------------------------------------------------------------------------
+# Scenario 6: edit_image_2026_06_ui_redesign
+#   The 2026-06 Grok Imagine UI flattened the "..." menu — every action
+#   moved to inline post-page buttons. edit_current's UI walk had to be
+#   rewritten. These tests lock the new contract at source-level so
+#   future regressions surface as test failures rather than 187s hangs.
+# ---------------------------------------------------------------------------
+
+
+class TestEditCurrent2026UIRedesign:
+    """edit_current uses inline composer (not legacy "..." menu)."""
+
+    def test_no_longer_opens_dotdotdot_menu(self):
+        """The legacy ``open_post_menu`` + ``click_menu_item('Custom', ...)``
+        walk must NOT appear — Grok's "..." menu now contains only
+        报告问题 (Report Issue), so any code path expecting Custom /
+        编辑图像 / Edit image menuitems would hang.
+        """
+        import inspect
+
+        src = inspect.getsource(GrokClient.edit_current)
+        # The forbidden legacy idioms:
+        assert "open_post_menu(" not in src, (
+            "edit_current must not call open_post_menu — Grok's 2026-06 "
+            "redesign emptied the '...' menu (only 报告问题 remains). "
+            "Use the inline 编辑/Edit submit on the post page instead."
+        )
+        assert 'click_menu_item(self._tab, "Custom"' not in src, (
+            "edit_current must not look for Custom menuitem — removed in the 2026-06 redesign"
+        )
+
+    def test_verifies_inline_composer_present(self):
+        """Layer 1: edit_current must verify the inline composer
+        (editor + 编辑/Edit submit) is present before typing/clicking."""
+        import inspect
+
+        src = inspect.getsource(GrokClient.edit_current)
+        # The composer-presence probe must run BEFORE the fill code.
+        assert "has_editor" in src and "has_edit_submit" in src, (
+            "edit_current must verify both editor and 编辑/Edit submit "
+            "are present on the post page (composer_ready probe)"
+        )
+
+    def test_captures_typed_server_error(self):
+        """Layer 2: when Grok returns a typed error body (e.g. the
+        2026-06 GCS-download bug), edit_current must surface it as
+        a GrokAPIError rather than waiting the full timeout and
+        returning an empty ImageEditResult."""
+        import inspect
+
+        src = inspect.getsource(GrokClient.edit_current)
+        assert "server_error" in src, "edit_current must capture the server's typed error message"
+        assert "Failed to download image from GCS" in src, (
+            "edit_current must document the 2026-06 GCS-download bug"
+            " in its error path so the workaround (warm statsig snitch)"
+            " is reachable from the error message"
+        )
+
+    def test_docstring_first_line_is_decision_signal(self):
+        """Per cli-steering-engineering: docstring first line should
+        be a 'use when' decision signal, not a description."""
+        doc = (GrokClient.edit_current.__doc__ or "").strip()
+        first_line = doc.split("\n", 1)[0].lower()
+        # Decision-time signal: "use when" / "when:" + selection guidance
+        assert "use when" in first_line or "when:" in first_line, (
+            f"edit_current docstring first line should be a 'use when' "
+            f"decision signal per cli-steering-engineering skill; got: "
+            f"{first_line!r}"
+        )
+
+    def test_docstring_has_failure_section(self):
+        """Per cli-steering-engineering Rule 5b: every non-trivial
+        failure mode needs a Failure: section so callers can branch."""
+        doc = GrokClient.edit_current.__doc__ or ""
+        assert "Failure:" in doc, (
+            "edit_current docstring must include a Failure: section "
+            "enumerating typed-error paths (composer not present, "
+            "GCS download error, ref upload timeout)"
+        )
 
 
 # ---------------------------------------------------------------------------
