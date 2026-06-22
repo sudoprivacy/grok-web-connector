@@ -650,6 +650,136 @@ class TestEditCurrent2026UIRedesign:
 
 
 # ---------------------------------------------------------------------------
+# Scenario 7: post_actions_2026_06_inline_button_era
+#   Like / dislike / delete_video / upgrade_video / extend (the
+#   "..." → menuitem callers from the legacy era) were rewritten to
+#   click inline buttons directly. delete_post / delete_image now
+#   raise typed errors documenting Grok's removal of those surfaces.
+#   These tests lock the contracts at source level.
+# ---------------------------------------------------------------------------
+
+
+class TestPostActions2026UIRedesign:
+    """Per-post actions use inline buttons (not legacy "..." menu)."""
+
+    @pytest.mark.parametrize(
+        "method_name",
+        ["like_post", "dislike_post", "delete_video", "upgrade_video"],
+    )
+    def test_no_longer_uses_open_post_menu(self, method_name):
+        """The legacy ``_open_post_menu`` + ``_click_menu_item`` walk
+        must NOT appear — Grok's "..." menu now contains only 报告问题
+        (Report Issue). Each affected method must drive its inline
+        button directly via ``_click_inline_post_button``."""
+        import inspect
+
+        method = getattr(GrokClient, method_name)
+        src = inspect.getsource(method)
+        assert "_open_post_menu(" not in src, (
+            f"{method_name} must not call _open_post_menu — 2026-06 redesign emptied the '...' menu"
+        )
+        assert "_click_menu_item(" not in src, (
+            f"{method_name} must not call _click_menu_item — actions "
+            f"moved out of '...' to inline post-page buttons"
+        )
+        assert "_click_inline_post_button(" in src, (
+            f"{method_name} must drive its inline button via "
+            f"_click_inline_post_button (multi-locale + visible-button "
+            f"diagnostic dump on failure)"
+        )
+
+    @pytest.mark.parametrize(
+        "method_name",
+        [
+            "like_post",
+            "dislike_post",
+            "delete_video",
+            "delete_post",
+            "delete_image",
+            "upgrade_video",
+        ],
+    )
+    def test_docstring_has_use_when_and_failure(self, method_name):
+        """Per cli-steering-engineering: decision-time first line
+        ('Use when:') + explicit Failure: section."""
+        method = getattr(GrokClient, method_name)
+        doc = (method.__doc__ or "").strip()
+        first_line = doc.split("\n", 1)[0].lower()
+        assert "use when" in first_line, (
+            f"{method_name} docstring first line should start with "
+            f"'Use when:' (decision signal); got: {first_line!r}"
+        )
+        assert "Failure:" in doc, (
+            f"{method_name} docstring needs a Failure: section enumerating its typed-error paths"
+        )
+
+    def test_delete_image_raises_typed_removed_error(self):
+        """delete_image cannot be implemented in the 2026-06 UI —
+        method must raise GrokAPIError documenting the removal so
+        callers in old scripts get an actionable message instead of
+        AttributeError."""
+        import asyncio
+        import inspect
+
+        src = inspect.getsource(GrokClient.delete_image)
+        assert "raise GrokAPIError" in src, (
+            "delete_image must raise GrokAPIError — no UI surface in 2026-06"
+        )
+        assert "2026-06" in src, (
+            "delete_image error message must name the 2026-06 redesign "
+            "so users understand it's not a transient bug"
+        )
+
+        # Behavioural: actually call it on a bare instance and confirm raise.
+        client = GrokClient.__new__(GrokClient)
+
+        async def call_it():
+            await client.delete_image("any-post-id", 1)
+
+        with pytest.raises(GrokAPIError, match="2026-06"):
+            asyncio.run(call_it())
+
+    def test_delete_post_image_path_explains_removal(self):
+        """delete_post on an image post must re-raise with a message
+        that explains the 2026-06 removal (rather than leaking the
+        raw 'inline button not found' diagnostic)."""
+        import inspect
+
+        src = inspect.getsource(GrokClient.delete_post)
+        assert "2026-06" in src, (
+            "delete_post must document the redesign-removal in its image-post error path"
+        )
+        # Must route through delete_video first (which knows the
+        # video inline button), then translate the failure.
+        assert "delete_video(post_id)" in src, (
+            "delete_post must route to delete_video first (single "
+            "implementation of the inline 删除视频 walk)"
+        )
+
+    def test_dead_menu_helpers_are_gone(self):
+        """post_menu module + private menu helpers must be fully
+        removed (not just unused). The user's cleanup request was
+        explicit: no stale symbols to confuse readers."""
+        # Module deleted
+        with pytest.raises(ImportError):
+            from grok_web.actions import post_menu  # noqa: F401
+
+        # Private helpers deleted from GrokClient
+        for dead_name in (
+            "_open_post_menu",
+            "_click_menu_item",
+            "_get_menu_items_text",
+            "_is_post_favorited",
+            "_favorite_post_browser",
+            "_unfavorite_post_browser",
+            "get_menu_items",
+        ):
+            assert not hasattr(GrokClient, dead_name), (
+                f"GrokClient.{dead_name} must be deleted (2026-06 cleanup)"
+            )
+
+
+# ---------------------------------------------------------------------------
 # Smoke test — imports
 # ---------------------------------------------------------------------------
 

@@ -2116,117 +2116,9 @@ class GrokClient(ResponseParser):
             "left column (orphan, deleted, or different account)."
         )
 
-    async def _navigate_to_post(self, post_id: str) -> None:
-        """Deprecated: use :meth:`select_post`.
-
-        Thin alias kept for internal callers; new code should use
-        ``select_post`` which guarantees the requested post is
-        actually selected even when Grok's SPA redirects.
-        """
-        await self.select_post({"post_id": post_id})
-
     # =========================================================================
-    # UI Menu Operations (shared helper + specific actions)
+    # Post-page UI Operations (2026-06 inline-button era)
     # =========================================================================
-
-    async def _open_post_menu(self, post_id: str) -> bool:
-        """
-        Navigate to a post and open its "..." menu.
-
-        Thin wrapper: navigate + 404 check, then delegate to the
-        resilient :func:`actions.post_menu.open_post_menu` (which handles
-        the multi-locale + structural-fallback locator strategy and
-        retries 3x). This is the shared helper for favorite / unfavorite
-        / delete / like / dislike etc.
-
-        Args:
-            post_id: The post UUID to navigate to
-
-        Returns:
-            True if menu was opened successfully
-
-        Raises:
-            GrokAPIError: If post is 404 or menu button not found
-        """
-        import asyncio
-
-        from .actions.post_menu import open_post_menu
-
-        d = self._ui_delay
-
-        # Navigate to the post page
-        await self._tab.get(f"{self.BASE_URL}/imagine/post/{post_id}")
-        await asyncio.sleep(3 * d)
-
-        # Check if page is 404
-        page_text = await self._tab.evaluate("document.body.innerText")
-        if "Page not found" in page_text or "404" in page_text:
-            raise GrokAPIError(f"Post {post_id} not found (404)")
-
-        return await open_post_menu(self._tab, delay=d)
-
-    async def _click_menu_item(self, *text_options: str) -> bool:
-        """
-        Click a menu item matching any of the given text_options.
-
-        Matches against both the item's trimmed ``innerText`` AND its
-        ``aria-label``. Some 2026-04 Grok menuitems (e.g. 赞 / 踩 at the
-        top of the "..." menu) are rendered as icon-only buttons with
-        an empty innerText and the Chinese label on aria-label — so
-        text-only matching silently missed them and raised "menu item
-        not found" even though the item was present.
-
-        Args:
-            *text_options: One or more strings to match (e.g., "Save", "保存")
-
-        Returns:
-            True if item was clicked
-
-        Raises:
-            GrokAPIError: If menu item not found
-        """
-        import asyncio
-
-        d = self._ui_delay
-
-        for _ in range(3):
-            items = await self._tab.query_selector_all('[role="menuitem"]')
-
-            for item in items:
-                item_text = item.text.strip() if item.text else ""
-                aria_label = item.attrs.get("aria-label", "") if hasattr(item, "attrs") else ""
-                if not aria_label:
-                    # Fallback: read aria-label via evaluate
-                    try:
-                        idx = items.index(item)
-                        aria_label = (
-                            await self._tab.evaluate(
-                                f"document.querySelectorAll('[role=\"menuitem\"]')"
-                                f"[{idx}].getAttribute('aria-label') || ''"
-                            )
-                            or ""
-                        )
-                    except Exception:
-                        aria_label = ""
-
-                if item_text in text_options or aria_label in text_options:
-                    idx = items.index(item)
-                    await self._tab.evaluate(f"""
-                        (function() {{
-                            var items = document.querySelectorAll('[role="menuitem"]');
-                            var item = items[{idx}];
-                            if (item) {{
-                                item.dispatchEvent(new PointerEvent("pointerdown", {{bubbles: true}}));
-                                item.dispatchEvent(new PointerEvent("pointerup", {{bubbles: true}}));
-                                item.dispatchEvent(new MouseEvent("click", {{bubbles: true}}));
-                            }}
-                        }})()
-                    """)
-                    return True
-
-            await asyncio.sleep(1 * d)
-
-        raise GrokAPIError(f"Could not find menu item: {text_options}")
 
     async def _click_confirm_button(self, *text_options: str) -> bool:
         """
@@ -2267,305 +2159,283 @@ class GrokClient(ResponseParser):
 
         raise GrokAPIError(f"Could not find confirm button: {text_options}")
 
-    async def _get_menu_items_text(self) -> list[str]:
-        """Get text of all currently visible menu items."""
-        result = await self._tab.evaluate(
-            "JSON.stringify(Array.from(document.querySelectorAll('[role=\"menuitem\"]')).map(i => i.textContent.trim()))"
-        )
-        import json
+    async def _click_inline_post_button(self, *labels: str) -> str:
+        """Click an inline action button on the currently-loaded post page.
 
-        return json.loads(result) if result else []
+        Helper for the 2026-06 UI redesign: the legacy "..." menu lost
+        nearly every item (only 报告问题 remains) — every action moved
+        to inline buttons on the post page. Matches by aria-label OR
+        innerText first line against ``labels`` (case-sensitive trimmed),
+        dispatches a full pointer-sequence click via JS, and raises
+        :class:`GrokAPIError` with the visible-button dump when no label
+        matches.
+
+        Pre-condition: caller has navigated to the post page (e.g. via
+        :meth:`select_post` or :meth:`_navigate_to_post_safe`).
+
+        Args:
+            labels: One or more multi-locale labels, e.g. ``("赞", "Like")``.
+
+        Returns:
+            The label that actually matched (useful when the button
+            toggles between two labels like 保存/取消保存).
+
+        Failure:
+            None of ``labels`` matched a visible inline button. The
+            raised message includes all visible inline-action labels
+            so a Grok-side rename surfaces as an actionable error.
+        """
+        import json as _json
+
+        labels_json = _json.dumps(list(labels))
+        js = (
+            "((labels) => {"
+            "  const norm = s => (s || '').trim();"
+            "  const visible = el => {"
+            "    const r = el.getBoundingClientRect();"
+            "    return r.width > 0 && r.height > 0;"
+            "  };"
+            "  const buttons = Array.from(document.querySelectorAll('button'))"
+            "    .filter(visible);"
+            "  const labelSet = new Set(labels);"
+            "  const btn = buttons.find(b =>"
+            "    labelSet.has(norm(b.getAttribute('aria-label')))"
+            "    || labelSet.has(norm(b.innerText).split('\\n')[0])"
+            "  );"
+            "  if (!btn) {"
+            "    const visibleLabels = buttons.map(b =>"
+            "      norm(b.getAttribute('aria-label'))"
+            "      || norm(b.innerText).split('\\n')[0].slice(0, 30)"
+            "    ).filter(t => t).slice(0, 40);"
+            "    return JSON.stringify({ok: false, visible: visibleLabels});"
+            "  }"
+            "  const r = btn.getBoundingClientRect();"
+            "  const x = r.x + r.width/2, y = r.y + r.height/2;"
+            "  const o = {bubbles:true, cancelable:true, clientX:x, clientY:y,"
+            "             pointerType:'mouse', button:0, pointerId:1, isPrimary:true};"
+            "  btn.dispatchEvent(new PointerEvent('pointerdown', o));"
+            "  btn.dispatchEvent(new MouseEvent('mousedown', o));"
+            "  btn.dispatchEvent(new PointerEvent('pointerup', o));"
+            "  btn.dispatchEvent(new MouseEvent('mouseup', o));"
+            "  btn.dispatchEvent(new MouseEvent('click', o));"
+            "  return JSON.stringify({ok: true,"
+            "    found: norm(btn.getAttribute('aria-label')) || norm(btn.innerText)});"
+            f"}})({labels_json})"
+        )
+        raw = await self._tab.evaluate(js)
+        try:
+            result = _json.loads(raw) if isinstance(raw, str) else {}
+        except Exception:
+            result = {}
+        if not result.get("ok"):
+            raise GrokAPIError(
+                f"Inline post button not found: {list(labels)!r}. "
+                f"Visible inline labels: {result.get('visible', [])!r}. "
+                f"Grok may have renamed the button (post-2026-06 UI "
+                f"churn) — extend the labels list or open an issue."
+            )
+        return result.get("found", "")
+
+    async def _navigate_to_post_safe(self, post_id: str) -> None:
+        """Navigate to a post page with 404 check.
+
+        Thin helper used by post-page UI methods (like_post / dislike_post
+        / delete_video / extend_current). Does NOT do select_post's
+        sidebar-correction — those callers want to act on whatever Grok
+        shows when you load /imagine/post/<id>. For chain-root awareness,
+        use :meth:`select_post` instead.
+        """
+        import asyncio
+
+        await self._tab.get(f"{self.BASE_URL}/imagine/post/{post_id}")
+        await asyncio.sleep(3 * self._ui_delay)
+        page_text = await self._tab.evaluate("document.body.innerText")
+        if page_text and ("Page not found" in page_text or "404" in page_text):
+            raise GrokAPIError(f"Post {post_id} not found (404)")
 
     async def delete_video(self, video_id: str) -> bool:
-        """
-        Delete a child video (not the parent post).
+        """Use when: removing a single child video post (2026-06 UI).
 
-        If the menu only shows "删除帖子" (delete entire post) instead of
-        "删除视频" (delete this video), raises GrokAPIError to prevent
-        accidentally deleting the parent post and all its children.
-
-        Use delete_post() if you intentionally want to delete the entire post.
+        Drives the post-page inline 删除视频/Delete video button +
+        confirmation dialog. Returns True even if the video was
+        already gone (404 navigate is idempotent).
 
         Args:
-            video_id: The child video UUID to delete
+            video_id: The child video UUID to delete.
 
         Returns:
-            True if deletion was successful (or video already doesn't exist)
+            True on success or if already deleted (404).
 
-        Raises:
-            GrokAPIError: If only "delete post" is available (use delete_post instead)
+        Failure:
+            * Inline 删除视频 button not present (e.g. video is an
+              image-only post — wrong API surface) → GrokAPIError.
+            * Confirmation dialog's "删除视频" button not found →
+              GrokAPIError (Grok UI may have changed the confirm wording).
         """
         import asyncio
 
         d = self._ui_delay
 
         try:
-            await self._open_post_menu(video_id)
+            await self._navigate_to_post_safe(video_id)
         except GrokAPIError as e:
             if "404" in str(e):
-                return True  # Already deleted
+                return True  # already deleted
             raise
 
-        # Check what delete options are available
-        menu_items = await self._get_menu_items_text()
-
-        has_delete_video = any(t in menu_items for t in ("删除视频", "Delete video"))
-        has_delete_post = any(t in menu_items for t in ("删除帖子", "Delete post"))
-
-        if has_delete_video:
-            await self._click_menu_item("删除视频", "Delete video")
-            await asyncio.sleep(1 * d)
-            await self._click_confirm_button("删除视频", "Delete video", "删除", "Delete")
-            await asyncio.sleep(1 * d)
-            return True
-
-        if has_delete_post and not has_delete_video:
-            raise GrokAPIError(
-                f"Video {video_id} can only be deleted by deleting the entire post "
-                f"(menu shows '删除帖子' not '删除视频'). "
-                f"Use delete_post() instead if this is intentional."
-            )
-
-        raise GrokAPIError(f"No delete option found in menu. Available: {menu_items}")
+        # Inline 删除视频/Delete video button. Same label appears in the
+        # confirmation dialog — Grok uses it as both trigger and confirm.
+        await self._click_inline_post_button("删除视频", "Delete video")
+        await asyncio.sleep(1 * d)
+        await self._click_confirm_button("删除视频", "Delete video", "删除", "Delete")
+        await asyncio.sleep(1 * d)
+        return True
 
     async def delete_post(self, post_id: str) -> bool:
-        """
-        Delete an entire post (parent + all children).
+        """Use when: deleting an entire post (currently only video posts work).
 
-        This is destructive — it removes the parent image/video and ALL child
-        videos under it. Use delete_video() to remove a single child instead.
+        2026-06 UI redesign: the per-post 删除帖子 / Delete post menu
+        item was REMOVED from image-post pages. For video posts this
+        method routes to :meth:`delete_video` (which targets the
+        inline 删除视频 button). For image posts, raises a typed
+        error because there is no longer a UI surface — use grok.com
+        directly to delete an image post.
+
+        Returns True even if the post was already gone (404 idempotent).
 
         Args:
-            post_id: The post UUID to delete
+            post_id: The post UUID to delete.
 
         Returns:
-            True if deletion was successful (or post already doesn't exist)
+            True on success or if already deleted (404).
+
+        Failure:
+            * Image posts: GrokAPIError explaining the 2026-06 removal.
+              No code change in the connector can restore it; users
+              must delete via grok.com or delete descendant videos.
         """
-        import asyncio
-
-        d = self._ui_delay
-
         try:
-            await self._open_post_menu(post_id)
+            await self._navigate_to_post_safe(post_id)
         except GrokAPIError as e:
             if "404" in str(e):
                 return True
             raise
 
-        await self._click_menu_item("删除帖子", "删除视频", "Delete post", "Delete video")
-        await asyncio.sleep(1 * d)
-        await self._click_confirm_button(
-            "删除帖子", "删除视频", "Delete post", "Delete video", "删除", "Delete"
-        )
-        await asyncio.sleep(1 * d)
-
-        return True
+        try:
+            return await self.delete_video(post_id)
+        except GrokAPIError as e:
+            msg = str(e)
+            if "删除视频" in msg and "not found" in msg:
+                raise GrokAPIError(
+                    f"delete_post({post_id!r}): no UI surface for "
+                    f"deleting image posts in the 2026-06 Grok redesign "
+                    f"— the legacy '...' → 删除帖子 menu item was "
+                    f"removed and no inline equivalent was added. "
+                    f"Workaround: delete via grok.com directly, OR "
+                    f"call delete_video(child_video_id) for each child."
+                ) from e
+            raise
 
     async def delete_image(self, post_id: str, thumbnail_index: int) -> bool:
-        """
-        Delete an image variant by its thumbnail index.
+        """Use when: previously deleted a specific image variant (REMOVED).
 
-        Navigates to the post, switches to image view, selects the
-        thumbnail, opens "..." menu, and clicks "删除图像".
+        2026-06 UI redesign: the per-thumbnail 删除图像 menu item
+        was removed entirely; no inline equivalent on the post page.
+        This method now always raises a typed error documenting the
+        removal — kept (rather than deleted) so callers in old scripts
+        get an actionable message instead of AttributeError.
 
         Args:
-            post_id: The post UUID
-            thumbnail_index: 1-based thumbnail index to delete
+            post_id: Ignored.
+            thumbnail_index: Ignored.
 
-        Returns:
-            True if deletion was successful
-
-        Raises:
-            GrokAPIError: If thumbnail or delete option not found
+        Failure:
+            Always raises GrokAPIError. There is no programmatic way
+            to delete an individual image variant in the 2026-06 UI.
         """
-        import asyncio
-
-        from .actions.navigation import navigate_to_post
-        from .actions.post_image import select_thumbnail
-        from .actions.post_media import switch_to_image_view
-        from .actions.post_menu import click_menu_item, open_post_menu
-
-        d = self._ui_delay
-
-        await navigate_to_post(self._tab, post_id, delay=d)
-        await switch_to_image_view(self._tab, delay=d)
-        await select_thumbnail(self._tab, thumbnail_index, delay=d)
-        await open_post_menu(self._tab, delay=d)
-        await click_menu_item(
-            self._tab,
-            "删除图像",
-            "Delete image",
-            delay=d,
+        raise GrokAPIError(
+            f"delete_image({post_id!r}, thumbnail_index={thumbnail_index}): "
+            f"per-thumbnail image deletion was removed from the Grok UI "
+            f"in the 2026-06 redesign — no inline button equivalent was "
+            f"added. The connector has no way to drive this action; "
+            f"delete the parent post via grok.com directly if you need "
+            f"to remove the variant."
         )
-        await asyncio.sleep(1 * d)
-
-        # Confirm deletion
-        await self._click_confirm_button("删除图像", "Delete image", "删除", "Delete")
-        await asyncio.sleep(1 * d)
-
-        return True
-
-    async def _is_post_favorited(self) -> bool:
-        """
-        Check if the current post is favorited by examining the menu item text.
-
-        Must be called after _open_post_menu().
-
-        Returns:
-            True if post is favorited (shows "取消保存"/"Unsave"), False otherwise
-        """
-        # Check if "Unsave" menu item exists (means post is favorited)
-        is_favorited = await self._tab.evaluate("""
-            (() => {
-                const items = document.querySelectorAll("[role='menuitem']");
-                for (const item of items) {
-                    const text = item.innerText.trim();
-                    if (text.includes('取消保存') || text.includes('Unsave')) {
-                        return true;
-                    }
-                }
-                return false;
-            })()
-        """)
-        return is_favorited
-
-    async def _favorite_post_browser(self, post_id: str) -> bool:
-        """
-        Internal: Add post to favorites via browser UI (fallback for HTTP 403).
-
-        This method is idempotent - if post is already favorited, it returns True
-        without clicking (which would unfavorite it).
-
-        Menu item states:
-        - Not favorited: "保存" (Save) with ♡
-        - Favorited: "取消保存" (Unsave) with ♥️
-        """
-        import asyncio
-
-        d = self._ui_delay
-
-        await self._open_post_menu(post_id)
-        # Wait for menu to fully render
-        await asyncio.sleep(1 * d)
-
-        # Check if already favorited (shows "Unsave")
-        if await self._is_post_favorited():
-            # Already favorited, close menu and return
-            await self._tab.evaluate("document.body.click()")
-            await asyncio.sleep(0.5 * d)
-            return True
-
-        # Not favorited, click "Save" to favorite
-        await self._click_menu_item("保存", "Save")
-        await asyncio.sleep(1 * d)
-
-        return True
-
-    async def _unfavorite_post_browser(self, post_id: str) -> bool:
-        """
-        Internal: Remove post from favorites via browser UI (fallback for HTTP 403).
-
-        This method is idempotent - if post is not favorited, it returns True
-        without clicking (which would favorite it).
-
-        Menu item states:
-        - Not favorited: "保存" (Save) with ♡
-        - Favorited: "取消保存" (Unsave) with ♥️
-        """
-        import asyncio
-
-        d = self._ui_delay
-
-        await self._open_post_menu(post_id)
-        # Wait for menu to fully render
-        await asyncio.sleep(1 * d)
-
-        # Check if not favorited (shows "Save" not "Unsave")
-        if not await self._is_post_favorited():
-            # Already not favorited, close menu and return
-            await self._tab.evaluate("document.body.click()")
-            await asyncio.sleep(0.5 * d)
-            return True
-
-        # Currently favorited, click "Unsave" to unfavorite
-        await self._click_menu_item("取消保存", "Unsave")
-        await asyncio.sleep(1 * d)
-
-        return True
 
     async def like_post(self, post_id: str) -> bool:
-        """
-        Give a thumbs-up to a post via UI menu.
+        """Use when: thumbs-up a post (not the same as favoriting).
 
-        Note: This is different from favorite_post() which saves to favorites.
-        This is the "赞" (Like/thumbs up) action.
+        Distinct from :meth:`favorite_post` (which adds to your saved
+        list via REST). This drives the post-page inline 赞/Like
+        button — a toggle: calling twice removes the like.
 
         Args:
-            post_id: The post UUID to like
+            post_id: The post UUID to like.
 
         Returns:
-            True if like was successful
+            True on success.
 
-        Raises:
-            GrokAPIError: If post not found or like fails
+        Failure:
+            * Post not found (404) → GrokAPIError.
+            * 赞/Like inline button missing (UI rename) → GrokAPIError
+              with visible-button dump.
         """
         import asyncio
 
-        d = self._ui_delay
-
-        await self._open_post_menu(post_id)
-        await self._click_menu_item("赞", "Like")
-        await asyncio.sleep(1 * d)
-
+        await self._navigate_to_post_safe(post_id)
+        await self._click_inline_post_button("赞", "Like")
+        await asyncio.sleep(1 * self._ui_delay)
         return True
 
     async def dislike_post(self, post_id: str) -> bool:
-        """
-        Give a thumbs-down to a post via UI menu.
+        """Use when: thumbs-down a post.
+
+        Drives the post-page inline 踩/Dislike button — a toggle:
+        calling twice removes the dislike.
 
         Args:
-            post_id: The post UUID to dislike
+            post_id: The post UUID to dislike.
 
         Returns:
-            True if dislike was successful
+            True on success.
 
-        Raises:
-            GrokAPIError: If post not found or dislike fails
+        Failure:
+            * Post not found (404) → GrokAPIError.
+            * 踩/Dislike inline button missing (UI rename) → GrokAPIError
+              with visible-button dump.
         """
         import asyncio
 
-        d = self._ui_delay
-
-        await self._open_post_menu(post_id)
-        await self._click_menu_item("踩", "Dislike")
-        await asyncio.sleep(1 * d)
-
+        await self._navigate_to_post_safe(post_id)
+        await self._click_inline_post_button("踩", "Dislike")
+        await asyncio.sleep(1 * self._ui_delay)
         return True
 
     async def upgrade_video(self, video_id: str) -> bool:
-        """
-        Upgrade a video to HD quality via UI menu.
+        """Use when: upgrading a non-HD video to HD.
 
-        This triggers the "升级视频" (Upgrade video) option which converts
-        a non-HD video to HD quality.
+        Drives the post-page inline 升级视频/Upgrade video button.
+        The button is only present on videos that are NOT already
+        HD — HD-already and uploaded-source videos do not expose it.
 
         Args:
-            video_id: The video UUID to upgrade
+            video_id: The video UUID to upgrade.
 
         Returns:
-            True if upgrade was initiated successfully
+            True on success.
 
-        Raises:
-            GrokAPIError: If video not found or upgrade fails
+        Failure:
+            * Video not found (404) → GrokAPIError.
+            * 升级视频 button absent → GrokAPIError with the dump of
+              visible inline labels. Common reasons: video is already
+              HD (no upgrade needed), or upgrade isn't available for
+              this video type (uploaded source / external).
         """
         import asyncio
 
-        d = self._ui_delay
-
-        await self._open_post_menu(video_id)
-        await self._click_menu_item("升级视频", "Upgrade video")
-        await asyncio.sleep(1 * d)
-
+        await self._navigate_to_post_safe(video_id)
+        await self._click_inline_post_button("升级视频", "Upgrade video")
+        await asyncio.sleep(1 * self._ui_delay)
         return True
 
     async def extend_current(
@@ -2630,7 +2500,6 @@ class GrokClient(ResponseParser):
             wait_for_filmstrip,
         )
         from .actions.network_monitor import CDPMonitor
-        from .actions.post_menu import click_menu_item, open_post_menu
 
         if duration is not None and duration not in {"6s", "10s"}:
             logger.warning(
@@ -2645,20 +2514,20 @@ class GrokClient(ResponseParser):
         async with CDPMonitor(self._tab, "/app-chat/conversations/new") as monitor:
             await asyncio.sleep(1 + random.uniform(0, 0.5))
 
-            # 1. Open "..." and click 扩展. Keep legacy label names as
-            # fallbacks in case Grok reverts. prefer_media="video" disambiguates
-            # on chain-root posts where both image and video cards render
-            # their own '...' triggers — extend wants the video-context one.
-            await open_post_menu(self._tab, delay=self._ui_delay, prefer_media="video")
-            await click_menu_item(
-                self._tab,
+            # 1. Click the inline 扩展/Extend button. As of 2026-06 the
+            # legacy "..." → 扩展 menu walk is gone; the same action
+            # moved to a direct inline button on the video post page.
+            # Multi-locale: include both Chinese and English aria-label
+            # variants Grok has used (the historical 扩展视频 / 延长视频
+            # synonyms aren't currently active but cost nothing to keep
+            # as fallbacks in case Grok reverts).
+            await self._click_inline_post_button(
                 "扩展",
+                "Extend",
                 "扩展视频",
                 "延长视频",
-                "Extend",
                 "Extend video",
                 "Extend Video",
-                delay=self._ui_delay,
             )
 
             # 2. Wait for the filmstrip to mount.
@@ -2710,7 +2579,8 @@ class GrokClient(ResponseParser):
                     "Extend did not trigger a generation request after "
                     "clicking 生成视频. The button may still be disabled "
                     "(missing prompt? seed not selected?) or the UI changed. "
-                    "Use get_menu_items() / screenshots to debug."
+                    "Inspect the tab DOM for the 扩展 / Extend button "
+                    "state to debug."
                 )
             await monitor.wait_for_body(timeout=timeout)
 
@@ -2960,41 +2830,6 @@ class GrokClient(ResponseParser):
             cumulative_duration_s=cumulative_duration_s,
             is_persisted=is_persisted,
         )
-
-    async def get_menu_items(self, post_id: str) -> list[str]:
-        """
-        Get all available menu items for a post.
-
-        Useful for debugging or checking what actions are available.
-
-        Args:
-            post_id: The post UUID
-
-        Returns:
-            List of menu item text labels
-        """
-        import asyncio
-
-        d = self._ui_delay
-
-        await self._open_post_menu(post_id)
-
-        # Get all menu items (use JSON.stringify for clean return)
-        import json
-
-        items_json = await self._tab.evaluate("""
-            JSON.stringify(
-                Array.from(document.querySelectorAll('[role="menuitem"]'))
-                    .map(item => item.innerText.trim())
-            )
-        """)
-        items = json.loads(items_json)
-
-        # Close menu by clicking elsewhere
-        await self._tab.evaluate("document.body.click()")
-        await asyncio.sleep(0.5 * d)
-
-        return items
 
     async def get_thumbnails(self, post_id: str) -> list[dict]:
         """Get image thumbnails on a post page.

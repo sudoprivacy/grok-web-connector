@@ -123,8 +123,10 @@ async def _click_toggle(tab, target: str, *, delay: float) -> str | None:
     plain ``click``. Neither ``click_by_ref`` (ax_tree) nor
     ``element.mouse_click()`` (CDP Input.dispatchMouseEvent without
     pointerType) fires a synthetic pointerdown that React sees, so
-    those report success but Grok never toggles. Same fix as
-    actions/post_menu.py: dispatch the full pointer sequence in JS.
+    those report success but Grok never toggles. Fix: dispatch the
+    full pointer sequence (pointerdown / mousedown / pointerup /
+    mouseup / click) via JS so React's Radix handlers register the
+    interaction.
 
     Args:
         target: ``"image"`` or ``"video"``.
