@@ -27,7 +27,7 @@ from ._internal import (
     parse_video_ndjson_response,
 )
 from .auth import DEFAULT_CONFIG_PATH, load_config, save_cookies
-from .exceptions import GrokAPIError, GrokAuthError, GrokNotFoundError
+from .exceptions import GrokAPIError, GrokAuthError, GrokConfigError, GrokNotFoundError
 from .models import (
     MODE_TXT2VID,
     GrokCookies,
@@ -2435,6 +2435,338 @@ class GrokClient(ResponseParser):
 
         await self._navigate_to_post_safe(video_id)
         await self._click_inline_post_button("升级视频", "Upgrade video")
+        await asyncio.sleep(1 * self._ui_delay)
+        return True
+
+    async def regenerate_post(self, post_id: str, *, timeout: int = 300) -> VideoGenerationResult:
+        """Use when: rerunning a video post's original prompt for a fresh variation.
+
+        Drives the post-page inline 重新生成 / Regenerate button (added
+        in the 2026-06 redesign). Grok re-submits the post's original
+        generation parameters and produces a new video post, returned
+        as a :class:`VideoGenerationResult`. Saves you from manually
+        re-typing prompt + reference for a re-roll.
+
+        Returns the new video info — ``video_id`` is the new post's
+        id, NOT the source's. Source's id is in ``source_post_id``.
+
+        Args:
+            post_id: The source post UUID to regenerate.
+            timeout: Max seconds to wait for the NDJSON response
+                (default 300).
+
+        Returns:
+            VideoGenerationResult for the new generation.
+
+        Failure:
+            * Post not found (404) → GrokAPIError.
+            * Inline 重新生成 button absent (e.g. on image posts or
+              uploaded-source videos that don't expose this action)
+              → GrokAPIError with visible-button dump.
+            * NDJSON timeout — no response within ``timeout`` →
+              GrokAPIError.
+            * Rate-limit / quota classification applies (raises
+              :class:`GrokRateLimitError` / :class:`GrokQuotaExceededError`
+              when the page indicates throttling).
+        """
+        import asyncio
+        import random
+
+        from ._internal import parse_video_ndjson_response
+        from .actions.extend_seed import enable_focus_emulation
+        from .actions.network_monitor import CDPMonitor
+
+        await self._navigate_to_post_safe(post_id)
+        await enable_focus_emulation(self._tab)
+
+        async with CDPMonitor(self._tab, "/app-chat/conversations/new") as monitor:
+            await asyncio.sleep(0.5 + random.uniform(0, 0.3))
+            await self._click_inline_post_button("重新生成", "Regenerate")
+
+            if not await monitor.wait_for_request(timeout=10):
+                raise GrokAPIError(
+                    f"regenerate_post({post_id!r}): clicked 重新生成 but no "
+                    f"/conversations/new request fired within 10s. The button "
+                    f"may be in a disabled state (mid-generation already, "
+                    f"or rate-limited)."
+                )
+            await monitor.wait_for_body(timeout=timeout)
+
+        gen_result = parse_video_ndjson_response(
+            monitor.body, parent_post_id=post_id, statsig_id=monitor.statsig_id
+        )
+        gen_result = await self._reclassify_or_return(gen_result)
+        gen_result.source_post_id = post_id
+        return gen_result
+
+    async def animate_post(
+        self,
+        post_id: str,
+        *,
+        mode: str = "quick",
+        prompt: str | None = None,
+        timeout: int = 600,
+    ) -> VideoGenerationResult:
+        """Use when: turning an existing image post into a video (img2vid shortcut).
+
+        Drives the post-page inline 动画 / Animate submenu added in the
+        2026-06 redesign. Equivalent to ``create_video({"images":
+        ["post:<id>"]})`` but uses the post-page direct surface
+        (one fewer composition step). Three sub-modes available:
+
+        * ``mode="quick"`` (default) → 快速动画化 — fastest img2vid,
+          uses Grok's default normal-spice prompting.
+        * ``mode="spicy"`` → 火辣 — spicy-mode img2vid (NSFW-leaning).
+        * ``mode="add_prompt"`` → 添加提示 — opens the video composer
+          so you can supply your own video prompt. Requires the
+          ``prompt`` arg.
+
+        Args:
+            post_id: The source IMAGE post UUID.
+            mode: ``"quick"`` / ``"spicy"`` / ``"add_prompt"``.
+            prompt: Required when ``mode="add_prompt"``; ignored
+                otherwise.
+            timeout: Max seconds to wait for the NDJSON response
+                (default 600 — img2vid is slower than image gen).
+
+        Returns:
+            VideoGenerationResult.
+
+        Failure:
+            * Post not found (404) → GrokAPIError.
+            * 动画 button absent (e.g. on video posts where this
+              action doesn't apply) → GrokAPIError.
+            * Submenu item not found (Grok renamed) → GrokAPIError
+              with available items dumped.
+            * ``mode="add_prompt"`` without ``prompt`` arg →
+              GrokConfigError.
+            * Grok server returns ``Failed to download image from
+              GCS`` (the 2026-06 source-URL bug also affects this
+              path) → GrokAPIError naming the bug + recommending
+              ``create_video({"images": ["post:..."]})`` instead
+              (which constructs the URL correctly via REST).
+        """
+        import asyncio
+        import json as json_mod
+        import random
+
+        from ._internal import parse_video_ndjson_response
+        from .actions.extend_seed import enable_focus_emulation
+        from .actions.network_monitor import CDPMonitor
+
+        SUBMENU_LABELS = {
+            "quick": ("快速动画化", "Quick animate"),
+            "spicy": ("火辣", "Spicy"),
+            "add_prompt": ("添加提示", "Add prompt"),
+        }
+        if mode not in SUBMENU_LABELS:
+            raise GrokConfigError(
+                f"animate_post: mode must be one of {list(SUBMENU_LABELS)!r}, got {mode!r}"
+            )
+        if mode == "add_prompt" and not prompt:
+            raise GrokConfigError("animate_post: mode='add_prompt' requires the prompt arg")
+        labels = SUBMENU_LABELS[mode]
+
+        await self._navigate_to_post_safe(post_id)
+        await enable_focus_emulation(self._tab)
+
+        async with CDPMonitor(self._tab, "/app-chat/conversations/new") as monitor:
+            await asyncio.sleep(0.5 + random.uniform(0, 0.3))
+            # Open the 动画 submenu (it renders as role=menuitem children).
+            await self._click_inline_post_button("动画", "Animate")
+            await asyncio.sleep(1.0 * self._ui_delay)
+
+            click_submenu = (
+                "((labels) => {"
+                "  const norm = s => (s || '').trim();"
+                "  const visible = el => {"
+                "    const r = el.getBoundingClientRect();"
+                "    return r.width > 0 && r.height > 0;"
+                "  };"
+                "  const items = Array.from("
+                "    document.querySelectorAll('[role=\"menuitem\"]')"
+                "  ).filter(visible);"
+                "  const labelSet = new Set(labels);"
+                "  const item = items.find(m =>"
+                "    labelSet.has(norm(m.innerText).split('\\n')[0])"
+                "  );"
+                "  if (!item) {"
+                "    return JSON.stringify({"
+                "      ok: false,"
+                "      available: items.map(m => norm(m.innerText).split('\\n')[0])"
+                "    });"
+                "  }"
+                "  const r = item.getBoundingClientRect();"
+                "  const x = r.x + r.width/2, y = r.y + r.height/2;"
+                "  const o = {bubbles:true, cancelable:true, clientX:x, clientY:y,"
+                "             pointerType:'mouse', button:0, pointerId:1, isPrimary:true};"
+                "  item.dispatchEvent(new PointerEvent('pointerdown', o));"
+                "  item.dispatchEvent(new MouseEvent('mousedown', o));"
+                "  item.dispatchEvent(new PointerEvent('pointerup', o));"
+                "  item.dispatchEvent(new MouseEvent('mouseup', o));"
+                "  item.dispatchEvent(new MouseEvent('click', o));"
+                "  return JSON.stringify({ok: true});"
+                f"}})({json_mod.dumps(list(labels))})"
+            )
+            raw = await self._tab.evaluate(click_submenu)
+            try:
+                sub_result = json_mod.loads(raw) if isinstance(raw, str) else {}
+            except Exception:
+                sub_result = {}
+            if not sub_result.get("ok"):
+                raise GrokAPIError(
+                    f"animate_post: 动画 submenu item {list(labels)!r} not "
+                    f"found. Available: {sub_result.get('available', [])!r}. "
+                    f"Grok may have renamed the submenu — open an issue."
+                )
+
+            # For add_prompt mode the submenu click opens the video composer
+            # (editor + 生成视频 submit). Fill prompt and click submit.
+            if mode == "add_prompt":
+                await asyncio.sleep(1.5 * self._ui_delay)
+                escaped = prompt.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
+                fill = await self._tab.evaluate(
+                    "(() => {"
+                    "  const ed = document.querySelector('.tiptap.ProseMirror')"
+                    "         || document.querySelector('[contenteditable=\"true\"]');"
+                    "  if (!ed) return 'no-editor';"
+                    "  ed.focus();"
+                    "  document.execCommand('selectAll');"
+                    "  document.execCommand('delete');"
+                    f"  document.execCommand('insertText', false, `{escaped}`);"
+                    "  return 'ok';"
+                    "})()"
+                )
+                if fill == "no-editor":
+                    raise GrokAPIError(
+                        "animate_post(mode='add_prompt'): composer editor "
+                        "not found after submenu click."
+                    )
+                await asyncio.sleep(1 * self._ui_delay)
+                await self._click_inline_post_button("生成视频", "Generate Video")
+
+            if not await monitor.wait_for_request(timeout=10):
+                raise GrokAPIError(
+                    f"animate_post(mode={mode!r}): no /conversations/new "
+                    f"request fired within 10s after submenu click."
+                )
+            await monitor.wait_for_body(timeout=timeout)
+
+        # Capture GCS bug specifically — same Grok-side URL issue as
+        # edit_image. REST primary path (create_video) constructs the
+        # correct URL and works around it.
+        if monitor.body and '"Failed to download image from GCS"' in monitor.body:
+            raise GrokAPIError(
+                f"animate_post({post_id!r}, mode={mode!r}): Grok server "
+                f"returned 'Failed to download image from GCS' — the "
+                f"2026-06 UI constructs the source-image URL with the "
+                f"wrong CDN subdomain (the same bug edit_image hits). "
+                f"Workaround: use create_video({{'images': "
+                f"['post:{post_id}'], 'prompt': ...}}) — that path "
+                f"constructs the URL correctly via get_post_details."
+            )
+
+        gen_result = parse_video_ndjson_response(
+            monitor.body, parent_post_id=post_id, statsig_id=monitor.statsig_id
+        )
+        gen_result = await self._reclassify_or_return(gen_result)
+        gen_result.source_post_id = post_id
+        return gen_result
+
+    async def crop_post(self, post_id: str) -> bool:
+        """Use when: opening the post-page crop tool and committing the default crop.
+
+        2026-06 UI redesign added an inline 裁剪 / Crop button on post
+        pages. Clicking it opens an inline crop tool with two new
+        buttons at the bottom: 取消 (cancel) and 裁剪 (confirm). This
+        method opens the tool and clicks the confirm button.
+
+        Programmatic region selection is NOT supported yet — the crop
+        UI uses a region-drag interaction (no canvas / slider / role
+        elements expose the rectangle), and we haven't reverse-
+        engineered the drag protocol. For now this method commits
+        whatever default region Grok provides (typically the original
+        aspect at full image bounds, i.e. effectively a no-op crop).
+        Use the browser UI for region-specific crops; this API is
+        useful mostly as a confirmation hook in larger workflows
+        and as a smoke test that the inline button is wired up.
+
+        Args:
+            post_id: The image post UUID to crop.
+
+        Returns:
+            True if the crop tool was opened + confirmed.
+
+        Failure:
+            * Post not found (404) → GrokAPIError.
+            * 裁剪 inline button absent → GrokAPIError with visible
+              button dump (button may be conditional on post type).
+            * Confirm-裁剪 button not found in the open tool →
+              GrokAPIError (Grok may have renamed; the tool's two
+              bottom buttons should be 取消 + 裁剪).
+        """
+        import asyncio
+        import json as json_mod
+
+        await self._navigate_to_post_safe(post_id)
+        # Snapshot the visible 裁剪 buttons BEFORE click — there's
+        # already a 裁剪 inline action button. The crop-confirm
+        # button is the SECOND 裁剪 that appears after click.
+        await self._click_inline_post_button("裁剪", "Crop")
+        await asyncio.sleep(1.5 * self._ui_delay)
+
+        # Now find the confirm — it's the 裁剪 button at the BOTTOM
+        # of the page (next to a sibling 取消 button), not the
+        # original inline action. Identify by the sibling 取消.
+        click_confirm = (
+            "(() => {"
+            "  const norm = s => (s || '').trim();"
+            "  const visible = el => {"
+            "    const r = el.getBoundingClientRect();"
+            "    return r.width > 0 && r.height > 0;"
+            "  };"
+            "  const all = Array.from(document.querySelectorAll('button'))"
+            "    .filter(visible);"
+            "  const cancel = all.find(b =>"
+            "    ['取消', 'Cancel'].includes(norm(b.getAttribute('aria-label')))"
+            "    || ['取消', 'Cancel'].includes(norm(b.innerText).split('\\n')[0])"
+            "  );"
+            "  if (!cancel) return JSON.stringify({ok: false, reason: 'no-cancel-sibling'});"
+            "  const cancelRect = cancel.getBoundingClientRect();"
+            "  const confirm = all.find(b => {"
+            "    if (b === cancel) return false;"
+            "    const label = norm(b.getAttribute('aria-label'))"
+            "      || norm(b.innerText).split('\\n')[0];"
+            "    if (!['裁剪', 'Crop'].includes(label)) return false;"
+            "    const r = b.getBoundingClientRect();"
+            "    return Math.abs(r.y - cancelRect.y) < 40;"
+            "  });"
+            "  if (!confirm) return JSON.stringify({ok: false, reason: 'no-confirm-next-to-cancel'});"
+            "  const r = confirm.getBoundingClientRect();"
+            "  const x = r.x + r.width/2, y = r.y + r.height/2;"
+            "  const o = {bubbles:true, cancelable:true, clientX:x, clientY:y,"
+            "             pointerType:'mouse', button:0, pointerId:1, isPrimary:true};"
+            "  confirm.dispatchEvent(new PointerEvent('pointerdown', o));"
+            "  confirm.dispatchEvent(new MouseEvent('mousedown', o));"
+            "  confirm.dispatchEvent(new PointerEvent('pointerup', o));"
+            "  confirm.dispatchEvent(new MouseEvent('mouseup', o));"
+            "  confirm.dispatchEvent(new MouseEvent('click', o));"
+            "  return JSON.stringify({ok: true});"
+            "})()"
+        )
+        raw = await self._tab.evaluate(click_confirm)
+        try:
+            result = json_mod.loads(raw) if isinstance(raw, str) else {}
+        except Exception:
+            result = {}
+        if not result.get("ok"):
+            raise GrokAPIError(
+                f"crop_post({post_id!r}): could not find the confirm "
+                f"button inside the crop tool (reason="
+                f"{result.get('reason')!r}). Grok may have changed the "
+                f"crop UI structure — expected a 取消/Cancel + 裁剪/Crop "
+                f"button pair next to each other."
+            )
         await asyncio.sleep(1 * self._ui_delay)
         return True
 

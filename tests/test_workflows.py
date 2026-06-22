@@ -756,6 +756,90 @@ class TestPostActions2026UIRedesign:
             "implementation of the inline 删除视频 walk)"
         )
 
+    @pytest.mark.parametrize(
+        "method_name,expected_label",
+        [
+            ("regenerate_post", "重新生成"),
+            ("animate_post", "动画"),
+            ("crop_post", "裁剪"),
+        ],
+    )
+    def test_new_2026_06_methods_drive_inline_button(self, method_name, expected_label):
+        """The 3 new-feature methods added in v0.19.28 must drive
+        their inline button via _click_inline_post_button (consistent
+        with the rest of the 2026-06 post-action surface)."""
+        import inspect
+
+        method = getattr(GrokClient, method_name)
+        src = inspect.getsource(method)
+        assert "_click_inline_post_button(" in src, (
+            f"{method_name} must use the shared inline-button helper"
+        )
+        assert expected_label in src, (
+            f"{method_name} must reference the {expected_label!r} label "
+            f"that drives its inline button"
+        )
+
+    @pytest.mark.parametrize(
+        "method_name",
+        ["regenerate_post", "animate_post", "crop_post"],
+    )
+    def test_new_methods_have_use_when_and_failure(self, method_name):
+        """Per cli-steering-engineering: new methods must follow the
+        Use when: + Failure: docstring contract."""
+        method = getattr(GrokClient, method_name)
+        doc = (method.__doc__ or "").strip()
+        first_line = doc.split("\n", 1)[0].lower()
+        assert "use when" in first_line, (
+            f"{method_name} first docstring line should be a 'Use when:' "
+            f"decision signal; got: {first_line!r}"
+        )
+        assert "Failure:" in doc, f"{method_name} docstring needs an explicit Failure: section"
+
+    def test_animate_post_validates_mode(self):
+        """animate_post rejects bogus modes upfront with GrokConfigError
+        (not GrokAPIError) — invalid arg is the caller's mistake, not
+        a server-side condition."""
+        import asyncio
+
+        client = GrokClient.__new__(GrokClient)
+
+        async def call_it():
+            await client.animate_post("any-id", mode="bogus")
+
+        with pytest.raises(GrokConfigError, match="mode must be"):
+            asyncio.run(call_it())
+
+    def test_animate_post_add_prompt_requires_prompt(self):
+        """animate_post(mode='add_prompt') without prompt arg raises
+        GrokConfigError eagerly — fails before navigation so no
+        wasted browser work."""
+        import asyncio
+
+        client = GrokClient.__new__(GrokClient)
+
+        async def call_it():
+            await client.animate_post("any-id", mode="add_prompt")
+
+        with pytest.raises(GrokConfigError, match="requires the prompt"):
+            asyncio.run(call_it())
+
+    def test_animate_post_documents_gcs_workaround(self):
+        """animate_post hits the same Grok-side GCS URL bug as
+        edit_image when called on borderline content. The error
+        path must name the bug + recommend create_video as the
+        REST-primary workaround (which constructs URL correctly)."""
+        import inspect
+
+        src = inspect.getsource(GrokClient.animate_post)
+        assert "Failed to download image from GCS" in src, (
+            "animate_post must detect the GCS error specifically"
+        )
+        assert "create_video" in src, (
+            "animate_post's GCS error must point callers at "
+            "create_video as the REST-primary workaround"
+        )
+
     def test_dead_menu_helpers_are_gone(self):
         """post_menu module + private menu helpers must be fully
         removed (not just unused). The user's cleanup request was
