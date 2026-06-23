@@ -824,6 +824,107 @@ class TestPostActions2026UIRedesign:
         with pytest.raises(GrokConfigError, match="requires the prompt"):
             asyncio.run(call_it())
 
+    def test_generate_video_from_current_no_legacy_dead_code(self):
+        """v0.19.29 rewrote generate_video_from_current for the new
+        inline-button UI. The legacy settings-gear + 制作视频 walk
+        must not survive — those buttons no longer exist on Grok's
+        post pages, and any code still looking for them would either
+        hang or silently miss the click."""
+        import inspect
+
+        src = inspect.getsource(GrokClient.generate_video_from_current)
+        forbidden = [
+            'aria-label="设置"',
+            'aria-label="Settings"',
+            'aria-label="制作视频"',
+            'aria-label="Make video"',
+            "_open_settings",
+            "_click_make_video_button",
+            "preset_menu_map",
+        ]
+        for marker in forbidden:
+            assert marker not in src, (
+                f"generate_video_from_current must not contain legacy "
+                f"marker {marker!r} (removed in 2026-06 redesign)"
+            )
+
+    def test_generate_video_from_current_uses_inline_submenu(self):
+        """The new flow must drive 动画 → submenu via the shared
+        helpers (_click_inline_post_button + _click_menuitem)."""
+        import inspect
+
+        src = inspect.getsource(GrokClient.generate_video_from_current)
+        assert "_click_inline_post_button(" in src, (
+            "generate_video_from_current must drive its inline buttons via the shared helper"
+        )
+        assert "_click_menuitem(" in src, (
+            "generate_video_from_current must click submenu items via the shared helper"
+        )
+        # Must reference the 动画 entry button + at least one submenu label
+        assert "动画" in src, "must click the 动画 / Animate inline trigger"
+        assert "快速动画化" in src or "添加提示" in src, (
+            "must click a 动画 submenu item (快速动画化 / 添加提示)"
+        )
+
+    def test_generate_video_from_current_docstring(self):
+        """Per cli-steering-engineering: Use when: + Failure: sections."""
+        doc = (GrokClient.generate_video_from_current.__doc__ or "").strip()
+        first_line = doc.split("\n", 1)[0].lower()
+        assert "use when" in first_line, (
+            f"generate_video_from_current first docstring line should be "
+            f"a 'Use when:' signal; got: {first_line!r}"
+        )
+        assert "Failure:" in doc, "generate_video_from_current needs a Failure: section"
+
+    def test_generate_video_from_current_preset_fun_warning(self):
+        """preset='fun' should be downgraded to 'normal' with a warning,
+        not raise — the Fun preset is gone from the 2026-06 submenu and
+        we shouldn't break callers who passed it before."""
+        import inspect
+
+        src = inspect.getsource(GrokClient.generate_video_from_current)
+        assert "preset='fun'" in src or '"fun"' in src, (
+            "must reference 'fun' preset for the downgrade path"
+        )
+        assert "logger.warning" in src and "fun" in src.lower(), (
+            "must warn (not raise) when caller passes preset='fun'"
+        )
+
+    def test_legacy_stub_method_removed(self):
+        """_generate_video_from_current_LEGACY_DEAD sentinel was added
+        then immediately removed per user's '完整清理干净' instruction.
+        No stale stubs should remain."""
+        assert not hasattr(GrokClient, "_generate_video_from_current_LEGACY_DEAD"), (
+            "no LEGACY_DEAD sentinel methods (clean cleanup)"
+        )
+
+    def test_shared_click_menuitem_helper(self):
+        """The new _click_menuitem helper should exist and be used
+        by methods that open submenus."""
+        import inspect
+
+        assert hasattr(GrokClient, "_click_menuitem"), "_click_menuitem helper missing"
+        # animate_post should use it (refactored in v0.19.29)
+        src = inspect.getsource(GrokClient.animate_post)
+        assert "_click_menuitem(" in src, (
+            "animate_post should use the shared _click_menuitem helper "
+            "(refactored away from inline JS in v0.19.29)"
+        )
+
+    def test_generate_video_from_current_documents_gcs_workaround(self):
+        """Same Grok-side GCS URL bug hits this path too. Connector
+        must surface the typed error with the REST-warmup workaround,
+        not let it surface as a generic 'failed to parse' error."""
+        import inspect
+
+        src = inspect.getsource(GrokClient.generate_video_from_current)
+        assert "Failed to download image from GCS" in src, (
+            "must detect Grok's typed GCS error specifically"
+        )
+        assert "warm the statsig" in src or "REST primary" in src, (
+            "must document the REST-primary statsig-warmup workaround"
+        )
+
     def test_animate_post_documents_gcs_workaround(self):
         """animate_post hits the same Grok-side GCS URL bug as
         edit_image when called on borderline content. The error

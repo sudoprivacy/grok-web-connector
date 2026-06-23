@@ -2236,6 +2236,64 @@ class GrokClient(ResponseParser):
             )
         return result.get("found", "")
 
+    async def _click_menuitem(self, *labels: str) -> None:
+        """Click a [role="menuitem"] in a currently-open dropdown.
+
+        Used after an inline button opens a Radix dropdown (e.g.
+        clicking 动画 opens its [添加提示 / 火辣 / 快速动画化] submenu;
+        clicking 宽高比 opens its [3:2 / 1:1 / 9:16 / 16:9] submenu).
+        Matches by aria-label OR innerText first line against the
+        provided labels.
+
+        Failure:
+            None of ``labels`` matched a visible menuitem → raises
+            :class:`GrokAPIError` with the dump of available item
+            labels for triage.
+        """
+        import json as _json
+
+        labels_json = _json.dumps(list(labels))
+        js = (
+            "((labels) => {"
+            "  const norm = s => (s || '').trim();"
+            "  const visible = el => {"
+            "    const r = el.getBoundingClientRect();"
+            "    return r.width > 0 && r.height > 0;"
+            "  };"
+            "  const items = Array.from(document.querySelectorAll('[role=\"menuitem\"]'))"
+            "    .filter(visible);"
+            "  const labelSet = new Set(labels);"
+            "  const item = items.find(m =>"
+            "    labelSet.has(norm(m.getAttribute('aria-label')))"
+            "    || labelSet.has(norm(m.innerText).split('\\n')[0])"
+            "  );"
+            "  if (!item) {"
+            "    return JSON.stringify({ok: false, available:"
+            "      items.map(m => norm(m.innerText).split('\\n')[0])});"
+            "  }"
+            "  const r = item.getBoundingClientRect();"
+            "  const x = r.x + r.width/2, y = r.y + r.height/2;"
+            "  const o = {bubbles:true, cancelable:true, clientX:x, clientY:y,"
+            "             pointerType:'mouse', button:0, pointerId:1, isPrimary:true};"
+            "  item.dispatchEvent(new PointerEvent('pointerdown', o));"
+            "  item.dispatchEvent(new MouseEvent('mousedown', o));"
+            "  item.dispatchEvent(new PointerEvent('pointerup', o));"
+            "  item.dispatchEvent(new MouseEvent('mouseup', o));"
+            "  item.dispatchEvent(new MouseEvent('click', o));"
+            "  return JSON.stringify({ok: true});"
+            f"}})({labels_json})"
+        )
+        raw = await self._tab.evaluate(js)
+        try:
+            result = _json.loads(raw) if isinstance(raw, str) else {}
+        except Exception:
+            result = {}
+        if not result.get("ok"):
+            raise GrokAPIError(
+                f"Submenu item not found: {list(labels)!r}. Available: "
+                f"{result.get('available', [])!r}."
+            )
+
     async def _navigate_to_post_safe(self, post_id: str) -> None:
         """Navigate to a post page with 404 check.
 
@@ -2470,7 +2528,6 @@ class GrokClient(ResponseParser):
               when the page indicates throttling).
         """
         import asyncio
-        import random
 
         from ._internal import parse_video_ndjson_response
         from .actions.extend_seed import enable_focus_emulation
@@ -2547,8 +2604,6 @@ class GrokClient(ResponseParser):
               (which constructs the URL correctly via REST).
         """
         import asyncio
-        import json as json_mod
-        import random
 
         from ._internal import parse_video_ndjson_response
         from .actions.extend_seed import enable_focus_emulation
@@ -2575,50 +2630,7 @@ class GrokClient(ResponseParser):
             # Open the 动画 submenu (it renders as role=menuitem children).
             await self._click_inline_post_button("动画", "Animate")
             await asyncio.sleep(1.0 * self._ui_delay)
-
-            click_submenu = (
-                "((labels) => {"
-                "  const norm = s => (s || '').trim();"
-                "  const visible = el => {"
-                "    const r = el.getBoundingClientRect();"
-                "    return r.width > 0 && r.height > 0;"
-                "  };"
-                "  const items = Array.from("
-                "    document.querySelectorAll('[role=\"menuitem\"]')"
-                "  ).filter(visible);"
-                "  const labelSet = new Set(labels);"
-                "  const item = items.find(m =>"
-                "    labelSet.has(norm(m.innerText).split('\\n')[0])"
-                "  );"
-                "  if (!item) {"
-                "    return JSON.stringify({"
-                "      ok: false,"
-                "      available: items.map(m => norm(m.innerText).split('\\n')[0])"
-                "    });"
-                "  }"
-                "  const r = item.getBoundingClientRect();"
-                "  const x = r.x + r.width/2, y = r.y + r.height/2;"
-                "  const o = {bubbles:true, cancelable:true, clientX:x, clientY:y,"
-                "             pointerType:'mouse', button:0, pointerId:1, isPrimary:true};"
-                "  item.dispatchEvent(new PointerEvent('pointerdown', o));"
-                "  item.dispatchEvent(new MouseEvent('mousedown', o));"
-                "  item.dispatchEvent(new PointerEvent('pointerup', o));"
-                "  item.dispatchEvent(new MouseEvent('mouseup', o));"
-                "  item.dispatchEvent(new MouseEvent('click', o));"
-                "  return JSON.stringify({ok: true});"
-                f"}})({json_mod.dumps(list(labels))})"
-            )
-            raw = await self._tab.evaluate(click_submenu)
-            try:
-                sub_result = json_mod.loads(raw) if isinstance(raw, str) else {}
-            except Exception:
-                sub_result = {}
-            if not sub_result.get("ok"):
-                raise GrokAPIError(
-                    f"animate_post: 动画 submenu item {list(labels)!r} not "
-                    f"found. Available: {sub_result.get('available', [])!r}. "
-                    f"Grok may have renamed the submenu — open an issue."
-                )
+            await self._click_menuitem(*labels)
 
             # For add_prompt mode the submenu click opens the video composer
             # (editor + 生成视频 submit). Fill prompt and click submit.
@@ -2819,7 +2831,6 @@ class GrokClient(ResponseParser):
             cumulative_duration_s), use :meth:`extend_video`.
         """
         import asyncio
-        import random
 
         from .actions.extend_seed import (
             SEED_DRIFT_TOLERANCE,
@@ -4400,7 +4411,6 @@ class GrokClient(ResponseParser):
             VideoGenerationResult with video_id and metadata.
         """
         import asyncio
-        import random
 
         from ai_dev_browser import cdp
 
@@ -6578,108 +6588,82 @@ class GrokClient(ResponseParser):
         aspect_ratio: str = "2:3",
         thumbnail_index: int | None = None,
     ) -> VideoGenerationResult:
-        """Generate a video from the image post currently selected on the tab.
+        """Use when: img2vid from the image post currently selected on the tab.
 
-        Lower-level primitive: opens the settings gear menu to configure
-        video options (duration / resolution / aspect ratio), clicks
-        "制作视频" on the image overlay, optionally enters a prompt for
-        custom mode, and waits for the NDJSON generation response.
+        Lower-level primitive of :meth:`create_video` (which composes
+        ``select_post + generate_video_from_current``). Drives the
+        post-page inline 动画 / Animate submenu that Grok added in the
+        2026-06 redesign — the legacy 设置 gear + 制作视频 flow no
+        longer exists (settings dropdown and 制作视频 button were both
+        removed when actions moved out of the "..." menu and into
+        inline buttons).
+
+        Submenu routing by ``preset`` + ``adjustment_prompt``:
+
+        * ``preset='spicy'`` → clicks 火辣 (fires immediately; settings
+          / prompt args are ignored).
+        * ``preset='normal'`` + no prompt + default settings → clicks
+          快速动画化 (fast path, no composer step).
+        * Otherwise → clicks 添加提示 to open the composer, sets
+          duration / resolution / aspect via inline buttons, fills
+          prompt if given, clicks 生成视频.
 
         Does NOT navigate. Caller is responsible for selecting the
-        source image first via :meth:`select_post` — ``source_post_id``
-        is only used for result labeling, retry thumbnail-matching,
-        and the legacy ``stable_id`` reload path. If the tab is not on
-        ``source_post_id``'s view, the UI click either fails (button
-        not found → retried internally) or operates on the wrong post.
-
-        See :meth:`create_video` for the dict-API wrapper that composes
-        ``select_post + generate_video_from_current`` — use that for the
-        common case.
+        source via :meth:`select_post` — ``source_post_id`` is used
+        for result metadata and (when ``stable_id`` is set) the
+        legacy stable-id injection.
 
         Args:
-            source_post_id: The image post UUID to generate from. Used
-                for result metadata (``source_post_id`` / ``parent_post_id``)
-                and as the anchor for internal retry-recovery if Grok's
-                UI drifts mid-flow.
-            preset: 'normal', 'fun', or 'spicy'.
-            timeout: Max seconds to wait for the generation response.
-            stable_id: Optional custom stable_id to inject before generation.
-            adjustment_prompt: Video prompt (triggers 'custom' mode). None
-                keeps Grok's default preset mode.
-            duration: 6 or 10 seconds.
-            resolution: "480p" or "720p".
-            aspect_ratio: "2:3" / "3:2" / "1:1" / "9:16" / "16:9".
-            thumbnail_index: If the source has multiple images, pick one
-                by index before generating.
+            source_post_id: The image post UUID being generated from.
+                Surfaced on the result; does not affect the UI walk.
+            preset: ``"normal"`` / ``"fun"`` / ``"spicy"``. ``"fun"``
+                is treated as ``"normal"`` with a warning — the Fun
+                preset menu item was not retained in the 2026-06
+                submenu (only Spicy / Quick / Add prompt survive).
+            timeout: Max seconds to wait for the NDJSON response.
+            stable_id: Optional custom stable_id injected before gen.
+            adjustment_prompt: Optional video prompt. Triggers the
+                添加提示 (Add prompt) composer path; without it
+                ``preset='normal'`` uses 快速动画化 (Quick animate).
+            duration: 6 or 10 seconds. Anything else logs a warning
+                and uses 10.
+            resolution: ``"480p"`` or ``"720p"``. Anything else logs a
+                warning and uses 720p.
+            aspect_ratio: One of ``"3:2"`` / ``"1:1"`` / ``"9:16"`` /
+                ``"16:9"``. ``"2:3"`` (the pre-2026-06 default) is
+                NOT in the new submenu — passing it leaves Grok on
+                its own default. Other unrecognised values log a
+                warning and fall through.
+            thumbnail_index: If the source has multiple images, pick
+                one by index before generating.
 
         Returns:
-            VideoGenerationResult with video_id (empty if moderated).
+            VideoGenerationResult. ``video_id`` is the new video's
+            id; ``source_post_id`` is the caller-supplied source.
+
+        Failure:
+            * 动画 inline button absent — typical when the page is on
+              a video (not image) view, or the post isn't an image →
+              GrokAPIError with visible-button dump.
+            * Submenu item missing (label rename) → GrokAPIError with
+              available menuitems dumped.
+            * 生成视频 submit absent after composer setup →
+              GrokAPIError.
+            * Rate-limit / quota reclassification applies (raises
+              :class:`GrokRateLimitError` / :class:`GrokQuotaExceededError`
+              when a throttle banner / silent-disabled-submit is
+              detected).
         """
         import asyncio
 
-        from ai_dev_browser import cdp
+        from ._internal import parse_video_ndjson_response
+        from .actions.extend_seed import enable_focus_emulation
+        from .actions.network_monitor import CDPMonitor
 
-        # Inject custom stable_id if provided
         if stable_id:
             await self.set_stable_id(stable_id, reload_page=False)
-
-        # Internal alias to keep the body untouched. This is the post we
-        # anchor result metadata and retry-recovery to; navigation to it
-        # happened in the caller via select_post.
         parent_post_id = source_post_id
 
-        # Normalize preset to string
-        preset_str = str(preset).lower()
-
-        # Map preset string to menu text (case-sensitive as shown in UI)
-        preset_menu_map = {
-            "normal": "Normal",
-            "fun": "Fun",
-            "spicy": "Spicy",
-        }
-        preset_menu_text = preset_menu_map.get(preset_str, "Normal")
-
-        # Set up network monitoring to capture the response and statsig_id
-        await self._tab.send(cdp.network.enable())
-
-        captured_response = {"body": None, "request_id": None, "statsig_id": None}
-
-        async def handle_request(event: cdp.network.RequestWillBeSent):
-            url = event.request.url
-            # Only match the specific video generation endpoint, not conversation list
-            if "/app-chat/conversations/new" in url:
-                captured_response["request_id"] = event.request_id
-                # Capture statsig_id from request headers
-                headers = event.request.headers
-                # Headers can be dict or special CDP type
-                if headers and (hasattr(headers, "get") or isinstance(headers, dict)):
-                    captured_response["statsig_id"] = headers.get("x-statsig-id")
-
-        async def handle_loading_finished(event: cdp.network.LoadingFinished):
-            if (
-                captured_response["request_id"]
-                and captured_response["request_id"] == event.request_id
-            ):
-                try:
-                    body_result = await self._tab.send(
-                        cdp.network.get_response_body(request_id=event.request_id)
-                    )
-                    # CDP returns a tuple (body, base64_encoded)
-                    if isinstance(body_result, tuple):
-                        body = body_result[0]
-                    else:
-                        body = getattr(body_result, "body", str(body_result))
-                    captured_response["body"] = body
-                except Exception:
-                    pass  # Response body may not be available
-
-        self._tab.add_handler(cdp.network.RequestWillBeSent, handle_request)
-        self._tab.add_handler(cdp.network.LoadingFinished, handle_loading_finished)
-
-        # Wait for page to fully load (React hydration) + random jitter
-        await asyncio.sleep(3 + random.uniform(0, 2.0))
-
-        # Select specific image thumbnail if requested
         if thumbnail_index is not None:
             from .actions.post_image import select_thumbnail
             from .actions.post_media import switch_to_image_view
@@ -6687,381 +6671,155 @@ class GrokClient(ResponseParser):
             await switch_to_image_view(self._tab, delay=self._ui_delay)
             await select_thumbnail(self._tab, thumbnail_index, delay=self._ui_delay)
 
-        # --- New UI: Settings gear menu ---
-        # The settings gear (button[aria-label="设置"]) opens a Radix dropdown containing:
-        #   - Duration: button[aria-label="6s"] / button[aria-label="10s"]
-        #   - Resolution: button[aria-label="480p"] / button[aria-label="720p"]
-        #   - Aspect ratio: button[aria-label="2:3"] / "3:2" / "1:1" / "9:16" / "16:9"
-        #   - "编辑图像" menuitem
-        #   - "制作视频" menuitem (triggers video generation)
-        # After entering video mode, extra items appear: presets + "重做"
-        # IMPORTANT: Radix dropdown closes after ANY click — must reopen between selections.
+        # --- Normalise preset and decide which submenu item to click ---
+        preset_str = str(preset).lower()
+        if preset_str not in {"normal", "fun", "spicy"}:
+            logger.warning(
+                f"generate_video_from_current: unknown preset {preset!r}; treating as 'normal'."
+            )
+            preset_str = "normal"
+        if preset_str == "fun":
+            logger.warning(
+                "generate_video_from_current: preset='fun' is not in the "
+                "2026-06 Grok inline submenu (only Spicy / Quick / Add "
+                "prompt survive). Falling back to 'normal'."
+            )
+            preset_str = "normal"
 
-        async def _open_settings():
-            """Open the settings gear dropdown. Returns True if opened."""
-            btn = await self._tab.query_selector('button[aria-label="设置"]')
-            if not btn:
-                btn = await self._tab.query_selector('button[aria-label="Settings"]')
-            if btn:
-                # Dropdown menus require real mouse events
-                await btn.mouse_click()
-                await asyncio.sleep(0.5)
-                return True
-            return False
-
-        async def _click_menuitem(text: str) -> bool:
-            """Find and click a menuitem by text content. Returns True if clicked."""
-            menu_items = await self._tab.query_selector_all('[role="menuitem"]')
-            for item in menu_items:
-                item_text = item.text.strip() if hasattr(item, "text") else ""
-                if not item_text:
-                    idx = menu_items.index(item)
-                    item_text = await self._tab.evaluate(
-                        f"document.querySelectorAll('[role=\"menuitem\"]')[{idx}].textContent.trim()",
-                        await_promise=False,
-                    )
-                if text in item_text:
-                    await item.click()
-                    await asyncio.sleep(0.3)
-                    return True
-            return False
-
-        try:
-            # Select duration (e.g., "10s") — open menu, click, menu closes
-            if await _open_settings():
-                duration_label = f"{duration}s"
-                dur_btn = await self._tab.query_selector(f'button[aria-label="{duration_label}"]')
-                if dur_btn:
-                    await dur_btn.click()
-                    await asyncio.sleep(0.3)
-
-            # Select resolution (e.g., "720p") — reopen menu, click, menu closes
-            if await _open_settings():
-                res_label = resolution if resolution.endswith("p") else f"{resolution}p"
-                res_btn = await self._tab.query_selector(f'button[aria-label="{res_label}"]')
-                if res_btn:
-                    await res_btn.click()
-                    await asyncio.sleep(0.3)
-
-            # Select aspect ratio if non-default — reopen menu, click, menu closes
-            if aspect_ratio and aspect_ratio != "2:3" and await _open_settings():
-                ar_btn = await self._tab.query_selector(f'button[aria-label="{aspect_ratio}"]')
-                if ar_btn:
-                    await ar_btn.click()
-                    await asyncio.sleep(0.3)
-        except Exception:
-            pass  # If settings interaction fails, continue with defaults
-
-        # Scroll to ensure buttons are visible (image overlay button may be below fold)
-        await self._tab.evaluate(
-            "window.scrollTo(0, document.body.scrollHeight / 3)", await_promise=False
+        # Settings worth taking the composer (添加提示) path for. The
+        # default 2:3 aspect is intentionally treated as "no change"
+        # because it isn't in the new submenu anyway.
+        non_default_settings = (
+            adjustment_prompt is not None
+            or duration != 10
+            or resolution != "720p"
+            or (aspect_ratio and aspect_ratio not in ("2:3", ""))
         )
-        await asyncio.sleep(0.5 + random.uniform(0, 0.3))
 
-        # --- Generation trigger ---
-        # New UI flow:
-        # - button[aria-label="制作视频"] (image overlay) → triggers first generation
-        # - After entering video mode: button[aria-label="生成视频"] (arrow up = regenerate)
-        # - Settings dropdown gains presets (Spicy/Fun/Normal) + "重做" in video mode
-        # - "输入你的想象" input appears in video mode for adjustment prompts
+        if preset_str == "spicy":
+            submenu = ("火辣", "Spicy")
+            use_composer = False  # 火辣 fires immediately, ignores settings
+        elif non_default_settings:
+            submenu = ("添加提示", "Add prompt")
+            use_composer = True
+        else:
+            submenu = ("快速动画化", "Quick animate")
+            use_composer = False
 
-        async def _restore_image_view() -> bool:
-            """Click the sidebar thumbnail matching parent_post_id so the
-            page renders the image view (not a descendant video).
+        await enable_focus_emulation(self._tab)
 
-            Grok's post page silently redirects to the tail descendant
-            when one exists; a post that was a brand-new edit_image
-            output can also land on the wrong sibling candidate
-            depending on Grok's default selection. Calling this before
-            and between 制作视频 retries makes the lookup resilient to
-            both.
+        async with CDPMonitor(self._tab, "/app-chat/conversations/new") as monitor:
+            await asyncio.sleep(0.5 + random.uniform(0, 0.5))
 
-            Returns True if a matching thumbnail was clicked.
-            """
-            return bool(
-                await self._tab.evaluate(
-                    r"""
-                    (() => {
-                        const want = "__POST_ID__";
-                        const imgs = Array.from(document.querySelectorAll('img'))
-                            .filter(i => {
-                                const r = i.getBoundingClientRect();
-                                if (r.width < 20 || r.width > 150) return false;
-                                return (i.currentSrc || i.src || '').includes(want);
-                            });
-                        if (imgs.length === 0) return false;
-                        let el = imgs[0];
-                        while (el && el.tagName !== 'BUTTON' && el.parentElement) {
-                            el = el.parentElement;
-                        }
-                        if (!el) return false;
-                        const r = el.getBoundingClientRect();
-                        const x = r.x + r.width/2, y = r.y + r.height/2;
-                        const o = {bubbles: true, cancelable: true, clientX: x, clientY: y,
-                                   pointerType: 'mouse', button: 0, pointerId: 1, isPrimary: true};
-                        el.dispatchEvent(new PointerEvent('pointerdown', o));
-                        el.dispatchEvent(new MouseEvent('mousedown', o));
-                        el.dispatchEvent(new PointerEvent('pointerup', o));
-                        el.dispatchEvent(new MouseEvent('mouseup', o));
-                        el.dispatchEvent(new MouseEvent('click', o));
-                        return true;
-                    })()
-                    """.replace("__POST_ID__", parent_post_id)
+            # 1. Click 动画 → open submenu
+            await self._click_inline_post_button("动画", "Animate")
+            await asyncio.sleep(1.0 * self._ui_delay)
+
+            # 2. Click submenu item
+            await self._click_menuitem(*submenu)
+
+            if use_composer:
+                # 3. Composer mounted — set duration / resolution / aspect
+                # / prompt + click 生成视频.
+                await asyncio.sleep(1.5 * self._ui_delay)
+
+                # Duration: 6 / 10. Default 10 is no-op.
+                if duration != 10:
+                    if duration not in (6, 10):
+                        logger.warning(f"duration={duration} not in (6, 10); using 10.")
+                    else:
+                        await self._click_inline_post_button(f"{duration}s")
+                        await asyncio.sleep(0.3 * self._ui_delay)
+
+                # Resolution: 480p / 720p. Default 720p is no-op.
+                if resolution != "720p":
+                    res_label = resolution if resolution.endswith("p") else f"{resolution}p"
+                    if res_label not in ("480p", "720p"):
+                        logger.warning(
+                            f"resolution={resolution!r} not in (480p, 720p); using 720p."
+                        )
+                    else:
+                        await self._click_inline_post_button(res_label)
+                        await asyncio.sleep(0.3 * self._ui_delay)
+
+                # Aspect ratio via 宽高比 submenu.
+                if aspect_ratio and aspect_ratio not in ("", "2:3"):
+                    valid_aspects = ("3:2", "1:1", "9:16", "16:9")
+                    if aspect_ratio not in valid_aspects:
+                        logger.warning(
+                            f"aspect_ratio={aspect_ratio!r} not in "
+                            f"{valid_aspects} (2026-06 post-page submenu "
+                            "options); leaving Grok default."
+                        )
+                    else:
+                        await self._click_inline_post_button("宽高比", "Aspect ratio")
+                        await asyncio.sleep(0.5 * self._ui_delay)
+                        await self._click_menuitem(aspect_ratio)
+                        await asyncio.sleep(0.3 * self._ui_delay)
+
+                # Prompt
+                if adjustment_prompt:
+                    escaped = (
+                        adjustment_prompt.replace("\\", "\\\\")
+                        .replace("`", "\\`")
+                        .replace("$", "\\$")
+                    )
+                    fill = await self._tab.evaluate(
+                        "(() => {"
+                        "  const ed = document.querySelector('.tiptap.ProseMirror')"
+                        "         || document.querySelector('[contenteditable=\"true\"]');"
+                        "  if (!ed) return 'no-editor';"
+                        "  ed.focus();"
+                        "  document.execCommand('selectAll');"
+                        "  document.execCommand('delete');"
+                        f"  document.execCommand('insertText', false, `{escaped}`);"
+                        "  return 'ok';"
+                        "})()"
+                    )
+                    if fill == "no-editor":
+                        raise GrokAPIError(
+                            "generate_video_from_current: composer editor "
+                            "not found after 添加提示 click."
+                        )
+                    await asyncio.sleep(1 * self._ui_delay)
+
+                # Submit
+                await self._click_inline_post_button("生成视频", "Generate Video")
+
+            if not await monitor.wait_for_request(timeout=10):
+                raise GrokAPIError(
+                    "generate_video_from_current: clicked the 动画 submenu "
+                    "but no /conversations/new request fired within 10s. "
+                    "Possible causes: composer settings raced the submit "
+                    "click, the page lost focus (focus emulation should "
+                    "prevent this), or Grok silently disabled the submit "
+                    "(rate-limited)."
                 )
+            await monitor.wait_for_body(timeout=timeout)
+
+        # Same Grok-side bug as edit_image / animate_post: the post-page
+        # composer constructs the source-image URL with the wrong CDN
+        # subdomain (images-public.x.ai/... instead of imagine-public.x.ai/...)
+        # and the server returns a typed GCS error. The REST primary path
+        # in create_video constructs the URL correctly via get_post_details,
+        # so the workaround is to warm the statsig snitch so we take that
+        # path on subsequent calls.
+        if monitor.body and '"Failed to download image from GCS"' in monitor.body:
+            raise GrokAPIError(
+                f"generate_video_from_current({source_post_id!r}): Grok "
+                f"server returned 'Failed to download image from GCS' — "
+                f"the 2026-06 post-page composer constructs the source-"
+                f"image URL with the wrong CDN subdomain (Grok-side bug, "
+                f"same one edit_image / animate_post hit). Workaround: "
+                f"warm the statsig snitch by running any successful "
+                f"create_video / create_image first, then this method's "
+                f"REST primary path in create_video will construct the "
+                f"URL correctly via get_post_details."
             )
 
-        async def _click_make_video_button() -> bool:
-            """Click the '制作视频' or '生成视频' button to trigger generation.
-
-            If the expected button isn't present, try restoring image
-            view once before giving up — the post page may have drifted
-            off the image (Grok can default to a sibling edit candidate
-            or a descendant video depending on state).
-            """
-            # Try "制作视频" first (initial image post state)
-            btn = await self._tab.query_selector('button[aria-label="制作视频"]')
-            if not btn:
-                btn = await self._tab.query_selector('button[aria-label="Make video"]')
-            # Fallback: "生成视频" (video mode state, arrow up = regenerate)
-            if not btn:
-                btn = await self._tab.query_selector('button[aria-label="生成视频"]')
-            if not btn:
-                btn = await self._tab.query_selector('button[aria-label="Generate video"]')
-            # Defensive: we may have landed on a sibling or descendant
-            # view where the button doesn't exist. Restore image view
-            # explicitly and try once more.
-            if not btn and await _restore_image_view():
-                await asyncio.sleep(1.5)
-                btn = await self._tab.query_selector('button[aria-label="制作视频"]')
-                if not btn:
-                    btn = await self._tab.query_selector('button[aria-label="Make video"]')
-                if not btn:
-                    btn = await self._tab.query_selector('button[aria-label="生成视频"]')
-                if not btn:
-                    btn = await self._tab.query_selector('button[aria-label="Generate video"]')
-            if btn:
-                await btn.click()
-                return True
-            return False
-
-        async def _wait_for_request(wait_timeout: int = 8) -> bool:
-            """Wait for a CDP request to be captured. Returns True if captured."""
-            wait_start = asyncio.get_event_loop().time()
-            while captured_response["request_id"] is None:
-                elapsed = asyncio.get_event_loop().time() - wait_start
-                if elapsed > wait_timeout:
-                    return False
-                await asyncio.sleep(0.5)
-            return True
-
-        async def _wait_for_body(body_timeout: int = 0) -> None:
-            """Wait for response body with timeout."""
-            effective_timeout = body_timeout or timeout
-            start = asyncio.get_event_loop().time()
-            while captured_response["body"] is None:
-                elapsed = asyncio.get_event_loop().time() - start
-                if elapsed > effective_timeout:
-                    raise GrokAPIError("Timeout waiting for video generation response")
-                await asyncio.sleep(0.5)
-
-        max_click_retries = 3
-        click_wait_timeout = 8
-
-        if preset_str != "normal" or adjustment_prompt:
-            # Both non-normal preset and adjustment_prompt require entering video mode first.
-            # Step 1: Click "制作视频" to enter video mode (triggers initial Normal generation)
-            for click_attempt in range(1, max_click_retries + 1):
-                captured_response["request_id"] = None
-                await asyncio.sleep(random.uniform(0.3, 0.8))
-
-                clicked = await _click_make_video_button()
-                if not clicked and click_attempt == max_click_retries:
-                    # Last-ditch: moderation state or cached DOM can stick
-                    # across soft navigations in long retry loops (reported
-                    # to fail deterministically on the 4th consecutive call
-                    # with moderated outputs). Force a hard reload and try
-                    # one more time before giving up.
-                    logger.warning(
-                        "[generate_video_from_current] '制作视频' not found "
-                        "after %d retries — forcing hard page_reload as "
-                        "last-ditch and retrying once.",
-                        max_click_retries,
-                    )
-                    try:
-                        await self._tab.page_reload()
-                        await asyncio.sleep(3 + random.uniform(0, 1.0))
-                        if await _click_make_video_button() and await _wait_for_request(
-                            click_wait_timeout
-                        ):
-                            break
-                    except Exception as _e:
-                        logger.debug(f"page_reload last-ditch failed: {_e}")
-                    raise GrokAPIError(
-                        "Could not find '制作视频' button after retries "
-                        "(including hard page reload). Common causes:\n"
-                        "  1. Consecutive moderated generations (3+) can leave "
-                        "persistent UI state — the connector's banner-killer "
-                        "now tries to dismiss moderation alerts/toasts; if "
-                        "you still hit this, inspect the DOM for a new "
-                        "overlay pattern and report back.\n"
-                        "  2. The target post belongs to another user (no "
-                        "generate permission).\n"
-                        "  3. The target is not an image post (already a "
-                        "video / deleted)."
-                    )
-                elif not clicked:
-                    await asyncio.sleep(2 + random.uniform(0, 1.0))
-                    continue
-
-                if await _wait_for_request(click_wait_timeout):
-                    break
-
-                if click_attempt < max_click_retries:
-                    await asyncio.sleep(2 + random.uniform(0, 1.5))
-
-            if captured_response["request_id"] is None:
-                raise GrokAPIError("'制作视频' button did not trigger video generation request")
-
-            # Wait for first generation to complete
-            await _wait_for_body()
-
-            # Now in video mode — reset capture for the second generation
-            await asyncio.sleep(2 + random.uniform(0, 1.0))
-            captured_response["body"] = None
-            captured_response["request_id"] = None
-
-            if adjustment_prompt:
-                # Step 2a: Fill the "输入你的想象" input and click "生成视频" (arrow up)
-                escaped_prompt = (
-                    adjustment_prompt.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
-                )
-
-                # Try textarea first, then contenteditable (ProseMirror/tiptap editor)
-                await self._tab.evaluate(
-                    f"""
-                    (function() {{
-                        // Try textarea
-                        const ta = document.querySelector('textarea');
-                        if (ta && ta.offsetParent !== null) {{
-                            ta.focus();
-                            const setter = Object.getOwnPropertyDescriptor(
-                                window.HTMLTextAreaElement.prototype, 'value'
-                            ).set;
-                            setter.call(ta, "{escaped_prompt}");
-                            ta.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                            ta.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                            return 'textarea';
-                        }}
-                        // Try contenteditable (ProseMirror/tiptap)
-                        const editor = document.querySelector('.tiptap.ProseMirror') ||
-                                       document.querySelector('[contenteditable="true"]') ||
-                                       document.querySelector('.ProseMirror');
-                        if (editor) {{
-                            editor.focus();
-                            editor.innerHTML = '<p>{escaped_prompt}</p>';
-                            editor.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                            return 'editor';
-                        }}
-                        return 'not_found';
-                    }})()
-                """,
-                    await_promise=False,
-                )
-
-                await asyncio.sleep(0.5)
-
-                # Click "生成视频" button (the arrow up / regenerate button)
-                for click_attempt in range(1, max_click_retries + 1):
-                    captured_response["request_id"] = None
-                    await asyncio.sleep(random.uniform(0.3, 0.8))
-
-                    submit_btn = await self._tab.query_selector('button[aria-label="生成视频"]')
-                    if not submit_btn:
-                        submit_btn = await self._tab.query_selector(
-                            'button[aria-label="Generate video"]'
-                        )
-                    if not submit_btn:
-                        submit_btn = await self._tab.query_selector('button[aria-label="提交"]')
-
-                    if submit_btn:
-                        await submit_btn.click()
-                    elif click_attempt == max_click_retries:
-                        raise GrokAPIError("Could not find '生成视频' button after retries")
-                    else:
-                        await asyncio.sleep(2 + random.uniform(0, 1.0))
-                        continue
-
-                    if await _wait_for_request(click_wait_timeout):
-                        break
-
-                    if click_attempt < max_click_retries:
-                        await asyncio.sleep(2 + random.uniform(0, 1.5))
-
-                if captured_response["request_id"] is None:
-                    raise GrokAPIError("'生成视频' button did not trigger request after retries")
-
-            else:
-                # Step 2b: Non-normal preset — open settings and click preset menuitem
-                for click_attempt in range(1, max_click_retries + 1):
-                    captured_response["request_id"] = None
-                    await asyncio.sleep(random.uniform(0.3, 0.8))
-
-                    clicked = False
-                    if await _open_settings():
-                        clicked = await _click_menuitem(preset_menu_text)
-
-                    if not clicked and click_attempt == max_click_retries:
-                        raise GrokAPIError(f"Could not find preset '{preset_menu_text}' menu item")
-
-                    if await _wait_for_request(click_wait_timeout):
-                        break
-
-                    if click_attempt < max_click_retries:
-                        await asyncio.sleep(2 + random.uniform(0, 1.5))
-
-                if captured_response["request_id"] is None:
-                    raise GrokAPIError(
-                        f"Preset '{preset_menu_text}' did not trigger video generation"
-                    )
-
-        else:
-            # Normal preset, no adjustment_prompt:
-            # Simply click the "制作视频" button on the image overlay
-            for click_attempt in range(1, max_click_retries + 1):
-                captured_response["request_id"] = None
-                await asyncio.sleep(random.uniform(0.3, 0.8))
-
-                clicked = await _click_make_video_button()
-                if not clicked and click_attempt == max_click_retries:
-                    raise GrokAPIError("Could not find '制作视频' button after retries")
-                elif not clicked:
-                    await asyncio.sleep(2 + random.uniform(0, 1.0))
-                    continue
-
-                if await _wait_for_request(click_wait_timeout):
-                    break
-
-                if click_attempt < max_click_retries:
-                    await asyncio.sleep(2 + random.uniform(0, 1.5))
-
-            if captured_response["request_id"] is None:
-                raise GrokAPIError(
-                    f"'制作视频' button did not trigger request after {max_click_retries} attempts"
-                )
-
-        # Wait for response body with timeout
-        start_time = asyncio.get_event_loop().time()
-        while captured_response["body"] is None:
-            elapsed = asyncio.get_event_loop().time() - start_time
-            if elapsed > timeout:
-                raise GrokAPIError("Timeout waiting for video generation response")
-            await asyncio.sleep(0.5)
-
-        # Parse response using shared utility (statsig_id captured from request)
         gen_result = parse_video_ndjson_response(
-            captured_response["body"], parent_post_id, statsig_id=captured_response["statsig_id"]
+            monitor.body, parent_post_id, statsig_id=monitor.statsig_id
         )
-        # Rate-limit / quota reclassification — see _reclassify_or_return.
         return await self._reclassify_or_return(gen_result)
 
     # =========================================================================
