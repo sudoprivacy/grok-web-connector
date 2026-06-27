@@ -2496,8 +2496,18 @@ class GrokClient(ResponseParser):
         await asyncio.sleep(1 * self._ui_delay)
         return True
 
-    async def regenerate_post(self, post_id: str, *, timeout: int = 300) -> VideoGenerationResult:
-        """Use when: rerunning a video post's original prompt for a fresh variation.
+    async def regenerate_post(self, params: dict) -> VideoGenerationResult:
+        """Use when: rerunning a post's original prompt for a fresh variation.
+
+        Canonical shape (dict API, matches every other generation
+        method in the connector — :meth:`create_video`,
+        :meth:`create_image`, :meth:`edit_image`, :meth:`extend_video`,
+        :meth:`animate_post`)::
+
+            await client.regenerate_post({
+                "post_id": "<source-uuid>",
+                "timeout": 300,
+            })
 
         Drives the post-page inline 重新生成 / Regenerate button (added
         in the 2026-06 redesign). Grok re-submits the post's original
@@ -2509,14 +2519,15 @@ class GrokClient(ResponseParser):
         id, NOT the source's. Source's id is in ``source_post_id``.
 
         Args:
-            post_id: The source post UUID to regenerate.
-            timeout: Max seconds to wait for the NDJSON response
-                (default 300).
+            params: Dict with keys from REGENERATE_KEYS.
+                Required: ``post_id``.
+                Optional: ``timeout`` (default 300).
 
         Returns:
             VideoGenerationResult for the new generation.
 
         Failure:
+            * Missing ``post_id`` → :class:`GrokConfigError`.
             * Post not found (404) → GrokAPIError.
             * Inline 重新生成 button absent (e.g. on image posts or
               uploaded-source videos that don't expose this action)
@@ -2532,6 +2543,13 @@ class GrokClient(ResponseParser):
         from ._internal import parse_video_ndjson_response
         from .actions.extend_seed import enable_focus_emulation
         from .actions.network_monitor import CDPMonitor
+        from .schema import REGENERATE_KEYS, validate_params
+
+        p = validate_params(params, REGENERATE_KEYS)
+        post_id = p.get("post_id")
+        if not post_id:
+            raise GrokConfigError("regenerate_post: 'post_id' is required in params dict")
+        timeout = p.get("timeout", 300)
 
         await self._navigate_to_post_safe(post_id)
         await enable_focus_emulation(self._tab)
@@ -2556,71 +2574,122 @@ class GrokClient(ResponseParser):
         gen_result.source_post_id = post_id
         return gen_result
 
-    async def animate_post(
-        self,
-        post_id: str,
-        *,
-        mode: str = "quick",
-        prompt: str | None = None,
-        timeout: int = 600,
-    ) -> VideoGenerationResult:
+    async def animate_post(self, params: dict) -> VideoGenerationResult:
         """Use when: turning an existing image post into a video (img2vid shortcut).
 
-        Drives the post-page inline 动画 / Animate submenu added in the
-        2026-06 redesign. Equivalent to ``create_video({"images":
-        ["post:<id>"]})`` but uses the post-page direct surface
-        (one fewer composition step). Three sub-modes available:
+        Canonical shape (dict API, matches :meth:`create_video` /
+        :meth:`edit_image` — main-body prompt string + structured
+        ``images`` list)::
 
-        * ``mode="quick"`` (default) → 快速动画化 — fastest img2vid,
-          uses Grok's default normal-spice prompting.
-        * ``mode="spicy"`` → 火辣 — spicy-mode img2vid (NSFW-leaning).
-        * ``mode="add_prompt"`` → 添加提示 — opens the video composer
-          so you can supply your own video prompt. Requires the
-          ``prompt`` arg.
+            await client.animate_post({
+                "images": ["post:<source-uuid>"],   # @1 = source
+                "prompt": "cinematic zoom into @1",  # optional
+                "animate_mode": "quick",              # optional, auto-inferred
+                "timeout": 600,
+            })
+
+        Drives the post-page inline 动画 / Animate submenu added in
+        the 2026-06 redesign. Equivalent to
+        ``create_video({"images": ["post:<id>"], "prompt": "..."})``
+        but uses the post-page direct surface (one fewer composition
+        step). Three submenu items:
+
+        * ``animate_mode="quick"`` → 快速动画化 — fastest img2vid,
+          Grok's default normal-style prompting (ignores ``prompt``).
+        * ``animate_mode="spicy"`` → 火辣 — spicy-mode img2vid
+          (ignores ``prompt``).
+        * ``animate_mode="add_prompt"`` → 添加提示 — opens the video
+          composer; uses ``prompt``.
+
+        Mode auto-inference (when ``animate_mode`` is omitted):
+
+        * ``prompt`` present → ``"add_prompt"``.
+        * ``prompt`` absent  → ``"quick"``.
 
         Args:
-            post_id: The source IMAGE post UUID.
-            mode: ``"quick"`` / ``"spicy"`` / ``"add_prompt"``.
-            prompt: Required when ``mode="add_prompt"``; ignored
-                otherwise.
-            timeout: Max seconds to wait for the NDJSON response
+            params: Dict with keys from ANIMATE_KEYS.
+                Required: ``images`` (list with one ``"post:<uuid>"``).
+                Optional: ``prompt``, ``animate_mode``, ``timeout``
                 (default 600 — img2vid is slower than image gen).
 
         Returns:
             VideoGenerationResult.
 
         Failure:
-            * Post not found (404) → GrokAPIError.
+            * Missing / wrong-shape ``images`` (not exactly one
+              ``"post:<uuid>"`` entry) → :class:`GrokConfigError`.
+            * ``animate_mode="add_prompt"`` without ``prompt`` →
+              :class:`GrokConfigError`.
+            * ``animate_mode`` not in the three valid values →
+              :class:`GrokConfigError`.
+            * Post not found (404) → :class:`GrokAPIError`.
             * 动画 button absent (e.g. on video posts where this
-              action doesn't apply) → GrokAPIError.
-            * Submenu item not found (Grok renamed) → GrokAPIError
-              with available items dumped.
-            * ``mode="add_prompt"`` without ``prompt`` arg →
-              GrokConfigError.
+              action doesn't apply) → :class:`GrokAPIError`.
+            * Submenu item not found (Grok renamed) →
+              :class:`GrokAPIError` with available items dumped.
             * Grok server returns ``Failed to download image from
               GCS`` (the 2026-06 source-URL bug also affects this
-              path) → GrokAPIError naming the bug + recommending
-              ``create_video({"images": ["post:..."]})`` instead
-              (which constructs the URL correctly via REST).
+              path) → :class:`GrokAPIError` naming the bug and
+              recommending ``create_video({"images": ["post:..."]})``
+              instead (REST path constructs the URL correctly).
         """
         import asyncio
 
         from ._internal import parse_video_ndjson_response
         from .actions.extend_seed import enable_focus_emulation
         from .actions.network_monitor import CDPMonitor
+        from .prompt_parser import classify_image_source
+        from .schema import ANIMATE_KEYS, validate_params
+
+        p = validate_params(params, ANIMATE_KEYS)
+        images = p.get("images") or []
+        if not images:
+            raise GrokConfigError(
+                "animate_post: 'images' is required (list with one "
+                "'post:<uuid>' entry — the image to animate)"
+            )
+        src_kind, src_value = classify_image_source(images[0])
+        if src_kind != "post":
+            raise GrokConfigError(
+                f"animate_post: images[0] must be 'post:<uuid>'; got {images[0]!r}"
+            )
+        if len(images) > 1:
+            logger.warning(
+                f"animate_post: only images[0] is used as the source "
+                f"(extras ignored — animate_post is single-source by "
+                f"design). To use refs in an img2vid prompt, use "
+                f"create_video with @N markers instead. Got "
+                f"{len(images)} images, using {images[0]!r}."
+            )
+        post_id = src_value
+        prompt = p.get("prompt")
+        animate_mode = p.get("animate_mode")
+        timeout = p.get("timeout", 600)
 
         SUBMENU_LABELS = {
             "quick": ("快速动画化", "Quick animate"),
             "spicy": ("火辣", "Spicy"),
             "add_prompt": ("添加提示", "Add prompt"),
         }
-        if mode not in SUBMENU_LABELS:
+        if animate_mode is None:
+            animate_mode = "add_prompt" if prompt else "quick"
+        if animate_mode not in SUBMENU_LABELS:
             raise GrokConfigError(
-                f"animate_post: mode must be one of {list(SUBMENU_LABELS)!r}, got {mode!r}"
+                f"animate_post: animate_mode must be one of "
+                f"{list(SUBMENU_LABELS)!r}, got {animate_mode!r}"
             )
-        if mode == "add_prompt" and not prompt:
-            raise GrokConfigError("animate_post: mode='add_prompt' requires the prompt arg")
-        labels = SUBMENU_LABELS[mode]
+        if animate_mode == "add_prompt" and not prompt:
+            raise GrokConfigError(
+                "animate_post: animate_mode='add_prompt' requires the 'prompt' field"
+            )
+        if animate_mode in ("quick", "spicy") and prompt:
+            logger.info(
+                f"animate_post: animate_mode={animate_mode!r} ignores "
+                f"the prompt (only 'add_prompt' uses it). Set "
+                f"animate_mode='add_prompt' explicitly if you want the "
+                f"prompt to take effect."
+            )
+        labels = SUBMENU_LABELS[animate_mode]
 
         await self._navigate_to_post_safe(post_id)
         await enable_focus_emulation(self._tab)
@@ -2634,7 +2703,7 @@ class GrokClient(ResponseParser):
 
             # For add_prompt mode the submenu click opens the video composer
             # (editor + 生成视频 submit). Fill prompt and click submit.
-            if mode == "add_prompt":
+            if animate_mode == "add_prompt":
                 await asyncio.sleep(1.5 * self._ui_delay)
                 escaped = prompt.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
                 fill = await self._tab.evaluate(
@@ -2651,16 +2720,17 @@ class GrokClient(ResponseParser):
                 )
                 if fill == "no-editor":
                     raise GrokAPIError(
-                        "animate_post(mode='add_prompt'): composer editor "
-                        "not found after submenu click."
+                        "animate_post(animate_mode='add_prompt'): composer "
+                        "editor not found after submenu click."
                     )
                 await asyncio.sleep(1 * self._ui_delay)
                 await self._click_inline_post_button("生成视频", "Generate Video")
 
             if not await monitor.wait_for_request(timeout=10):
                 raise GrokAPIError(
-                    f"animate_post(mode={mode!r}): no /conversations/new "
-                    f"request fired within 10s after submenu click."
+                    f"animate_post(animate_mode={animate_mode!r}): no "
+                    f"/conversations/new request fired within 10s after "
+                    f"submenu click."
                 )
             await monitor.wait_for_body(timeout=timeout)
 
@@ -2669,11 +2739,11 @@ class GrokClient(ResponseParser):
         # correct URL and works around it.
         if monitor.body and '"Failed to download image from GCS"' in monitor.body:
             raise GrokAPIError(
-                f"animate_post({post_id!r}, mode={mode!r}): Grok server "
-                f"returned 'Failed to download image from GCS' — the "
-                f"2026-06 UI constructs the source-image URL with the "
-                f"wrong CDN subdomain (the same bug edit_image hits). "
-                f"Workaround: use create_video({{'images': "
+                f"animate_post({post_id!r}, animate_mode={animate_mode!r}): "
+                f"Grok server returned 'Failed to download image from "
+                f"GCS' — the 2026-06 UI constructs the source-image URL "
+                f"with the wrong CDN subdomain (the same bug edit_image "
+                f"hits). Workaround: use create_video({{'images': "
                 f"['post:{post_id}'], 'prompt': ...}}) — that path "
                 f"constructs the URL correctly via get_post_details."
             )

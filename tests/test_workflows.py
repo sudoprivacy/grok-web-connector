@@ -797,32 +797,87 @@ class TestPostActions2026UIRedesign:
         assert "Failure:" in doc, f"{method_name} docstring needs an explicit Failure: section"
 
     def test_animate_post_validates_mode(self):
-        """animate_post rejects bogus modes upfront with GrokConfigError
-        (not GrokAPIError) — invalid arg is the caller's mistake, not
-        a server-side condition."""
+        """animate_post rejects bogus animate_mode upfront with
+        GrokConfigError (not GrokAPIError) — invalid arg is the
+        caller's mistake, not a server-side condition."""
         import asyncio
 
         client = GrokClient.__new__(GrokClient)
 
         async def call_it():
-            await client.animate_post("any-id", mode="bogus")
+            await client.animate_post({"images": ["post:any-id"], "animate_mode": "bogus"})
 
-        with pytest.raises(GrokConfigError, match="mode must be"):
+        with pytest.raises(GrokConfigError, match="animate_mode must be"):
             asyncio.run(call_it())
 
     def test_animate_post_add_prompt_requires_prompt(self):
-        """animate_post(mode='add_prompt') without prompt arg raises
-        GrokConfigError eagerly — fails before navigation so no
-        wasted browser work."""
+        """animate_post(animate_mode='add_prompt') without prompt
+        raises GrokConfigError eagerly — fails before navigation
+        so no wasted browser work."""
         import asyncio
 
         client = GrokClient.__new__(GrokClient)
 
         async def call_it():
-            await client.animate_post("any-id", mode="add_prompt")
+            await client.animate_post({"images": ["post:any-id"], "animate_mode": "add_prompt"})
 
-        with pytest.raises(GrokConfigError, match="requires the prompt"):
+        with pytest.raises(GrokConfigError, match="requires the 'prompt'"):
             asyncio.run(call_it())
+
+    def test_animate_post_requires_images(self):
+        """animate_post without 'images' raises GrokConfigError."""
+        import asyncio
+
+        client = GrokClient.__new__(GrokClient)
+
+        async def call_it():
+            await client.animate_post({"prompt": "zoom in"})
+
+        with pytest.raises(GrokConfigError, match="'images' is required"):
+            asyncio.run(call_it())
+
+    def test_animate_post_requires_post_source(self):
+        """animate_post: images[0] must be 'post:<uuid>' (img2vid only)."""
+        import asyncio
+
+        client = GrokClient.__new__(GrokClient)
+
+        async def call_it():
+            await client.animate_post({"images": ["/tmp/local.png"], "prompt": "zoom"})
+
+        with pytest.raises(GrokConfigError, match="post:<uuid>"):
+            asyncio.run(call_it())
+
+    def test_animate_post_auto_infers_mode_from_prompt(self):
+        """When animate_mode is omitted: prompt → 'add_prompt', no
+        prompt → 'quick'. Locked at source level via docstring."""
+        doc = GrokClient.animate_post.__doc__ or ""
+        # Doc must explicitly state the auto-inference rule
+        assert "auto-infer" in doc.lower() or "auto-inference" in doc.lower(), (
+            "animate_post docstring must document mode auto-inference"
+        )
+
+    def test_regenerate_post_dict_api(self):
+        """regenerate_post is dict-API (matches every other generation
+        method). Direct-arg form (v0.19.28) was a v0.19.30 refactor
+        away — caller must pass {"post_id": "..."}."""
+        import asyncio
+        import inspect
+
+        # Signature: (self, params: dict)
+        sig = inspect.signature(GrokClient.regenerate_post)
+        params_list = list(sig.parameters)
+        assert params_list == ["self", "params"], (
+            f"regenerate_post should be (self, params: dict); got {params_list!r}"
+        )
+
+        client = GrokClient.__new__(GrokClient)
+
+        async def call_missing():
+            await client.regenerate_post({})
+
+        with pytest.raises(GrokConfigError, match="'post_id' is required"):
+            asyncio.run(call_missing())
 
     def test_generate_video_from_current_no_legacy_dead_code(self):
         """v0.19.29 rewrote generate_video_from_current for the new

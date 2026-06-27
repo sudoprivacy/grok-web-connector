@@ -249,6 +249,20 @@ PARAMS: dict[str, dict[str, Any]] = {
         "type": "str",
         "default": "url",
     },
+    # --- 2026-06 inline-button-era params (animate_post / regenerate_post) ---
+    "animate_mode": {
+        "desc": (
+            "Which 动画 / Animate submenu item to click on the source "
+            "post page (2026-06 UI). One of:\n"
+            "  • 'quick' → 快速动画化 (fastest, normal style, ignores prompt)\n"
+            "  • 'spicy' → 火辣 (spicy-mode img2vid, ignores prompt)\n"
+            "  • 'add_prompt' → 添加提示 (opens video composer; "
+            "uses the 'prompt' field)\n"
+            "Omit to auto-infer: 'add_prompt' when prompt is provided, "
+            "else 'quick'."
+        ),
+        "type": "str",
+    },
 }
 
 # =============================================================================
@@ -316,6 +330,24 @@ DOWNLOAD_KEYS = [
 
 # Keys accepted by select_post({...}) — dict-style as of v0.19.0.
 SELECT_POST_KEYS = [
+    "post_id",
+    "timeout",
+]
+
+# Keys accepted by animate_post({...}) — img2vid via 2026-06 inline 动画
+# submenu. Mirrors create_video's prompt + images (with @N) pattern: the
+# source image is images[0] ("post:<uuid>" required), prompt is optional.
+ANIMATE_KEYS = [
+    "images",
+    "prompt",
+    "animate_mode",
+    "timeout",
+]
+
+# Keys accepted by regenerate_post({...}) — re-runs a post's original
+# generation params. No prompt input (uses the source's), so dict only
+# needs post_id + timeout; dict form is preferred for forward-compat.
+REGENERATE_KEYS = [
     "post_id",
     "timeout",
 ]

@@ -45,6 +45,7 @@ from .models import (
 from .pool import BrowserWorkerPool
 from .prompt_parser import classify_image_source, parse_prompt
 from .schema import (
+    ANIMATE_KEYS,
     API_EDIT_KEYS,
     API_IMAGE_KEYS,
     API_VIDEO_KEYS,
@@ -52,6 +53,7 @@ from .schema import (
     EXTEND_KEYS,
     IMAGE_KEYS,
     PARAMS,
+    REGENERATE_KEYS,
     UPLOAD_KEYS,
     VIDEO_KEYS,
     schema_to_docstring,
@@ -177,6 +179,8 @@ __all__ = [
     "EDIT_KEYS",
     "EXTEND_KEYS",
     "UPLOAD_KEYS",
+    "ANIMATE_KEYS",
+    "REGENERATE_KEYS",
     "API_IMAGE_KEYS",
     "API_VIDEO_KEYS",
     "API_EDIT_KEYS",
