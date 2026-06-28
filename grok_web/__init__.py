@@ -13,6 +13,7 @@ For parallel processing, see BrowserWorkerPool (grok_web/pool/).
 
 from pathlib import Path
 
+from .agent_client import GrokAgentClient
 from .auth import load_api_key, load_cookies, save_cookies
 from .client import GrokClient
 from .exceptions import (
@@ -31,6 +32,7 @@ from .models import (
     MODE_TXT2VID,
     MODE_UNKNOWN,
     MODE_UPLOAD2VID,
+    AgentResponse,
     ChildPost,
     GrokCookies,
     ImageEditResult,
@@ -45,6 +47,7 @@ from .models import (
 from .pool import BrowserWorkerPool
 from .prompt_parser import classify_image_source, parse_prompt
 from .schema import (
+    AGENT_KEYS,
     ANIMATE_KEYS,
     API_EDIT_KEYS,
     API_IMAGE_KEYS,
@@ -138,6 +141,43 @@ def get_client(
     )
 
 
+def get_agent_client(
+    cookies: GrokCookies | None = None,
+    config_path: Path | str | None = None,
+    browser_host: str | None = None,
+    browser_port: int | None = None,
+    headless: bool = False,
+    profile: str | None = None,
+    startup_timeout: float = 30.0,
+    extra_chrome_args: list[str] | None = None,
+    user_data_dir: "str | Path | None" = None,
+) -> GrokAgentClient:
+    """Get the Grok Agent Mode client.
+
+    Use for conversational image/video generation on Agent Mode's
+    infinite canvas. Same auth and browser lifecycle as get_client().
+
+    Example:
+        async with get_agent_client() as agent:
+            r = await agent.send({"message": "create a logo for Bean Dream"})
+            r2 = await agent.send({
+                "message": "make it retro",
+                "session_url": r.session_url,
+            })
+    """
+    return GrokAgentClient(
+        cookies=cookies,
+        config_path=config_path,
+        host=browser_host,
+        port=browser_port,
+        headless=headless,
+        profile=profile,
+        startup_timeout=startup_timeout,
+        extra_chrome_args=extra_chrome_args,
+        user_data_dir=user_data_dir,
+    )
+
+
 def get_api_client(
     api_key: str | None = None,
     config_path: Path | str | None = None,
@@ -166,9 +206,11 @@ def get_api_client(
 __all__ = [
     # Factory functions (main entry points)
     "get_client",
+    "get_agent_client",
     "get_api_client",
     # Client classes
     "GrokClient",
+    "GrokAgentClient",
     "XAIClient",
     # Worker Pool (for parallel processing)
     "BrowserWorkerPool",
@@ -181,6 +223,7 @@ __all__ = [
     "UPLOAD_KEYS",
     "ANIMATE_KEYS",
     "REGENERATE_KEYS",
+    "AGENT_KEYS",
     "API_IMAGE_KEYS",
     "API_VIDEO_KEYS",
     "API_EDIT_KEYS",
@@ -198,6 +241,7 @@ __all__ = [
     "MODE_UPLOAD2VID",
     "MODE_UNKNOWN",
     # Models
+    "AgentResponse",
     "PostSummary",
     "PostDetails",
     "ChildPost",

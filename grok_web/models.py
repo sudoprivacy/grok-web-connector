@@ -837,6 +837,39 @@ class ImageEditResult(BaseModel):
         ]
 
 
+class AgentResponse(BaseModel):
+    """Result of GrokAgentClient.send() — Agent Mode dialog response."""
+
+    session_url: str = Field(..., description="Conversation URL for follow-up sends")
+    text: str = Field("", description="Agent's text response")
+    image_urls: list[str] = Field(
+        default_factory=list,
+        description="Generated image URLs on the canvas (assets.grok.com)",
+    )
+    message_sent: str = Field(..., description="The message that was sent")
+    is_new_conversation: bool = Field(
+        ..., description="True if this was a new conversation (no session_url provided)"
+    )
+
+    @computed_field
+    @property
+    def has_images(self) -> bool:
+        """True if the response includes generated images."""
+        return len(self.image_urls) > 0
+
+    @computed_field
+    @property
+    def image_count(self) -> int:
+        """Number of generated images."""
+        return len(self.image_urls)
+
+    @computed_field
+    @property
+    def success(self) -> bool:
+        """True if the agent responded (has text or images)."""
+        return bool(self.text) or len(self.image_urls) > 0
+
+
 class ImageGenerationResult(BaseModel):
     """Result of create_image() API call (text-to-image generation).
 

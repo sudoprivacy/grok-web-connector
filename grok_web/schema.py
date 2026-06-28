@@ -249,6 +249,41 @@ PARAMS: dict[str, dict[str, Any]] = {
         "type": "str",
         "default": "url",
     },
+    # --- Agent Mode params (GrokAgentClient) ---
+    "message": {
+        "desc": (
+            "Text to send to the Agent Mode conversation. This is the "
+            "natural-language prompt — equivalent to 'prompt' in other "
+            "methods but named 'message' to match Agent Mode's chat UX."
+        ),
+        "type": "str",
+    },
+    "session_url": {
+        "desc": (
+            "Conversation URL to resume (e.g. 'https://grok.com/imagine/"
+            "agent/...'). Omit for a new conversation. Returned in "
+            "AgentResponse.session_url after each send()."
+        ),
+        "type": "str",
+    },
+    "wait_for_images": {
+        "desc": (
+            "Wait for image generation to complete before returning. "
+            "When True (default), send() blocks until all canvas images "
+            "stabilize. When False, returns as soon as the text response "
+            "is ready — image_urls may be empty or partial."
+        ),
+        "type": "bool",
+        "default": True,
+    },
+    "agent_model": {
+        "desc": (
+            "Agent Mode model selection: 'grok-composer-2.5' or 'grok-4.2'. "
+            "Omit to use whichever model is currently selected in the UI. "
+            "Setting this opens the model dropdown and picks the target."
+        ),
+        "type": "str",
+    },
     # --- 2026-06 inline-button-era params (animate_post / regenerate_post) ---
     "animate_mode": {
         "desc": (
@@ -353,6 +388,15 @@ REGENERATE_KEYS = [
 ]
 
 # Keys accepted by wait_for_video_completion({...}) — dict-style as of v0.19.0.
+# Keys accepted by GrokAgentClient.send({...}) — Agent Mode dialog.
+AGENT_KEYS = [
+    "message",
+    "session_url",
+    "timeout",
+    "wait_for_images",
+    "agent_model",
+]
+
 WAIT_FOR_COMPLETION_KEYS = [
     "video_id",
     "timeout",

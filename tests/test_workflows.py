@@ -22,6 +22,7 @@ import httpx
 import pytest
 
 from grok_web import (
+    AGENT_KEYS,
     API_EDIT_KEYS,
     API_IMAGE_KEYS,
     API_VIDEO_KEYS,
@@ -29,7 +30,9 @@ from grok_web import (
     IMAGE_KEYS,
     PARAMS,
     VIDEO_KEYS,
+    AgentResponse,
     BrowserWorkerPool,
+    GrokAgentClient,
     GrokClient,
     ImageEditResult,
     ImageGenerationResult,
@@ -38,6 +41,7 @@ from grok_web import (
     VideoExtendResult,
     VideoGenerationResult,
     VideoMatchResult,
+    get_agent_client,
     get_api_client,
     get_client,
     load_api_key,
@@ -515,6 +519,7 @@ class TestSchemaCrossGroupConsistency:
             "VIDEO_KEYS": VIDEO_KEYS,
             "IMAGE_KEYS": IMAGE_KEYS,
             "EDIT_KEYS": EDIT_KEYS,
+            "AGENT_KEYS": AGENT_KEYS,
             "API_IMAGE_KEYS": API_IMAGE_KEYS,
             "API_VIDEO_KEYS": API_VIDEO_KEYS,
             "API_EDIT_KEYS": API_EDIT_KEYS,
@@ -1020,6 +1025,107 @@ class TestPostActions2026UIRedesign:
 
 
 # ---------------------------------------------------------------------------
+# Scenario 8: agent_mode_schema_and_model
+#   AGENT_KEYS → validate → AgentResponse → computed fields
+# ---------------------------------------------------------------------------
+
+
+class TestAgentModeSchemaAndModel:
+    """Agent Mode schema validation + AgentResponse model construction."""
+
+    def test_agent_keys_reference_valid_params(self):
+        """Every key in AGENT_KEYS must exist in PARAMS."""
+        for key in AGENT_KEYS:
+            assert key in PARAMS, f"AGENT_KEYS references '{key}' not in PARAMS"
+
+    def test_agent_params_validate_and_defaults(self):
+        """validate_params with AGENT_KEYS applies defaults and rejects unknowns."""
+        cleaned = validate_params(
+            {"message": "draw a circle", "bogus": True},
+            AGENT_KEYS,
+        )
+        assert cleaned["message"] == "draw a circle"
+        assert "bogus" not in cleaned
+        assert cleaned["wait_for_images"] is True  # default
+        assert cleaned["timeout"] == 300  # default
+
+    def test_agent_response_with_images(self):
+        """AgentResponse computed fields: has_images, image_count, success."""
+        r = AgentResponse(
+            session_url="https://grok.com/imagine/agent/abc",
+            text="Here is your logo",
+            image_urls=["https://assets.grok.com/img1.png", "https://assets.grok.com/img2.png"],
+            message_sent="create a logo",
+            is_new_conversation=True,
+        )
+        assert r.has_images is True
+        assert r.image_count == 2
+        assert r.success is True
+        assert r.is_new_conversation is True
+
+    def test_agent_response_text_only(self):
+        """AgentResponse with text but no images is still success."""
+        r = AgentResponse(
+            session_url="https://grok.com/imagine/agent/abc",
+            text="Sure, I can help with that",
+            image_urls=[],
+            message_sent="help me",
+            is_new_conversation=False,
+        )
+        assert r.has_images is False
+        assert r.image_count == 0
+        assert r.success is True  # has text
+        assert r.is_new_conversation is False
+
+    def test_agent_response_empty_is_not_success(self):
+        """AgentResponse with no text and no images is not success."""
+        r = AgentResponse(
+            session_url="https://grok.com/imagine/agent/abc",
+            text="",
+            image_urls=[],
+            message_sent="hello",
+            is_new_conversation=True,
+        )
+        assert r.success is False
+
+    def test_agent_response_resume_session(self):
+        """session_url is preserved for conversation resume."""
+        url = "https://grok.com/imagine/agent/session-123"
+        r = AgentResponse(
+            session_url=url,
+            text="Updated!",
+            image_urls=[],
+            message_sent="make it blue",
+            is_new_conversation=False,
+        )
+        assert r.session_url == url
+
+    def test_agent_docstring_spliced(self):
+        """send() docstring has SCHEMA_ARGS replaced with param descriptions."""
+        doc = GrokAgentClient.send.__doc__ or ""
+        assert "<SCHEMA_ARGS>" not in doc
+        assert "message" in doc
+        assert "session_url" in doc
+        assert "wait_for_images" in doc
+
+    def test_send_requires_message(self):
+        """send() without 'message' raises GrokConfigError eagerly."""
+        import asyncio
+
+        client = GrokAgentClient.__new__(GrokAgentClient)
+
+        async def call_it():
+            await client.send({"session_url": "https://grok.com/imagine/agent/x"})
+
+        with pytest.raises(GrokConfigError, match="'message' is required"):
+            asyncio.run(call_it())
+
+    def test_get_agent_client_factory(self):
+        """get_agent_client returns a GrokAgentClient instance."""
+        assert callable(get_agent_client)
+
+
+# ---------------------------------------------------------------------------
 # Smoke test — imports
 # ---------------------------------------------------------------------------
 
@@ -1027,10 +1133,13 @@ class TestPostActions2026UIRedesign:
 def test_all_public_symbols_importable():
     """Every public symbol referenced in tests and README is importable."""
     assert get_client is not None
+    assert get_agent_client is not None
     assert get_api_client is not None
     assert GrokClient is not None
+    assert GrokAgentClient is not None
     assert XAIClient is not None
     assert BrowserWorkerPool is not None
+    assert AgentResponse is not None
     assert VideoGenerationResult is not None
     assert VideoExtendResult is not None
     assert ImageGenerationResult is not None
@@ -1040,4 +1149,5 @@ def test_all_public_symbols_importable():
     assert VideoMatchResult is not None
     assert PARAMS is not None
     assert VIDEO_KEYS is not None
+    assert AGENT_KEYS is not None
     assert API_IMAGE_KEYS is not None
