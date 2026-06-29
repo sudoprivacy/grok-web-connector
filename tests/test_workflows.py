@@ -26,6 +26,10 @@ from grok_web import (
     API_EDIT_KEYS,
     API_IMAGE_KEYS,
     API_VIDEO_KEYS,
+    CANVAS_IMAGE_KEYS,
+    CANVAS_TEXT_KEYS,
+    CANVAS_UPLOAD_KEYS,
+    CANVAS_VIDEO_KEYS,
     EDIT_KEYS,
     IMAGE_KEYS,
     PARAMS,
@@ -520,6 +524,10 @@ class TestSchemaCrossGroupConsistency:
             "IMAGE_KEYS": IMAGE_KEYS,
             "EDIT_KEYS": EDIT_KEYS,
             "AGENT_KEYS": AGENT_KEYS,
+            "CANVAS_IMAGE_KEYS": CANVAS_IMAGE_KEYS,
+            "CANVAS_VIDEO_KEYS": CANVAS_VIDEO_KEYS,
+            "CANVAS_TEXT_KEYS": CANVAS_TEXT_KEYS,
+            "CANVAS_UPLOAD_KEYS": CANVAS_UPLOAD_KEYS,
             "API_IMAGE_KEYS": API_IMAGE_KEYS,
             "API_VIDEO_KEYS": API_VIDEO_KEYS,
             "API_EDIT_KEYS": API_EDIT_KEYS,
@@ -1126,6 +1134,110 @@ class TestAgentModeSchemaAndModel:
 
 
 # ---------------------------------------------------------------------------
+# Scenario 9: agent_canvas_tools_schema
+#   CANVAS_*_KEYS → validate → docstrings → error on missing params
+# ---------------------------------------------------------------------------
+
+
+class TestAgentCanvasToolsSchema:
+    """Phase 2: Canvas tool schema validation and eager errors."""
+
+    def test_canvas_image_keys_reference_valid_params(self):
+        """Every key in CANVAS_IMAGE_KEYS must exist in PARAMS."""
+        for key in CANVAS_IMAGE_KEYS:
+            assert key in PARAMS, f"CANVAS_IMAGE_KEYS references '{key}' not in PARAMS"
+
+    def test_canvas_video_keys_reference_valid_params(self):
+        for key in CANVAS_VIDEO_KEYS:
+            assert key in PARAMS, f"CANVAS_VIDEO_KEYS references '{key}' not in PARAMS"
+
+    def test_canvas_text_keys_reference_valid_params(self):
+        for key in CANVAS_TEXT_KEYS:
+            assert key in PARAMS, f"CANVAS_TEXT_KEYS references '{key}' not in PARAMS"
+
+    def test_canvas_upload_keys_reference_valid_params(self):
+        for key in CANVAS_UPLOAD_KEYS:
+            assert key in PARAMS, f"CANVAS_UPLOAD_KEYS references '{key}' not in PARAMS"
+
+    def test_canvas_image_params_defaults(self):
+        """validate_params applies defaults for canvas image generation."""
+        cleaned = validate_params({"prompt": "a blue star"}, CANVAS_IMAGE_KEYS)
+        assert cleaned["prompt"] == "a blue star"
+        assert cleaned["image_count"] == 2  # default
+        assert cleaned["timeout"] == 300  # default
+
+    def test_canvas_generate_image_requires_prompt(self):
+        """canvas_generate_image without prompt raises GrokConfigError."""
+        import asyncio
+
+        client = GrokAgentClient.__new__(GrokAgentClient)
+
+        async def call_it():
+            await client.canvas_generate_image({"session_url": "https://grok.com/imagine/agent/x"})
+
+        with pytest.raises(GrokConfigError, match="'prompt' is required"):
+            asyncio.run(call_it())
+
+    def test_canvas_generate_video_requires_prompt(self):
+        import asyncio
+
+        client = GrokAgentClient.__new__(GrokAgentClient)
+
+        async def call_it():
+            await client.canvas_generate_video({})
+
+        with pytest.raises(GrokConfigError, match="'prompt' is required"):
+            asyncio.run(call_it())
+
+    def test_canvas_add_text_requires_canvas_text(self):
+        import asyncio
+
+        client = GrokAgentClient.__new__(GrokAgentClient)
+
+        async def call_it():
+            await client.canvas_add_text({})
+
+        with pytest.raises(GrokConfigError, match="'canvas_text' is required"):
+            asyncio.run(call_it())
+
+    def test_canvas_upload_image_requires_file_path(self):
+        import asyncio
+
+        client = GrokAgentClient.__new__(GrokAgentClient)
+
+        async def call_it():
+            await client.canvas_upload_image({})
+
+        with pytest.raises(GrokConfigError, match="'file_path' is required"):
+            asyncio.run(call_it())
+
+    def test_canvas_upload_image_rejects_missing_file(self):
+        import asyncio
+
+        client = GrokAgentClient.__new__(GrokAgentClient)
+
+        async def call_it():
+            await client.canvas_upload_image({"file_path": "/nonexistent/image.png"})
+
+        with pytest.raises(GrokConfigError, match="File not found"):
+            asyncio.run(call_it())
+
+    def test_canvas_docstrings_spliced(self):
+        """Canvas tool docstrings have SCHEMA_ARGS replaced."""
+        for method_name in [
+            "canvas_generate_image",
+            "canvas_generate_video",
+            "canvas_add_text",
+            "canvas_upload_image",
+        ]:
+            doc = getattr(GrokAgentClient, method_name).__doc__ or ""
+            assert "<SCHEMA_ARGS>" not in doc, f"{method_name} has unspliced <SCHEMA_ARGS>"
+            assert "prompt" in doc or "canvas_text" in doc or "file_path" in doc, (
+                f"{method_name} docstring missing param descriptions"
+            )
+
+
+# ---------------------------------------------------------------------------
 # Smoke test — imports
 # ---------------------------------------------------------------------------
 
@@ -1150,4 +1262,8 @@ def test_all_public_symbols_importable():
     assert PARAMS is not None
     assert VIDEO_KEYS is not None
     assert AGENT_KEYS is not None
+    assert CANVAS_IMAGE_KEYS is not None
+    assert CANVAS_VIDEO_KEYS is not None
+    assert CANVAS_TEXT_KEYS is not None
+    assert CANVAS_UPLOAD_KEYS is not None
     assert API_IMAGE_KEYS is not None

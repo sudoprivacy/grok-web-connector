@@ -24,7 +24,14 @@ from ai_dev_browser.core.config import DEFAULT_DEBUG_HOST
 from .auth import DEFAULT_CONFIG_PATH, load_config, save_cookies
 from .exceptions import GrokAPIError, GrokConfigError
 from .models import AgentResponse, GrokCookies
-from .schema import AGENT_KEYS, validate_params
+from .schema import (
+    AGENT_KEYS,
+    CANVAS_IMAGE_KEYS,
+    CANVAS_TEXT_KEYS,
+    CANVAS_UPLOAD_KEYS,
+    CANVAS_VIDEO_KEYS,
+    validate_params,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -749,10 +756,682 @@ class GrokAgentClient:
             is_new_conversation=is_new,
         )
 
+    # =========================================================================
+    # Canvas tool helpers — validated 2026-06-29
+    #
+    # Canvas toolbar (bottom-right of react-flow area):
+    #   x=813: cursor/select tool
+    #   x=873: 生成图片 (⌘I) — opens prompt input on canvas
+    #   x=917: 生成视频 (⌘U) — opens prompt input on canvas
+    #   x=961: 文本 (⌘E) — opens text input on canvas
+    #   x=1005: 上传图片 — opens file picker
+    #
+    # Canvas prompt input UI (after clicking toolbar button):
+    #   - Input: [aria-label="Ask Grok anything"] at y < 400 (canvas area)
+    #   - Submit: [aria-label="发送"] (NOT "提交" — canvas uses 发送)
+    #   - Cancel: [aria-label="取消"]
+    #   - Image count: [aria-label="图像数量"]
+    #   - Quality: buttons "速度"/"质量"
+    #   - Aspect ratio: [aria-label="宽高比"]
+    # =========================================================================
 
-# Splice schema into send() docstring at module load
+    async def _ensure_conversation(self, session_url: str | None) -> str:
+        """Ensure we're in an active Agent Mode conversation.
+
+        Canvas toolbar only appears inside an active conversation. If
+        session_url differs from the current page, navigates to it.
+        If no session_url and no active conversation, bootstraps one
+        via send(). Returns the effective session URL.
+        """
+        current_url = await self._tab.evaluate("window.location.href")
+        current_url = current_url if isinstance(current_url, str) else ""
+
+        if session_url and session_url != current_url:
+            await self._tab.get(session_url)
+            await asyncio.sleep(3)
+            await self._kill_banner()
+            for sel in _INPUT_SELECTORS:
+                if await self._wait_for_selector(sel, timeout=15):
+                    break
+            await self._kill_banner()
+            return session_url
+
+        # Check if we're already in an active conversation
+        # (chat panel visible with messages)
+        has_chat = await self._evaluate_json(
+            """
+            JSON.stringify((() => {
+                const input = document.querySelector('[aria-label="Ask Grok anything"]');
+                if (!input || !input.offsetHeight) return false;
+                let p = input;
+                for (let i = 0; i < 15; i++) {
+                    p = p.parentElement;
+                    if (!p) break;
+                    if ((p.className || '').toString().includes('group/chat')) return true;
+                }
+                return false;
+            })())
+            """
+        )
+
+        if has_chat:
+            await self._kill_banner()
+            return current_url
+
+        # No active conversation — bootstrap one via send()
+        await self.send(
+            {
+                "message": "Start a new canvas session",
+                "wait_for_images": False,
+                "timeout": 30,
+            }
+        )
+        # Don't navigate — stay on the current page with the active conversation
+        await asyncio.sleep(1)
+        final_url = await self._tab.evaluate("window.location.href")
+        return final_url if isinstance(final_url, str) else current_url
+
+    async def _click_canvas_toolbar(self, tooltip_text: str) -> bool:
+        """Click a canvas toolbar button by hovering to match tooltip.
+
+        The canvas toolbar buttons have no aria-label — they're icon-only.
+        We identify them by hovering and reading the Radix tooltip text.
+
+        Args:
+            tooltip_text: Expected tooltip text (e.g. '生成图片', '生成视频', '文本')
+        """
+        from ai_dev_browser import cdp
+
+        # Find icon-only toolbar buttons in the bottom bar.
+        # Canvas toolbar buttons: bottom area, icon-only (SVG child, no text),
+        # typically have class containing "rounded-[11px]" or similar.
+        # We look for SVG-only buttons with no meaningful text/aria-label.
+        positions = await self._evaluate_json(
+            """
+            JSON.stringify((() => {
+                const buttons = document.querySelectorAll('button');
+                const toolbar = [];
+                for (const b of buttons) {
+                    const r = b.getBoundingClientRect();
+                    const ariaLabel = b.getAttribute('aria-label') || '';
+                    const text = (b.textContent || '').trim();
+                    const hasSvg = !!b.querySelector('svg');
+                    // Canvas toolbar: bottom area, has SVG, small-ish width,
+                    // no meaningful aria-label (exclude known non-toolbar buttons)
+                    if (r.y > 830 && b.offsetHeight > 0 && hasSvg
+                        && r.width >= 28 && r.width <= 80
+                        && !ariaLabel.includes('听写') && !ariaLabel.includes('提交')
+                        && !ariaLabel.includes('Submit') && !ariaLabel.includes('发送')
+                        && !ariaLabel.includes('缩小') && !ariaLabel.includes('放大')
+                        && !ariaLabel.includes('更多')
+                        && !text.includes('%')
+                        && !text.includes('报告')
+                        && ariaLabel !== '添加图片'
+                        ) {
+                        toolbar.push({
+                            x: Math.round(r.x + r.width/2),
+                            y: Math.round(r.y + r.height/2),
+                        });
+                    }
+                }
+                return toolbar;
+            })())
+            """
+        )
+
+        if not isinstance(positions, list) or not positions:
+            logger.warning("No canvas toolbar buttons found")
+            return False
+
+        for pos in positions:
+            # Hover to reveal tooltip
+            await self._tab.send(
+                cdp.input_.dispatch_mouse_event(
+                    type_="mouseMoved",
+                    x=pos["x"],
+                    y=pos["y"],
+                )
+            )
+            await asyncio.sleep(1.0)
+
+            # Read tooltip
+            tip = await self._evaluate_json(
+                """
+                JSON.stringify((() => {
+                    const tips = document.querySelectorAll(
+                        '[data-state="delayed-open"], [data-state="instant-open"], '
+                        + '[role="tooltip"], [data-radix-portal]'
+                    );
+                    for (const t of tips) {
+                        const text = (t.textContent || '').trim();
+                        if (text && t.offsetHeight > 0) return text;
+                    }
+                    return '';
+                })())
+                """
+            )
+
+            # Move away to close tooltip
+            await self._tab.send(cdp.input_.dispatch_mouse_event(type_="mouseMoved", x=0, y=0))
+            await asyncio.sleep(0.2)
+
+            if isinstance(tip, str) and tooltip_text in tip:
+                # Click this button
+                await self._tab.evaluate(
+                    f"""
+                    (() => {{
+                        const buttons = document.querySelectorAll('button');
+                        for (const b of buttons) {{
+                            const r = b.getBoundingClientRect();
+                            if (Math.round(r.x + r.width/2) === {pos["x"]}
+                                && Math.round(r.y + r.height/2) === {pos["y"]}) {{
+                                b.click();
+                                return 'clicked';
+                            }}
+                        }}
+                    }})()
+                    """
+                )
+                await asyncio.sleep(0.5)
+                return True
+
+        logger.warning(f"Canvas toolbar button with tooltip '{tooltip_text}' not found")
+        return False
+
+    async def _fill_canvas_input(self, text: str) -> None:
+        """Fill the canvas-area prompt input (not the chat input).
+
+        The canvas input appears after clicking a toolbar button (生成图片 etc.)
+        at y < 400. The chat input is at y > 800.
+        """
+        escaped = text.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
+        fill_result = await self._tab.evaluate(
+            f"""
+            (() => {{
+                const inputs = document.querySelectorAll('[aria-label="Ask Grok anything"]');
+                for (const inp of inputs) {{
+                    const r = inp.getBoundingClientRect();
+                    if (r.y < 400 && inp.offsetHeight > 0) {{
+                        inp.focus();
+                        document.execCommand('selectAll');
+                        document.execCommand('delete');
+                        document.execCommand('insertText', false, `{escaped}`);
+                        return 'ok';
+                    }}
+                }}
+                return 'no-canvas-input';
+            }})()
+            """
+        )
+        if fill_result == "no-canvas-input":
+            raise GrokAPIError(
+                "Canvas prompt input not found. Did the toolbar button click succeed? "
+                "Expected an input at y < 400 with aria-label='Ask Grok anything'."
+            )
+
+    async def _click_canvas_submit(self) -> None:
+        """Click the canvas prompt submit button (aria-label="发送").
+
+        The canvas prompt uses "发送" (Send), distinct from the chat's "提交" (Submit).
+        The canvas submit is near the canvas input (y < 400).
+        """
+        clicked = await self._tab.evaluate(
+            """
+            (() => {
+                // Find 发送 button near the canvas input (y < 400)
+                const buttons = document.querySelectorAll('button[aria-label="发送"]');
+                for (const b of buttons) {
+                    const r = b.getBoundingClientRect();
+                    if (r.y < 400 && !b.disabled && b.offsetHeight > 0) {
+                        b.click();
+                        return true;
+                    }
+                }
+                // Fallback: any non-disabled 发送 button
+                for (const b of buttons) {
+                    if (!b.disabled && b.offsetHeight > 0) {
+                        b.click();
+                        return true;
+                    }
+                }
+                return false;
+            })()
+            """
+        )
+        if not clicked:
+            raise GrokAPIError(
+                "Canvas submit button (aria-label='发送') not found or disabled. "
+                "Make sure the canvas prompt input has text."
+            )
+
+    async def _count_canvas_nodes(self) -> dict[str, Any]:
+        """Count react-flow nodes and their image URLs (canvas only)."""
+        result = await self._evaluate_json(
+            """
+            JSON.stringify((() => {
+                const nodes = document.querySelectorAll('.react-flow__node');
+                const urls = [];
+                for (const n of nodes) {
+                    const imgs = n.querySelectorAll('img');
+                    for (const img of imgs) {
+                        if (img.src && img.src.includes('assets.grok.com')
+                            && !urls.includes(img.src)) {
+                            urls.push(img.src);
+                        }
+                    }
+                }
+                return {node_count: nodes.length, urls: urls};
+            })())
+            """
+        )
+        if isinstance(result, dict):
+            return result
+        return {"node_count": 0, "urls": []}
+
+    async def _wait_for_canvas_images(
+        self,
+        pre_urls: list[str],
+        timeout: float,
+    ) -> list[str]:
+        """Wait for new images on the canvas (react-flow nodes only)."""
+        deadline = asyncio.get_event_loop().time() + timeout
+        pre_set = set(pre_urls)
+        last_new_count = 0
+        stable_since = asyncio.get_event_loop().time()
+
+        while asyncio.get_event_loop().time() < deadline:
+            state = await self._count_canvas_nodes()
+            current_urls = state.get("urls", [])
+            new_urls = [u for u in current_urls if u not in pre_set]
+
+            if len(new_urls) != last_new_count:
+                last_new_count = len(new_urls)
+                stable_since = asyncio.get_event_loop().time()
+            elif new_urls and asyncio.get_event_loop().time() - stable_since >= 5.0:
+                return new_urls
+
+            await asyncio.sleep(1)
+
+        # Timeout — return whatever new images we found
+        state = await self._count_canvas_nodes()
+        return [u for u in state.get("urls", []) if u not in pre_set]
+
+    async def _set_canvas_option(self, aria_label: str, value: str) -> bool:
+        """Click a canvas prompt option button and select a value.
+
+        Used for aspect_ratio (宽高比) and image_count (图像数量).
+        """
+        # Click the option button to open dropdown
+        clicked = await self._tab.evaluate(
+            f"""
+            (() => {{
+                const btn = document.querySelector('button[aria-label="{aria_label}"]');
+                if (btn && btn.offsetHeight > 0) {{
+                    btn.click();
+                    return true;
+                }}
+                return false;
+            }})()
+            """
+        )
+        if not clicked:
+            return False
+
+        await asyncio.sleep(0.5)
+
+        # Click the value option
+        escaped_value = value.replace("\\", "\\\\").replace("'", "\\'")
+        selected = await self._tab.evaluate(
+            f"""
+            (() => {{
+                const items = document.querySelectorAll(
+                    '[role="menuitem"], [role="option"], [role="radio"], button'
+                );
+                for (const item of items) {{
+                    const text = (item.textContent || '').trim();
+                    if (text === '{escaped_value}' && item.offsetHeight > 0) {{
+                        item.click();
+                        return true;
+                    }}
+                }}
+                return false;
+            }})()
+            """
+        )
+        await asyncio.sleep(0.3)
+        return bool(selected)
+
+    # =========================================================================
+    # Phase 2: Canvas tool public methods
+    # =========================================================================
+
+    async def canvas_generate_image(self, params: dict) -> AgentResponse:
+        """Generate image(s) directly on the canvas via the 生成图片 toolbar.
+
+        Use when: you want to place generated images directly on the
+        infinite canvas without going through the chat dialog. This
+        clicks the canvas toolbar's image button, fills the prompt,
+        and waits for generation.
+
+        Args:
+            params: Dict with keys:
+                <SCHEMA_ARGS>
+
+        Returns:
+            AgentResponse with new image_urls on the canvas.
+
+        Failure:
+            GrokAPIError — toolbar button not found, canvas input missing, or timeout.
+            GrokConfigError — missing required prompt.
+        """
+        cleaned = validate_params(params, CANVAS_IMAGE_KEYS)
+
+        prompt = cleaned.get("prompt")
+        if not prompt:
+            raise GrokConfigError("'prompt' is required for canvas_generate_image()")
+
+        session_url = cleaned.get("session_url")
+        timeout = cleaned.get("timeout", 300)
+        aspect_ratio = cleaned.get("aspect_ratio")
+        quality = cleaned.get("quality")
+        image_count = cleaned.get("image_count")
+
+        # 1. Navigate
+        target_url = await self._ensure_conversation(session_url)
+
+        # 2. Snapshot canvas state (react-flow nodes only)
+        pre_canvas = await self._count_canvas_nodes()
+        pre_urls = pre_canvas.get("urls", [])
+
+        # 3. Click 生成图片 toolbar button
+        if not await self._click_canvas_toolbar("生成图片"):
+            raise GrokAPIError(
+                "Could not find 生成图片 (Generate Image) canvas toolbar button. "
+                "The canvas toolbar may not be visible."
+            )
+        await asyncio.sleep(0.5)
+
+        # 4. Set options before filling prompt
+        if aspect_ratio:
+            await self._set_canvas_option("宽高比", aspect_ratio)
+        if quality:
+            quality_label = "质量" if quality == "quality" else "速度"
+            await self._tab.evaluate(
+                f"""
+                (() => {{
+                    const btns = document.querySelectorAll('button');
+                    for (const b of btns) {{
+                        if ((b.textContent || '').trim() === '{quality_label}'
+                            && b.offsetHeight > 0) {{
+                            b.click();
+                            return;
+                        }}
+                    }}
+                }})()
+                """
+            )
+            await asyncio.sleep(0.3)
+        if image_count is not None:
+            await self._set_canvas_option("图像数量", str(image_count))
+
+        # 5. Fill canvas prompt
+        await self._fill_canvas_input(prompt)
+        await asyncio.sleep(0.5)
+
+        # 6. Click canvas submit (发送)
+        await self._click_canvas_submit()
+
+        # 7. Wait for images
+        new_urls = await self._wait_for_canvas_images(
+            pre_urls=pre_urls,
+            timeout=timeout,
+        )
+
+        # 8. Get session URL
+        current_url = await self._tab.evaluate("window.location.href")
+        final_session_url = current_url if isinstance(current_url, str) else target_url
+
+        return AgentResponse(
+            session_url=final_session_url,
+            text="",
+            image_urls=new_urls,
+            message_sent=prompt,
+            is_new_conversation=session_url is None,
+        )
+
+    async def canvas_generate_video(self, params: dict) -> AgentResponse:
+        """Generate video on the canvas via the 生成视频 toolbar.
+
+        Use when: you want to create a video directly on the canvas.
+
+        Args:
+            params: Dict with keys:
+                <SCHEMA_ARGS>
+
+        Returns:
+            AgentResponse — video generation triggers but tracking is limited
+            since videos appear as canvas nodes, not image URLs.
+
+        Failure:
+            GrokAPIError — toolbar button not found or timeout.
+            GrokConfigError — missing required prompt.
+        """
+        cleaned = validate_params(params, CANVAS_VIDEO_KEYS)
+
+        prompt = cleaned.get("prompt")
+        if not prompt:
+            raise GrokConfigError("'prompt' is required for canvas_generate_video()")
+
+        session_url = cleaned.get("session_url")
+
+        # 1. Navigate
+        target_url = await self._ensure_conversation(session_url)
+
+        # 2. Click 生成视频 toolbar button
+        if not await self._click_canvas_toolbar("生成视频"):
+            raise GrokAPIError("Could not find 生成视频 (Generate Video) canvas toolbar button.")
+        await asyncio.sleep(0.5)
+
+        # 3. Fill canvas prompt
+        await self._fill_canvas_input(prompt)
+        await asyncio.sleep(0.5)
+
+        # 4. Click canvas submit (发送)
+        await self._click_canvas_submit()
+
+        # 5. Wait briefly — video generation is async and tracked differently
+        await asyncio.sleep(5)
+
+        # 6. Get session URL
+        current_url = await self._tab.evaluate("window.location.href")
+        final_session_url = current_url if isinstance(current_url, str) else target_url
+
+        return AgentResponse(
+            session_url=final_session_url,
+            text="",
+            image_urls=[],
+            message_sent=prompt,
+            is_new_conversation=session_url is None,
+        )
+
+    async def canvas_add_text(self, params: dict) -> AgentResponse:
+        """Place text on the canvas via the 文本 toolbar.
+
+        Use when: you want to add text content to the infinite canvas.
+
+        Args:
+            params: Dict with keys:
+                <SCHEMA_ARGS>
+
+        Returns:
+            AgentResponse with session_url.
+
+        Failure:
+            GrokAPIError — toolbar button not found or text input missing.
+            GrokConfigError — missing required canvas_text.
+        """
+        cleaned = validate_params(params, CANVAS_TEXT_KEYS)
+
+        text = cleaned.get("canvas_text")
+        if not text:
+            raise GrokConfigError("'canvas_text' is required for canvas_add_text()")
+
+        session_url = cleaned.get("session_url")
+
+        # 1. Navigate
+        target_url = await self._ensure_conversation(session_url)
+
+        # 2. Click 文本 toolbar button
+        if not await self._click_canvas_toolbar("文本"):
+            raise GrokAPIError("Could not find 文本 (Text) canvas toolbar button.")
+        await asyncio.sleep(0.5)
+
+        # 3. The text tool opens a text input on canvas — type into it
+        escaped = text.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
+        await self._tab.evaluate(
+            f"""
+            (() => {{
+                // After clicking 文本, a contenteditable text node appears on canvas
+                const editables = document.querySelectorAll('[contenteditable="true"]');
+                for (const ed of editables) {{
+                    const r = ed.getBoundingClientRect();
+                    // Canvas text input is in the react-flow area (not the chat panel)
+                    if (r.y < 800 && ed.offsetHeight > 0) {{
+                        ed.focus();
+                        document.execCommand('insertText', false, `{escaped}`);
+                        return 'ok';
+                    }}
+                }}
+                return 'no-text-input';
+            }})()
+            """
+        )
+        await asyncio.sleep(0.5)
+
+        # Click elsewhere on canvas to deselect
+        await self._tab.evaluate(
+            """
+            (() => {
+                const rf = document.querySelector('.react-flow__pane');
+                if (rf) rf.click();
+            })()
+            """
+        )
+
+        current_url = await self._tab.evaluate("window.location.href")
+        final_session_url = current_url if isinstance(current_url, str) else target_url
+
+        return AgentResponse(
+            session_url=final_session_url,
+            text="",
+            image_urls=[],
+            message_sent=text,
+            is_new_conversation=session_url is None,
+        )
+
+    async def canvas_upload_image(self, params: dict) -> AgentResponse:
+        """Upload a local image to the canvas via the 上传图片 toolbar.
+
+        Use when: you want to place an existing image on the canvas.
+
+        Args:
+            params: Dict with keys:
+                <SCHEMA_ARGS>
+
+        Returns:
+            AgentResponse with session_url.
+
+        Failure:
+            GrokAPIError — toolbar button not found or upload failed.
+            GrokConfigError — missing required file_path or file not found.
+        """
+        cleaned = validate_params(params, CANVAS_UPLOAD_KEYS)
+
+        file_path = cleaned.get("file_path")
+        if not file_path:
+            raise GrokConfigError("'file_path' is required for canvas_upload_image()")
+
+        from pathlib import Path as _Path
+
+        path = _Path(file_path)
+        if not path.exists():
+            raise GrokConfigError(f"File not found: {file_path}")
+
+        session_url = cleaned.get("session_url")
+
+        # 1. Navigate
+        target_url = await self._ensure_conversation(session_url)
+
+        # 2. Click 上传图片 toolbar button
+        if not await self._click_canvas_toolbar("上传图片"):
+            raise GrokAPIError("Could not find 上传图片 (Upload Image) canvas toolbar button.")
+        await asyncio.sleep(0.5)
+
+        # 3. Set file on the hidden file input
+        from ai_dev_browser import cdp
+
+        # Find the file input element
+        abs_path = str(path.resolve())
+        file_set = await self._tab.evaluate(
+            """
+            JSON.stringify((() => {
+                const inputs = document.querySelectorAll('input[type="file"]');
+                for (const inp of inputs) {
+                    return {found: true, id: inp.id, name: inp.name};
+                }
+                return {found: false};
+            })())
+            """
+        )
+
+        if isinstance(file_set, str):
+            file_set = json_mod.loads(file_set)
+
+        if not file_set or not file_set.get("found"):
+            raise GrokAPIError("File input element not found after clicking 上传图片")
+
+        # Use CDP DOM.setFileInputFiles to set the file
+        # First get the file input node
+        doc = await self._tab.send(cdp.dom.get_document())
+        file_input_node = await self._tab.send(
+            cdp.dom.query_selector(doc.node_id, 'input[type="file"]')
+        )
+        if file_input_node:
+            await self._tab.send(
+                cdp.dom.set_file_input_files(
+                    files=[abs_path],
+                    node_id=file_input_node,
+                )
+            )
+            await asyncio.sleep(2)
+
+        current_url = await self._tab.evaluate("window.location.href")
+        final_session_url = current_url if isinstance(current_url, str) else target_url
+
+        return AgentResponse(
+            session_url=final_session_url,
+            text="",
+            image_urls=[],
+            message_sent=str(file_path),
+            is_new_conversation=session_url is None,
+        )
+
+
+# Splice schema into docstrings at module load
 from .schema import splice_schema_into_docstring  # noqa: E402
 
 GrokAgentClient.send.__doc__ = splice_schema_into_docstring(
     GrokAgentClient.send.__doc__, AGENT_KEYS
+)
+GrokAgentClient.canvas_generate_image.__doc__ = splice_schema_into_docstring(
+    GrokAgentClient.canvas_generate_image.__doc__, CANVAS_IMAGE_KEYS
+)
+GrokAgentClient.canvas_generate_video.__doc__ = splice_schema_into_docstring(
+    GrokAgentClient.canvas_generate_video.__doc__, CANVAS_VIDEO_KEYS
+)
+GrokAgentClient.canvas_add_text.__doc__ = splice_schema_into_docstring(
+    GrokAgentClient.canvas_add_text.__doc__, CANVAS_TEXT_KEYS
+)
+GrokAgentClient.canvas_upload_image.__doc__ = splice_schema_into_docstring(
+    GrokAgentClient.canvas_upload_image.__doc__, CANVAS_UPLOAD_KEYS
 )

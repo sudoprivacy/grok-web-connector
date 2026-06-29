@@ -249,6 +249,27 @@ PARAMS: dict[str, dict[str, Any]] = {
         "type": "str",
         "default": "url",
     },
+    # --- Agent Mode canvas params (GrokAgentClient canvas tools) ---
+    "image_count": {
+        "desc": (
+            "Number of images to generate on the canvas (1-4). "
+            "Maps to the 图像数量 (Image Count) selector in the "
+            "canvas generate-image prompt UI."
+        ),
+        "type": "int",
+        "default": 2,
+    },
+    "canvas_text": {
+        "desc": "Text content to place on the canvas via the 文本 (Text) tool.",
+        "type": "str",
+    },
+    "file_path": {
+        "desc": (
+            "Local file path for canvas_upload_image. The file is "
+            "uploaded via the 上传图片 toolbar button's file input."
+        ),
+        "type": "str",
+    },
     # --- Agent Mode params (GrokAgentClient) ---
     "message": {
         "desc": (
@@ -395,6 +416,37 @@ AGENT_KEYS = [
     "timeout",
     "wait_for_images",
     "agent_model",
+]
+
+# Keys accepted by GrokAgentClient.canvas_generate_image({...}).
+CANVAS_IMAGE_KEYS = [
+    "prompt",
+    "aspect_ratio",
+    "quality",
+    "image_count",
+    "session_url",
+    "timeout",
+]
+
+# Keys accepted by GrokAgentClient.canvas_generate_video({...}).
+CANVAS_VIDEO_KEYS = [
+    "prompt",
+    "session_url",
+    "timeout",
+]
+
+# Keys accepted by GrokAgentClient.canvas_add_text({...}).
+CANVAS_TEXT_KEYS = [
+    "canvas_text",
+    "session_url",
+    "timeout",
+]
+
+# Keys accepted by GrokAgentClient.canvas_upload_image({...}).
+CANVAS_UPLOAD_KEYS = [
+    "file_path",
+    "session_url",
+    "timeout",
 ]
 
 WAIT_FOR_COMPLETION_KEYS = [
