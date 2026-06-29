@@ -1238,6 +1238,92 @@ class TestAgentCanvasToolsSchema:
 
 
 # ---------------------------------------------------------------------------
+# Scenario 10: agent_image_actions_and_project_management
+#   Phase 3 (image actions) + Phase 4 (project management) method contracts
+# ---------------------------------------------------------------------------
+
+
+class TestAgentImageActionsAndProjectManagement:
+    """Phase 3+4: image actions + project management method existence."""
+
+    @pytest.mark.parametrize(
+        "method_name",
+        [
+            "download_image",
+            "delete_canvas_image",
+            "like_canvas_image",
+            "dislike_canvas_image",
+            "animate_canvas_image",
+            "crop_canvas_image",
+            "fullscreen_canvas_image",
+        ],
+    )
+    def test_image_action_methods_exist(self, method_name):
+        """Phase 3 image action methods exist on GrokAgentClient."""
+        assert hasattr(GrokAgentClient, method_name), (
+            f"GrokAgentClient missing method {method_name}"
+        )
+        assert callable(getattr(GrokAgentClient, method_name))
+
+    @pytest.mark.parametrize(
+        "method_name",
+        [
+            "list_conversations",
+            "new_project",
+            "new_agent",
+            "rename_conversation",
+            "delete_conversation",
+        ],
+    )
+    def test_project_management_methods_exist(self, method_name):
+        """Phase 4 project management methods exist on GrokAgentClient."""
+        assert hasattr(GrokAgentClient, method_name), (
+            f"GrokAgentClient missing method {method_name}"
+        )
+        assert callable(getattr(GrokAgentClient, method_name))
+
+    @pytest.mark.parametrize(
+        "method_name",
+        [
+            "download_image",
+            "delete_canvas_image",
+            "like_canvas_image",
+            "dislike_canvas_image",
+            "animate_canvas_image",
+            "crop_canvas_image",
+            "fullscreen_canvas_image",
+        ],
+    )
+    def test_image_action_docstrings(self, method_name):
+        """Image action methods have Use when: + Failure: docstrings."""
+        doc = (getattr(GrokAgentClient, method_name).__doc__ or "").strip()
+        first_line = doc.split("\n", 1)[0].lower()
+        assert "use when" in first_line, (
+            f"{method_name} first line should be 'Use when:'; got: {first_line!r}"
+        )
+        assert "failure:" in doc.lower(), f"{method_name} needs a Failure: section"
+
+    @pytest.mark.parametrize(
+        "method_name",
+        [
+            "list_conversations",
+            "new_project",
+            "new_agent",
+            "rename_conversation",
+            "delete_conversation",
+        ],
+    )
+    def test_project_management_docstrings(self, method_name):
+        """Project management methods have Use when: + Failure: docstrings."""
+        doc = (getattr(GrokAgentClient, method_name).__doc__ or "").strip()
+        first_line = doc.split("\n", 1)[0].lower()
+        assert "use when" in first_line, (
+            f"{method_name} first line should be 'Use when:'; got: {first_line!r}"
+        )
+        assert "failure:" in doc.lower(), f"{method_name} needs a Failure: section"
+
+
+# ---------------------------------------------------------------------------
 # Smoke test — imports
 # ---------------------------------------------------------------------------
 

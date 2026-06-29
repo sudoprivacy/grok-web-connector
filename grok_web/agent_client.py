@@ -1416,6 +1416,460 @@ class GrokAgentClient:
             is_new_conversation=session_url is None,
         )
 
+    # =========================================================================
+    # Phase 3: Image actions — floating toolbar on selected canvas image
+    #
+    # Validated 2026-06-29 via e2e:
+    # react-flow__node-toolbar appears when a canvas node is selected.
+    # Contains icon-only buttons identified by hover tooltips:
+    #   制作视频, 裁剪, 全屏, 下载, Share, Good result, Bad result, 删除⌫
+    # =========================================================================
+
+    async def _select_canvas_node(self, node_index: int = 0) -> str | None:
+        """Click a canvas node to select it. Returns node data-id or None."""
+        from ai_dev_browser import cdp
+
+        node_info = await self._evaluate_json(
+            f"""
+            JSON.stringify((() => {{
+                const nodes = document.querySelectorAll('.react-flow__node');
+                const visible = [];
+                for (const n of nodes) {{
+                    const r = n.getBoundingClientRect();
+                    if (r.x > 0 && r.y > 0 && r.x < window.innerWidth && r.y < window.innerHeight) {{
+                        visible.push({{
+                            id: n.getAttribute('data-id'),
+                            x: Math.round(r.x + r.width/2),
+                            y: Math.round(r.y + r.height/2),
+                        }});
+                    }}
+                }}
+                return visible[{node_index}] || null;
+            }})())
+            """
+        )
+        if not isinstance(node_info, dict):
+            return None
+
+        cx, cy = node_info["x"], node_info["y"]
+        await self._tab.send(cdp.input_.dispatch_mouse_event(type_="mouseMoved", x=cx, y=cy))
+        await asyncio.sleep(0.2)
+        await self._tab.send(
+            cdp.input_.dispatch_mouse_event(
+                type_="mousePressed",
+                x=cx,
+                y=cy,
+                button=cdp.input_.MouseButton("left"),
+                click_count=1,
+            )
+        )
+        await self._tab.send(
+            cdp.input_.dispatch_mouse_event(
+                type_="mouseReleased",
+                x=cx,
+                y=cy,
+                button=cdp.input_.MouseButton("left"),
+                click_count=1,
+            )
+        )
+        await asyncio.sleep(0.5)
+        return node_info.get("id")
+
+    async def _click_node_toolbar_button(self, tooltip_match: str) -> bool:
+        """Click a button on the floating node toolbar by tooltip text.
+
+        The toolbar buttons are icon-only — we hover each to read the
+        Radix tooltip and click the match.
+        """
+        from ai_dev_browser import cdp
+
+        buttons = await self._evaluate_json(
+            """
+            JSON.stringify((() => {
+                const tb = document.querySelector('.react-flow__node-toolbar');
+                if (!tb) return [];
+                const btns = tb.querySelectorAll('button');
+                const items = [];
+                for (const b of btns) {
+                    if (b.offsetHeight > 0) {
+                        const r = b.getBoundingClientRect();
+                        items.push({
+                            x: Math.round(r.x + r.width/2),
+                            y: Math.round(r.y + r.height/2),
+                        });
+                    }
+                }
+                return items;
+            })())
+            """
+        )
+        if not isinstance(buttons, list) or not buttons:
+            return False
+
+        for pos in buttons:
+            await self._tab.send(
+                cdp.input_.dispatch_mouse_event(type_="mouseMoved", x=pos["x"], y=pos["y"])
+            )
+            await asyncio.sleep(0.6)
+            tip = await self._evaluate_json(
+                """
+                JSON.stringify((() => {
+                    const tips = document.querySelectorAll(
+                        '[role="tooltip"], [data-radix-portal]'
+                    );
+                    for (const t of tips) {
+                        const text = (t.textContent || '').trim();
+                        if (text && t.offsetHeight > 0) return text;
+                    }
+                    return '';
+                })())
+                """
+            )
+            await self._tab.send(cdp.input_.dispatch_mouse_event(type_="mouseMoved", x=0, y=0))
+            await asyncio.sleep(0.15)
+
+            if isinstance(tip, str) and tooltip_match in tip:
+                await self._tab.send(
+                    cdp.input_.dispatch_mouse_event(type_="mouseMoved", x=pos["x"], y=pos["y"])
+                )
+                await asyncio.sleep(0.1)
+                await self._tab.send(
+                    cdp.input_.dispatch_mouse_event(
+                        type_="mousePressed",
+                        x=pos["x"],
+                        y=pos["y"],
+                        button=cdp.input_.MouseButton("left"),
+                        click_count=1,
+                    )
+                )
+                await self._tab.send(
+                    cdp.input_.dispatch_mouse_event(
+                        type_="mouseReleased",
+                        x=pos["x"],
+                        y=pos["y"],
+                        button=cdp.input_.MouseButton("left"),
+                        click_count=1,
+                    )
+                )
+                await asyncio.sleep(0.5)
+                return True
+
+        return False
+
+    async def download_image(self, node_index: int = 0) -> bool:
+        """Use when: you want to download a canvas image to local disk.
+
+        Clicks the 下载 (Download) button on the selected image's floating toolbar.
+
+        Failure:
+            Returns False if no node found or download button missing.
+        """
+        node_id = await self._select_canvas_node(node_index)
+        if not node_id:
+            return False
+        return await self._click_node_toolbar_button("下载")
+
+    async def delete_canvas_image(self, node_index: int = 0) -> bool:
+        """Use when: you want to remove an image from the canvas.
+
+        Clicks the 删除 (Delete) button on the selected image's floating toolbar.
+
+        Failure:
+            Returns False if no node found or delete button missing.
+        """
+        node_id = await self._select_canvas_node(node_index)
+        if not node_id:
+            return False
+        return await self._click_node_toolbar_button("删除")
+
+    async def like_canvas_image(self, node_index: int = 0) -> bool:
+        """Use when: you want to give positive feedback on a canvas image.
+
+        Clicks the Good result button on the floating toolbar.
+
+        Failure:
+            Returns False if no node found or button missing.
+        """
+        node_id = await self._select_canvas_node(node_index)
+        if not node_id:
+            return False
+        return await self._click_node_toolbar_button("Good result")
+
+    async def dislike_canvas_image(self, node_index: int = 0) -> bool:
+        """Use when: you want to give negative feedback on a canvas image.
+
+        Clicks the Bad result button on the floating toolbar.
+
+        Failure:
+            Returns False if no node found or button missing.
+        """
+        node_id = await self._select_canvas_node(node_index)
+        if not node_id:
+            return False
+        return await self._click_node_toolbar_button("Bad result")
+
+    async def animate_canvas_image(self, node_index: int = 0) -> bool:
+        """Use when: you want to create a video from a canvas image.
+
+        Clicks the 制作视频 (Make video) button on the floating toolbar.
+
+        Failure:
+            Returns False if no node found or button missing.
+        """
+        node_id = await self._select_canvas_node(node_index)
+        if not node_id:
+            return False
+        return await self._click_node_toolbar_button("制作视频")
+
+    async def crop_canvas_image(self, node_index: int = 0) -> bool:
+        """Use when: you want to crop a canvas image.
+
+        Clicks the 裁剪 (Crop) button on the floating toolbar.
+
+        Failure:
+            Returns False if no node found or button missing.
+        """
+        node_id = await self._select_canvas_node(node_index)
+        if not node_id:
+            return False
+        return await self._click_node_toolbar_button("裁剪")
+
+    async def fullscreen_canvas_image(self, node_index: int = 0) -> bool:
+        """Use when: you want to view a canvas image in fullscreen.
+
+        Clicks the 全屏 (Fullscreen) button on the floating toolbar.
+
+        Failure:
+            Returns False if no node found or button missing.
+        """
+        node_id = await self._select_canvas_node(node_index)
+        if not node_id:
+            return False
+        return await self._click_node_toolbar_button("全屏")
+
+    # =========================================================================
+    # Phase 4: Project management
+    #
+    # Validated 2026-06-29 via e2e:
+    # - Sidebar conversation items: div[class*="menu-button"] at x < 250
+    # - Hover reveals button[aria-label="备选方案"] (context menu trigger)
+    # - Context menu options: 重命名 (Rename), 删除 (Delete)
+    # - 新项目 button at top of sidebar
+    # - 新建代理 button in chat panel header
+    # =========================================================================
+
+    async def list_conversations(self) -> list[str]:
+        """Use when: you want to see all conversation history in the sidebar.
+
+        Returns a list of conversation titles from the sidebar.
+
+        Failure:
+            Returns empty list if sidebar not visible.
+        """
+        result = await self._evaluate_json(
+            """
+            JSON.stringify((() => {
+                const items = document.querySelectorAll('div[class*="menu-button"]');
+                const convos = [];
+                for (const b of items) {
+                    const text = (b.textContent || '').trim();
+                    const r = b.getBoundingClientRect();
+                    if (r.x < 250 && r.y > 180 && b.offsetHeight > 0 && text) {
+                        convos.push(text);
+                    }
+                }
+                return convos;
+            })())
+            """
+        )
+        return result if isinstance(result, list) else []
+
+    async def new_project(self) -> bool:
+        """Use when: you want to create a new project in the sidebar.
+
+        Clicks the 新项目 (New Project) button.
+
+        Failure:
+            Returns False if button not found.
+        """
+        clicked = await self._tab.evaluate(
+            """
+            (() => {
+                const btn = document.querySelector('button[aria-label="新项目"]');
+                if (btn && btn.offsetHeight > 0) {
+                    btn.click();
+                    return true;
+                }
+                return false;
+            })()
+            """
+        )
+        return bool(clicked)
+
+    async def new_agent(self) -> bool:
+        """Use when: you want to start a new conversation thread.
+
+        Clicks the 新建代理 / New agent button in the chat panel header.
+
+        Failure:
+            Returns False if button not found.
+        """
+        clicked = await self._tab.evaluate(
+            """
+            (() => {
+                // Look for 新建代理 button in various locations
+                const candidates = document.querySelectorAll('button, span');
+                for (const el of candidates) {
+                    const text = (el.textContent || '').trim();
+                    const ariaLabel = el.getAttribute('aria-label') || '';
+                    if ((text === '新建代理' || ariaLabel === '新建代理'
+                         || text === 'New agent' || ariaLabel === 'New agent')
+                        && el.offsetHeight > 0) {
+                        el.click();
+                        return true;
+                    }
+                }
+                return false;
+            })()
+            """
+        )
+        if clicked:
+            await asyncio.sleep(2)
+        return bool(clicked)
+
+    async def _open_conversation_menu(self, conversation_title: str) -> bool:
+        """Hover a sidebar conversation item and click 备选方案 context menu."""
+        from ai_dev_browser import cdp
+
+        escaped = conversation_title.replace("\\", "\\\\").replace("'", "\\'")
+        pos = await self._evaluate_json(
+            f"""
+            JSON.stringify((() => {{
+                const items = document.querySelectorAll('div[class*="menu-button"]');
+                for (const b of items) {{
+                    const text = (b.textContent || '').trim();
+                    const r = b.getBoundingClientRect();
+                    if (r.x < 250 && r.y > 180 && b.offsetHeight > 0
+                        && text.includes('{escaped}')) {{
+                        return {{
+                            x: Math.round(r.x + r.width - 20),
+                            y: Math.round(r.y + r.height / 2),
+                        }};
+                    }}
+                }}
+                return null;
+            }})())
+            """
+        )
+        if not isinstance(pos, dict):
+            return False
+
+        # Hover to reveal 备选方案 button
+        await self._tab.send(
+            cdp.input_.dispatch_mouse_event(type_="mouseMoved", x=pos["x"], y=pos["y"])
+        )
+        await asyncio.sleep(0.5)
+
+        # Click 备选方案 button
+        clicked = await self._tab.evaluate(
+            """
+            (() => {
+                const btns = document.querySelectorAll('button[aria-label="备选方案"]');
+                for (const b of btns) {
+                    if (b.offsetHeight > 0) {
+                        b.click();
+                        return true;
+                    }
+                }
+                return false;
+            })()
+            """
+        )
+        await asyncio.sleep(0.5)
+        return bool(clicked)
+
+    async def rename_conversation(self, conversation_title: str, new_name: str) -> bool:
+        """Use when: you want to rename a conversation in the sidebar.
+
+        Failure:
+            Returns False if conversation not found or rename failed.
+        """
+        if not await self._open_conversation_menu(conversation_title):
+            return False
+
+        # Click 重命名 menu item
+        clicked = await self._tab.evaluate(
+            """
+            (() => {
+                const items = document.querySelectorAll('[role="menuitem"]');
+                for (const i of items) {
+                    if ((i.textContent || '').trim() === '重命名' && i.offsetHeight > 0) {
+                        i.click();
+                        return true;
+                    }
+                }
+                return false;
+            })()
+            """
+        )
+        if not clicked:
+            return False
+
+        await asyncio.sleep(0.5)
+
+        # Type new name into the rename input
+        escaped_name = new_name.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
+        renamed = await self._tab.evaluate(
+            f"""
+            (() => {{
+                const inputs = document.querySelectorAll('input[type="text"], input:not([type])');
+                for (const inp of inputs) {{
+                    if (inp.offsetHeight > 0) {{
+                        inp.focus();
+                        inp.select();
+                        document.execCommand('insertText', false, `{escaped_name}`);
+                        // Confirm with Enter
+                        inp.dispatchEvent(new KeyboardEvent('keydown', {{
+                            key: 'Enter', code: 'Enter', keyCode: 13,
+                            bubbles: true, cancelable: true
+                        }}));
+                        return true;
+                    }}
+                }}
+                return false;
+            }})()
+            """
+        )
+        await asyncio.sleep(0.5)
+        return bool(renamed)
+
+    async def delete_conversation(self, conversation_title: str) -> bool:
+        """Use when: you want to delete a conversation from the sidebar.
+
+        Failure:
+            Returns False if conversation not found or delete failed.
+        """
+        if not await self._open_conversation_menu(conversation_title):
+            return False
+
+        # Click 删除 menu item
+        clicked = await self._tab.evaluate(
+            """
+            (() => {
+                const items = document.querySelectorAll('[role="menuitem"]');
+                for (const i of items) {
+                    if ((i.textContent || '').trim() === '删除' && i.offsetHeight > 0) {
+                        i.click();
+                        return true;
+                    }
+                }
+                return false;
+            })()
+            """
+        )
+        await asyncio.sleep(1)
+        return bool(clicked)
+
 
 # Splice schema into docstrings at module load
 from .schema import splice_schema_into_docstring  # noqa: E402
