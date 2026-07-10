@@ -151,6 +151,80 @@ class TestSchemaToModel:
         assert len(result.image_urls) == 2
         assert result.success is True
 
+    def test_image_result_mod_by_layer_classifier(self):
+        """v0.19.31 attempts_trace + mod_by_layer diagnostic.
+
+        Simulate a batch: two prompt-intent rejects (no URL, fast),
+        one vision-output reject (URL + slow + frames), one uncertain
+        (URL but conflicting signals), one success. mod_by_layer must
+        aggregate the trace correctly.
+        """
+        result = ImageGenerationResult(
+            prompt="a benign portrait",
+            images=[],  # no gallery, we're only asserting trace math
+            attempts_trace=[
+                {
+                    "index": 0,
+                    "image_id": "a",
+                    "submit_to_first_frame_ms": 400,
+                    "frames_received": 1,
+                    "final_verdict": "moderated",
+                    "image_url": None,
+                    "estimated_mod_layer": "prompt_intent",
+                },
+                {
+                    "index": 1,
+                    "image_id": "b",
+                    "submit_to_first_frame_ms": 500,
+                    "frames_received": 2,
+                    "final_verdict": "moderated",
+                    "image_url": None,
+                    "estimated_mod_layer": "prompt_intent",
+                },
+                {
+                    "index": 2,
+                    "image_id": "c",
+                    "submit_to_first_frame_ms": 6800,
+                    "frames_received": 5,
+                    "final_verdict": "moderated",
+                    "image_url": "https://cdn/img.jpg",
+                    "estimated_mod_layer": "vision_output",
+                },
+                {
+                    "index": 3,
+                    "image_id": "d",
+                    "submit_to_first_frame_ms": 3000,
+                    "frames_received": 2,
+                    "final_verdict": "moderated",
+                    "image_url": "https://cdn/img.jpg",
+                    "estimated_mod_layer": "uncertain",
+                },
+                {
+                    "index": 4,
+                    "image_id": "e",
+                    "submit_to_first_frame_ms": 6100,
+                    "frames_received": 5,
+                    "final_verdict": "success",
+                    "image_url": "https://cdn/img.jpg",
+                    "estimated_mod_layer": None,  # non-moderated: no classification
+                },
+            ],
+        )
+        assert result.mod_by_layer == {
+            "prompt_intent": 2,
+            "vision_output": 1,
+            "uncertain": 1,
+        }, "mod_by_layer must aggregate estimated_mod_layer across trace"
+        # Non-moderated attempts don't get bucketed.
+        assert "success" not in result.mod_by_layer
+
+    def test_image_result_mod_by_layer_empty_trace(self):
+        """Backward compat: results built without attempts_trace (e.g.
+        old connector callers doing manual construction) return {}
+        for mod_by_layer rather than crashing."""
+        result = ImageGenerationResult(prompt="x", images=[])
+        assert result.mod_by_layer == {}
+
     def test_edit_params_validate_and_produce_result(self):
         """Workflow: edit params → validate → ImageEditResult → post_ids.
 
@@ -498,6 +572,73 @@ class TestPromptParsingToGeneration:
         result = parse_prompt("zoom into @1 and pan to @2", ["img1.jpg", "img2.jpg"])
         assert result is not None
         assert len(result) > 0
+
+
+class TestCreateImageModLayerInstrumentation:
+    """v0.19.31 attempts_trace instrumentation locks — source-level contracts.
+
+    Reporter's ask was per-attempt mod-layer diagnostic to distinguish
+    prompt-intent rejections (Grok's server rejected before pixel-gen)
+    from vision-output rejections (pixels were generated then flagged).
+    Locking the wiring at source level so regressions surface as test
+    failures instead of empty attempts_trace on real batches.
+    """
+
+    def test_captures_submit_timestamp(self):
+        """create_image must anchor submit_ts_ns (perf_counter_ns)
+        right after the submit click, before the fail-fast wait — that
+        anchor is what submit_to_first_frame_ms measures against."""
+        import inspect
+
+        src = inspect.getsource(GrokClient.create_image)
+        assert "submit_ts_ns" in src, (
+            "create_image must anchor a submit timestamp for the attempts_trace latency measurement"
+        )
+        assert "perf_counter_ns" in src, (
+            "must use perf_counter_ns (monotonic, NTP-safe) — wall "
+            "clock time.time() breaks under clock adjustments"
+        )
+
+    def test_captures_per_job_first_frame_and_count(self):
+        """WS handler must record first_frame_ts_ns + frame_count per
+        job. Without these, prompt_intent vs vision_output can't be
+        distinguished."""
+        import inspect
+
+        src = inspect.getsource(GrokClient.create_image)
+        assert "first_frame_ts_ns" in src, "WS handler must record first-frame ns timestamp per job"
+        assert "frame_count" in src, "WS handler must count frames per job (frame_count += 1)"
+
+    def test_builds_attempts_trace_with_layer_classification(self):
+        """create_image must build attempts_trace with the reporter's
+        heuristic keys + estimated_mod_layer classification."""
+        import inspect
+
+        src = inspect.getsource(GrokClient.create_image)
+        assert "attempts_trace" in src, "create_image must build attempts_trace"
+        # Reporter's schema keys
+        for key in (
+            "submit_to_first_frame_ms",
+            "frames_received",
+            "final_verdict",
+            "estimated_mod_layer",
+        ):
+            assert key in src, f"attempts_trace entry must include {key!r} per reporter's schema"
+        # Layer classifications
+        for layer in ("prompt_intent", "vision_output", "uncertain"):
+            assert layer in src, f"heuristic must classify moderated attempts into {layer!r}"
+
+    def test_strips_internal_telemetry_from_images(self):
+        """Internal telemetry keys (first_frame_ts_ns / frame_count) must
+        be stripped from result.images — those are impl detail, callers
+        get the diagnostic via result.attempts_trace."""
+        import inspect
+
+        src = inspect.getsource(GrokClient.create_image)
+        assert 'k not in ("first_frame_ts_ns", "frame_count")' in src, (
+            "internal telemetry keys must be stripped from images before "
+            "constructing ImageGenerationResult"
+        )
 
 
 # ---------------------------------------------------------------------------

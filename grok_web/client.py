@@ -4927,10 +4927,16 @@ class GrokClient(ResponseParser):
         # Set up WebSocket monitoring (imagine page uses wss://grok.com/ws/imagine/listen)
         await self._tab.send(cdp.network.enable())
 
-        captured_data: dict = {"jobs": {}}  # job_id -> job info
+        # ``submit_ts_ns`` is set right after the submit click succeeds
+        # (see the "Step 5b" fail-fast block). ``jobs`` maps job_id to
+        # per-job telemetry — first_frame_ts_ns / frame_count are the
+        # inputs to the mod-layer heuristic ( v0.19.31+).
+        captured_data: dict = {"jobs": {}, "submit_ts_ns": None}
 
         async def handle_ws_frame(event: cdp.network.WebSocketFrameReceived):
             """Capture WebSocket frames from imagine/listen endpoint."""
+            import time as _time
+
             try:
                 payload = event.response.payload_data
                 if not payload:
@@ -4955,7 +4961,12 @@ class GrokClient(ResponseParser):
                                 "prompt": data.get("prompt", ""),
                                 "full_prompt": data.get("full_prompt", ""),
                                 "model_name": data.get("model_name", ""),
+                                # v0.19.31: per-attempt mod-layer telemetry
+                                "first_frame_ts_ns": _time.perf_counter_ns(),
+                                "frame_count": 0,
                             }
+                        # Every json frame counts (including the first).
+                        captured_data["jobs"][job_id]["frame_count"] += 1
 
                         # Update progress
                         progress = data.get("percentage_complete", 0)
@@ -5352,6 +5363,11 @@ class GrokClient(ResponseParser):
         # default timeout (300s) makes a silent bug feel like a hang.
         # 30s is generous for the first ``json`` frame (normally arrives
         # in <3s) and short enough to surface the overlay hint quickly.
+        import time as _time_mod
+
+        # Anchor for the submit_to_first_frame_ms telemetry (v0.19.31).
+        # perf_counter_ns is monotonic and unaffected by NTP drift.
+        captured_data["submit_ts_ns"] = _time_mod.perf_counter_ns()
         wait_first = 30
         start_first = asyncio.get_event_loop().time()
         while asyncio.get_event_loop().time() - start_first < wait_first:
@@ -5717,11 +5733,80 @@ class GrokClient(ResponseParser):
             )
             self._gallery_ephemeral_hinted = True
 
+        # v0.19.31: build the per-attempt mod-layer trace. Reporter's
+        # heuristic: URL presence + latency + frame count discriminate
+        # prompt-intent rejection (fast fail, no pixels) from
+        # vision-output rejection (slow fail, pixels generated then
+        # flagged). Strip the internal telemetry keys from the raw job
+        # dicts so `result.images` stays free of implementation detail
+        # (attempts_trace carries the diagnostic).
+        submit_ts_ns = captured_data.get("submit_ts_ns")
+        attempts_trace: list[dict[str, Any]] = []
+        for index, job in enumerate(captured_data["jobs"].values()):
+            first_frame_ns = job.get("first_frame_ts_ns")
+            frames = int(job.get("frame_count", 0))
+            latency_ms: int | None = None
+            if submit_ts_ns and first_frame_ns:
+                latency_ms = max(0, (first_frame_ns - submit_ts_ns) // 1_000_000)
+            has_url = bool(job.get("image_url"))
+            is_moderated = bool(job.get("moderated"))
+            is_r_rated = bool(job.get("r_rated"))
+            if is_moderated:
+                final_verdict = "moderated"
+            elif is_r_rated:
+                final_verdict = "r_rated"
+            elif job.get("progress") == 100 and has_url:
+                final_verdict = "success"
+            else:
+                final_verdict = "incomplete"
+
+            # Layer classification only meaningful for moderated attempts.
+            estimated_mod_layer: str | None = None
+            if is_moderated:
+                fast_reject = latency_ms is not None and latency_ms < 1500
+                slow_reject = latency_ms is not None and latency_ms >= 5000
+                # image_url is the strongest signal — Grok templates the
+                # URL only after current_status == "completed" (pixels
+                # produced). No URL → gen never finished → server-side
+                # pre-gen reject.
+                if not has_url and (fast_reject or frames <= 2):
+                    estimated_mod_layer = "prompt_intent"
+                elif has_url and slow_reject and frames >= 3:
+                    estimated_mod_layer = "vision_output"
+                elif has_url:
+                    # URL present but timing/frame signals disagree — still
+                    # more likely vision_output than prompt_intent (pixels
+                    # got made), but flag as uncertain so callers know the
+                    # heuristic wasn't confident.
+                    estimated_mod_layer = "uncertain"
+                else:
+                    estimated_mod_layer = "uncertain"
+
+            attempts_trace.append(
+                {
+                    "index": index,
+                    "image_id": job.get("image_id", ""),
+                    "submit_to_first_frame_ms": latency_ms,
+                    "frames_received": frames,
+                    "final_verdict": final_verdict,
+                    "image_url": job.get("image_url") or None,
+                    "estimated_mod_layer": estimated_mod_layer,
+                }
+            )
+
+        # Drop internal telemetry keys from the images list — those are
+        # implementation detail. attempts_trace carries them.
+        clean_images = [
+            {k: v for k, v in job.items() if k not in ("first_frame_ts_ns", "frame_count")}
+            for job in images
+        ]
+
         return ImageGenerationResult(
             prompt=prompt,
-            images=images,
+            images=clean_images,
             conversation_id=None,  # Not available via WebSocket
             selected_post_ids=selected_post_ids,
+            attempts_trace=attempts_trace,
         )
 
     # Keyword pools for classifying probe text into typed exceptions.

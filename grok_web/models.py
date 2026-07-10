@@ -863,6 +863,25 @@ class ImageGenerationResult(BaseModel):
         description="Post IDs of images selected via thumbnail_selector callback",
     )
 
+    # Per-attempt moderation-layer diagnostic (v0.19.31+).
+    # Populated even when nothing was moderated — the trace also carries
+    # timing / frame-count telemetry for successful attempts, useful when
+    # profiling why a batch is slow (e.g. server delay vs pixel-gen time).
+    attempts_trace: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Per-image-attempt diagnostic. Each entry: "
+            "{index, image_id, submit_to_first_frame_ms, frames_received, "
+            "final_verdict, image_url, estimated_mod_layer}. "
+            "estimated_mod_layer classifies moderated attempts into "
+            "'prompt_intent' (Grok's server rejected before pixel-gen — "
+            "no image_url, fast fail) vs 'vision_output' (pixels were "
+            "generated then flagged — image_url present, slow fail) vs "
+            "'uncertain'. Non-moderated attempts have "
+            "estimated_mod_layer=None."
+        ),
+    )
+
     @computed_field
     @property
     def image_urls(self) -> list[str]:
@@ -890,6 +909,31 @@ class ImageGenerationResult(BaseModel):
     def r_rated_count(self) -> int:
         """Number of images flagged as R-rated (adult content)."""
         return sum(1 for img in self.images if img.get("r_rated"))
+
+    @computed_field
+    @property
+    def mod_by_layer(self) -> dict[str, int]:
+        """Aggregate mod-layer classification derived from attempts_trace.
+
+        Buckets:
+          - ``prompt_intent``: Grok's server rejected before pixel-gen
+            (fast fail, no image_url, ≤2 WS frames). Fixable by prompt
+            wording changes.
+          - ``vision_output``: pixels generated then flagged post-hoc
+            (slow fail, image_url present, ≥3 WS frames). Concept-level
+            rejection — reword rarely helps; must reshape the scene.
+          - ``uncertain``: signals are mixed; more probing needed.
+
+        Returns ``{}`` when ``attempts_trace`` is empty (e.g. old
+        connector versions or moderated-before-first-frame runs).
+        """
+        counts: dict[str, int] = {}
+        for entry in self.attempts_trace:
+            layer = entry.get("estimated_mod_layer")
+            if layer is None:
+                continue  # non-moderated attempts aren't classified
+            counts[layer] = counts.get(layer, 0) + 1
+        return counts
 
     @computed_field
     @property
