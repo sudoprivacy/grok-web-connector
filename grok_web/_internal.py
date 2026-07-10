@@ -27,6 +27,52 @@ from .models import (
 )
 
 # =============================================================================
+# Mod-layer classifier (create_image attempts_trace)
+# =============================================================================
+
+# Pixel gen normally takes ≥1.5s. A moderated attempt with image_url that
+# came back faster than this is suspicious — probably a cache hit or CDN
+# edge case, not a real "server ran vision-classifier on our pixels" event.
+_MOD_LAYER_VISION_MIN_LATENCY_MS = 1500
+
+
+def classify_mod_layer(
+    *,
+    is_moderated: bool,
+    has_image_url: bool,
+    latency_ms: int | None,
+) -> str | None:
+    """Classify a moderated attempt's mod layer for :attr:`attempts_trace`.
+
+    Returns one of ``"prompt_intent"`` / ``"vision_output"`` / ``"uncertain"``
+    for moderated attempts, or ``None`` when the attempt is not moderated
+    (nothing to classify).
+
+    Rules (v0.19.32; frame count is intentionally not consulted — see the
+    heuristic docstring in the ImageGenerationResult.attempts_trace field):
+
+    * not moderated                         → None
+    * moderated + no image_url              → prompt_intent
+    * moderated + image_url + latency <1.5s → uncertain
+    * moderated + image_url + latency ≥1.5s → vision_output
+    * moderated + image_url + latency None  → vision_output
+      (URL was templated, so pixel-gen ran to completion; safe default)
+
+    The heuristic is pure so it's cheap to unit-test and consistent
+    between the create_image call site and any downstream consumer that
+    wants to reclassify raw traces.
+    """
+    if not is_moderated:
+        return None
+    if not has_image_url:
+        return "prompt_intent"
+    # has image_url — pixel gen ran to `current_status: completed`.
+    if latency_ms is not None and latency_ms < _MOD_LAYER_VISION_MIN_LATENCY_MS:
+        return "uncertain"
+    return "vision_output"
+
+
+# =============================================================================
 # API Endpoint Constants
 # =============================================================================
 

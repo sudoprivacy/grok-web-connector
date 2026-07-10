@@ -5733,13 +5733,17 @@ class GrokClient(ResponseParser):
             )
             self._gallery_ephemeral_hinted = True
 
-        # v0.19.31: build the per-attempt mod-layer trace. Reporter's
-        # heuristic: URL presence + latency + frame count discriminate
-        # prompt-intent rejection (fast fail, no pixels) from
-        # vision-output rejection (slow fail, pixels generated then
-        # flagged). Strip the internal telemetry keys from the raw job
-        # dicts so `result.images` stays free of implementation detail
+        # v0.19.31: build the per-attempt mod-layer trace.
+        # v0.19.32: heuristic simplified — image_url presence is the
+        # primary discriminator (Grok templates image_url only when
+        # ``current_status == "completed"``). Frame count turned out
+        # to be unreliable (moderated attempts stream fewer frames
+        # than successes as Grok short-circuits after moderation).
+        # Strip the internal telemetry keys from the raw job dicts
+        # so ``result.images`` stays free of implementation detail
         # (attempts_trace carries the diagnostic).
+        from ._internal import classify_mod_layer
+
         submit_ts_ns = captured_data.get("submit_ts_ns")
         attempts_trace: list[dict[str, Any]] = []
         for index, job in enumerate(captured_data["jobs"].values()):
@@ -5760,27 +5764,21 @@ class GrokClient(ResponseParser):
             else:
                 final_verdict = "incomplete"
 
-            # Layer classification only meaningful for moderated attempts.
-            estimated_mod_layer: str | None = None
-            if is_moderated:
-                fast_reject = latency_ms is not None and latency_ms < 1500
-                slow_reject = latency_ms is not None and latency_ms >= 5000
-                # image_url is the strongest signal — Grok templates the
-                # URL only after current_status == "completed" (pixels
-                # produced). No URL → gen never finished → server-side
-                # pre-gen reject.
-                if not has_url and (fast_reject or frames <= 2):
-                    estimated_mod_layer = "prompt_intent"
-                elif has_url and slow_reject and frames >= 3:
-                    estimated_mod_layer = "vision_output"
-                elif has_url:
-                    # URL present but timing/frame signals disagree — still
-                    # more likely vision_output than prompt_intent (pixels
-                    # got made), but flag as uncertain so callers know the
-                    # heuristic wasn't confident.
-                    estimated_mod_layer = "uncertain"
-                else:
-                    estimated_mod_layer = "uncertain"
+            # Layer classification lives in _internal.classify_mod_layer
+            # so downstream consumers can reclassify raw traces (e.g.
+            # after a heuristic tuning round) without re-running the
+            # gen. Rule summary (full docstring on the helper):
+            #   not moderated              → None
+            #   moderated + no image_url   → prompt_intent
+            #   moderated + image_url +    → uncertain
+            #     latency < 1500 ms
+            #   moderated + image_url +    → vision_output
+            #     latency ≥ 1500 ms
+            estimated_mod_layer = classify_mod_layer(
+                is_moderated=is_moderated,
+                has_image_url=has_url,
+                latency_ms=latency_ms,
+            )
 
             attempts_trace.append(
                 {

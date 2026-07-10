@@ -906,12 +906,13 @@ class ImageGenerationResult(BaseModel):
             "Per-image-attempt diagnostic. Each entry: "
             "{index, image_id, submit_to_first_frame_ms, frames_received, "
             "final_verdict, image_url, estimated_mod_layer}. "
-            "estimated_mod_layer classifies moderated attempts into "
-            "'prompt_intent' (Grok's server rejected before pixel-gen — "
-            "no image_url, fast fail) vs 'vision_output' (pixels were "
-            "generated then flagged — image_url present, slow fail) vs "
-            "'uncertain'. Non-moderated attempts have "
-            "estimated_mod_layer=None."
+            "estimated_mod_layer classifies moderated attempts: "
+            "'prompt_intent' (no image_url — Grok aborted before pixel "
+            "generation ran to completion) vs 'vision_output' (image_url "
+            "present — pixels generated then flagged post-hoc) vs "
+            "'uncertain' (image_url present but latency <1500ms; "
+            "suspiciously fast, may be cached/CDN edge case). "
+            "Non-moderated attempts have estimated_mod_layer=None."
         ),
     )
 
@@ -949,13 +950,14 @@ class ImageGenerationResult(BaseModel):
         """Aggregate mod-layer classification derived from attempts_trace.
 
         Buckets:
-          - ``prompt_intent``: Grok's server rejected before pixel-gen
-            (fast fail, no image_url, ≤2 WS frames). Fixable by prompt
-            wording changes.
-          - ``vision_output``: pixels generated then flagged post-hoc
-            (slow fail, image_url present, ≥3 WS frames). Concept-level
-            rejection — reword rarely helps; must reshape the scene.
-          - ``uncertain``: signals are mixed; more probing needed.
+          - ``prompt_intent``: no image_url — Grok's server aborted
+            before pixel generation ran to completion. Fixable by
+            prompt wording changes.
+          - ``vision_output``: image_url present + latency ≥1500ms —
+            pixels generated then flagged post-hoc. Concept-level
+            rejection; reword rarely helps, must reshape the scene.
+          - ``uncertain``: image_url present but latency <1500ms
+            (suspiciously fast — may be cached / CDN edge case).
 
         Returns ``{}`` when ``attempts_trace`` is empty (e.g. old
         connector versions or moderated-before-first-frame runs).

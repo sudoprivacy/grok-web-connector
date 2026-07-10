@@ -159,72 +159,39 @@ class TestSchemaToModel:
         assert len(result.image_urls) == 2
         assert result.success is True
 
-    def test_image_result_mod_by_layer_classifier(self):
-        """v0.19.31 attempts_trace + mod_by_layer diagnostic.
+    def test_image_result_mod_by_layer_aggregate(self):
+        """mod_by_layer aggregates estimated_mod_layer across trace.
 
-        Simulate a batch: two prompt-intent rejects (no URL, fast),
-        one vision-output reject (URL + slow + frames), one uncertain
-        (URL but conflicting signals), one success. mod_by_layer must
-        aggregate the trace correctly.
+        Aggregate-math test: labels are pre-set on each attempt so we
+        can assert counting behaviour independently from the classifier.
+        See TestModLayerClassifier for the heuristic itself.
         """
         result = ImageGenerationResult(
             prompt="a benign portrait",
             images=[],  # no gallery, we're only asserting trace math
             attempts_trace=[
-                {
-                    "index": 0,
-                    "image_id": "a",
-                    "submit_to_first_frame_ms": 400,
-                    "frames_received": 1,
-                    "final_verdict": "moderated",
-                    "image_url": None,
-                    "estimated_mod_layer": "prompt_intent",
-                },
-                {
-                    "index": 1,
-                    "image_id": "b",
-                    "submit_to_first_frame_ms": 500,
-                    "frames_received": 2,
-                    "final_verdict": "moderated",
-                    "image_url": None,
-                    "estimated_mod_layer": "prompt_intent",
-                },
-                {
-                    "index": 2,
-                    "image_id": "c",
-                    "submit_to_first_frame_ms": 6800,
-                    "frames_received": 5,
-                    "final_verdict": "moderated",
-                    "image_url": "https://cdn/img.jpg",
-                    "estimated_mod_layer": "vision_output",
-                },
-                {
-                    "index": 3,
-                    "image_id": "d",
-                    "submit_to_first_frame_ms": 3000,
-                    "frames_received": 2,
-                    "final_verdict": "moderated",
-                    "image_url": "https://cdn/img.jpg",
-                    "estimated_mod_layer": "uncertain",
-                },
-                {
-                    "index": 4,
-                    "image_id": "e",
-                    "submit_to_first_frame_ms": 6100,
-                    "frames_received": 5,
-                    "final_verdict": "success",
-                    "image_url": "https://cdn/img.jpg",
-                    "estimated_mod_layer": None,  # non-moderated: no classification
-                },
+                {"index": i, "estimated_mod_layer": layer}
+                for i, layer in enumerate(
+                    [
+                        "prompt_intent",
+                        "prompt_intent",
+                        "vision_output",
+                        "vision_output",
+                        "vision_output",
+                        "uncertain",
+                        None,  # non-moderated: not bucketed
+                        None,
+                    ]
+                )
             ],
         )
         assert result.mod_by_layer == {
             "prompt_intent": 2,
-            "vision_output": 1,
+            "vision_output": 3,
             "uncertain": 1,
-        }, "mod_by_layer must aggregate estimated_mod_layer across trace"
-        # Non-moderated attempts don't get bucketed.
-        assert "success" not in result.mod_by_layer
+        }
+        # None (non-moderated) attempts are excluded.
+        assert None not in result.mod_by_layer
 
     def test_image_result_mod_by_layer_empty_trace(self):
         """Backward compat: results built without attempts_trace (e.g.
@@ -582,6 +549,90 @@ class TestPromptParsingToGeneration:
         assert len(result) > 0
 
 
+class TestModLayerClassifier:
+    """v0.19.32: classify_mod_layer heuristic — image_url is primary
+    signal, latency is tiebreaker for the has_url edge, frame count is
+    intentionally not consulted.
+
+    Reporter's real batch (2026-06 samples.html #12 debug): 48 moderated
+    attempts, all image_url=YES + latency 9-15s + frames_received=2. The
+    old rule required frames_received≥3 for vision_output → 100% fell
+    into uncertain. Fix: image_url present + latency≥1500ms = vision_output
+    regardless of frame count.
+    """
+
+    def test_non_moderated_returns_none(self):
+        """Non-moderated attempts aren't classified."""
+        from grok_web._internal import classify_mod_layer
+
+        assert classify_mod_layer(is_moderated=False, has_image_url=True, latency_ms=6000) is None
+        assert classify_mod_layer(is_moderated=False, has_image_url=False, latency_ms=None) is None
+
+    def test_moderated_no_url_is_prompt_intent(self):
+        """No image_url means pixel-gen never completed → prompt_intent
+        regardless of latency."""
+        from grok_web._internal import classify_mod_layer
+
+        # Fast reject
+        assert (
+            classify_mod_layer(is_moderated=True, has_image_url=False, latency_ms=200)
+            == "prompt_intent"
+        )
+        # Slow-but-still-no-URL — server took a while but never
+        # templated an image → still prompt-intent (pre-gen block).
+        assert (
+            classify_mod_layer(is_moderated=True, has_image_url=False, latency_ms=8000)
+            == "prompt_intent"
+        )
+        # Latency unknown (no frame ever arrived)
+        assert (
+            classify_mod_layer(is_moderated=True, has_image_url=False, latency_ms=None)
+            == "prompt_intent"
+        )
+
+    def test_moderated_url_slow_is_vision_output(self):
+        """Reporter's real-batch shape: has_url + latency 9-15s +
+        frames=2 → vision_output. Frame count is not consulted."""
+        from grok_web._internal import classify_mod_layer
+
+        # Reporter's actual observed values
+        for latency in (9000, 12000, 15000):
+            assert (
+                classify_mod_layer(is_moderated=True, has_image_url=True, latency_ms=latency)
+                == "vision_output"
+            ), f"has_url + moderated + latency={latency}ms must be vision_output"
+        # Boundary: exactly 1500ms
+        assert (
+            classify_mod_layer(is_moderated=True, has_image_url=True, latency_ms=1500)
+            == "vision_output"
+        )
+
+    def test_moderated_url_fast_is_uncertain(self):
+        """has_url + moderated but implausibly fast (<1500ms) → uncertain.
+        Pixel gen normally takes ≥1.5s; if URL came back sooner, likely
+        a cache hit or CDN edge case rather than a real pixel-classifier
+        event."""
+        from grok_web._internal import classify_mod_layer
+
+        for latency in (100, 500, 1000, 1499):
+            assert (
+                classify_mod_layer(is_moderated=True, has_image_url=True, latency_ms=latency)
+                == "uncertain"
+            ), f"has_url + moderated + latency={latency}ms must be uncertain"
+
+    def test_moderated_url_unknown_latency_defaults_to_vision_output(self):
+        """URL present means Grok reached ``current_status: completed``,
+        so pixel gen ran. When latency is None (rare — would require the
+        first WS frame carrying image_url), the safe classification is
+        vision_output rather than uncertain."""
+        from grok_web._internal import classify_mod_layer
+
+        assert (
+            classify_mod_layer(is_moderated=True, has_image_url=True, latency_ms=None)
+            == "vision_output"
+        )
+
+
 class TestCreateImageModLayerInstrumentation:
     """v0.19.31 attempts_trace instrumentation locks — source-level contracts.
 
@@ -619,7 +670,10 @@ class TestCreateImageModLayerInstrumentation:
 
     def test_builds_attempts_trace_with_layer_classification(self):
         """create_image must build attempts_trace with the reporter's
-        heuristic keys + estimated_mod_layer classification."""
+        heuristic keys + delegate estimated_mod_layer classification to
+        the shared _internal.classify_mod_layer helper (so downstream
+        consumers can reclassify raw traces after heuristic tuning
+        without re-running the gen)."""
         import inspect
 
         src = inspect.getsource(GrokClient.create_image)
@@ -632,9 +686,18 @@ class TestCreateImageModLayerInstrumentation:
             "estimated_mod_layer",
         ):
             assert key in src, f"attempts_trace entry must include {key!r} per reporter's schema"
-        # Layer classifications
+        # Classification is delegated to _internal (not inline).
+        assert "classify_mod_layer(" in src, (
+            "create_image must delegate classification to the shared "
+            "_internal.classify_mod_layer helper, not inline the rule"
+        )
+
+        # And the helper itself must know all three layer strings.
+        from grok_web import _internal
+
+        classifier_src = inspect.getsource(_internal.classify_mod_layer)
         for layer in ("prompt_intent", "vision_output", "uncertain"):
-            assert layer in src, f"heuristic must classify moderated attempts into {layer!r}"
+            assert layer in classifier_src, f"classify_mod_layer must emit the {layer!r} bucket"
 
     def test_strips_internal_telemetry_from_images(self):
         """Internal telemetry keys (first_frame_ts_ns / frame_count) must
