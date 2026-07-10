@@ -1526,6 +1526,28 @@ class TestAgentImageActionsAndProjectManagement:
         )
         assert "failure:" in doc.lower(), f"{method_name} needs a Failure: section"
 
+    @pytest.mark.parametrize(
+        "method_name",
+        [
+            "send",
+            "canvas_generate_image",
+            "canvas_generate_video",
+            "canvas_add_text",
+            "canvas_upload_image",
+        ],
+    )
+    def test_phase1_2_docstrings(self, method_name):
+        """Phase 1/2 methods (send + canvas_*) — v0.19.33 aligned their
+        first line to 'Use when:' decision signal (previously descriptive
+        first line, 'Use when:' buried on line 3). Locks the fix so
+        regressions surface as test failures."""
+        doc = (getattr(GrokAgentClient, method_name).__doc__ or "").strip()
+        first_line = doc.split("\n", 1)[0].lower()
+        assert "use when" in first_line, (
+            f"{method_name} first line should be 'Use when:'; got: {first_line!r}"
+        )
+        assert "failure:" in doc.lower(), f"{method_name} needs a Failure: section"
+
 
 # ---------------------------------------------------------------------------
 # Smoke test — imports

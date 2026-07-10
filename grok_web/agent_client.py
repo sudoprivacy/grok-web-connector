@@ -656,11 +656,11 @@ class GrokAgentClient:
     # =========================================================================
 
     async def send(self, params: dict) -> AgentResponse:
-        """Send a message to Grok Agent Mode and wait for response.
+        """Use when: you want conversational image/video generation on Agent Mode's canvas.
 
-        Use when: you want conversational image/video generation on Agent
-        Mode's infinite canvas. Pass a message and optionally a session_url
-        to resume a prior conversation.
+        Sends a message via the Agent Mode chat dialog and waits for the
+        reply. Pass a ``session_url`` in ``params`` to resume a prior
+        conversation; omit it to start a fresh thread.
 
         Args:
             params: Dict with keys:
@@ -1106,12 +1106,12 @@ class GrokAgentClient:
     # =========================================================================
 
     async def canvas_generate_image(self, params: dict) -> AgentResponse:
-        """Generate image(s) directly on the canvas via the 生成图片 toolbar.
+        """Use when: you want to place generated images directly on the canvas (no chat).
 
-        Use when: you want to place generated images directly on the
-        infinite canvas without going through the chat dialog. This
-        clicks the canvas toolbar's image button, fills the prompt,
-        and waits for generation.
+        Clicks the 生成图片 canvas-toolbar button, fills the prompt,
+        submits, and waits for the resulting image node(s) to appear
+        as react-flow nodes. Bypasses the chat dialog — use
+        :meth:`send` if you want a conversational reply instead.
 
         Args:
             params: Dict with keys:
@@ -1200,9 +1200,10 @@ class GrokAgentClient:
         )
 
     async def canvas_generate_video(self, params: dict) -> AgentResponse:
-        """Generate video on the canvas via the 生成视频 toolbar.
+        """Use when: you want to create a video directly on the canvas.
 
-        Use when: you want to create a video directly on the canvas.
+        Clicks the 生成视频 canvas-toolbar button, fills the prompt,
+        submits, and waits for the video node to render.
 
         Args:
             params: Dict with keys:
@@ -1255,9 +1256,10 @@ class GrokAgentClient:
         )
 
     async def canvas_add_text(self, params: dict) -> AgentResponse:
-        """Place text on the canvas via the 文本 toolbar.
+        """Use when: you want to add text content to the canvas.
 
-        Use when: you want to add text content to the infinite canvas.
+        Clicks the 文本 canvas-toolbar button and places the provided
+        text as a new canvas node.
 
         Args:
             params: Dict with keys:
@@ -1330,9 +1332,10 @@ class GrokAgentClient:
         )
 
     async def canvas_upload_image(self, params: dict) -> AgentResponse:
-        """Upload a local image to the canvas via the 上传图片 toolbar.
+        """Use when: you want to place an existing local image on the canvas.
 
-        Use when: you want to place an existing image on the canvas.
+        Clicks the 上传图片 canvas-toolbar button and uploads a local
+        file via its ``<input type="file">`` handle.
 
         Args:
             params: Dict with keys:
