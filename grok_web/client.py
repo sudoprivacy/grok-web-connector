@@ -4701,30 +4701,61 @@ class GrokClient(ResponseParser):
         async def _wait_body_or_nav(timeout_s: float) -> tuple[str, str] | None:
             """Return (mode, payload):
             ('body', ndjson_text) — got the full NDJSON body, normal path
-            ('url', video_id)     — tab navigated to post page; fall back
+            ('url', video_id)     — navigated to the post page AND the NDJSON
+                                    body never arrived within the grace
+                                    window; caller falls back to REST recovery
             ('failed', reason)    — CDP reported transport-level failure
+
+            The NDJSON body is STRONGLY preferred. On the 2026-07 Imagine UI
+            the frontend router.push'es to /imagine/post/{id} a beat before
+            the XHR stream closes, but the body DOES still arrive at
+            LoadingFinished (confirmed via live CDP capture). So on detecting
+            the post-page nav we do NOT abandon capture — we note it and keep
+            polling for the body up to NAV_GRACE_S, only returning 'url' if
+            the body genuinely never lands. url-recovery looks up a
+            freshly-minted id via /rest/media/post/get and is 404-prone
+            (upload2vid mints several variant ids that aren't immediately
+            queryable), so it is a last resort, never a race winner.
             """
+            NAV_GRACE_S = 20.0
             start = asyncio.get_event_loop().time()
+            nav_video_id: str | None = None
+            nav_seen_at: float | None = None
             while True:
                 if monitor.body is not None:
                     return ("body", monitor.body)
                 if monitor.failed_reason is not None:
                     return ("failed", monitor.failed_reason)
-                try:
-                    cur = await asyncio.wait_for(
-                        self._tab.evaluate(
-                            "window.location.href",
-                            await_promise=False,
-                            return_by_value=True,
-                        ),
-                        timeout=2.0,
-                    )
-                except Exception:
-                    cur = ""
-                if isinstance(cur, str):
-                    m = _post_re.search(cur)
-                    if m:
-                        return ("url", m.group(1))
+                if nav_video_id is None:
+                    try:
+                        cur = await asyncio.wait_for(
+                            self._tab.evaluate(
+                                "window.location.href",
+                                await_promise=False,
+                                return_by_value=True,
+                            ),
+                            timeout=2.0,
+                        )
+                    except Exception:
+                        cur = ""
+                    if isinstance(cur, str):
+                        m = _post_re.search(cur)
+                        if m:
+                            nav_video_id = m.group(1)
+                            nav_seen_at = asyncio.get_event_loop().time()
+                            logger.info(
+                                "video submit: tab navigated to post page (%s) "
+                                "before stream closed; preferring NDJSON body "
+                                "(grace %.0fs) over 404-prone url-recovery.",
+                                nav_video_id,
+                                NAV_GRACE_S,
+                            )
+                if (
+                    nav_video_id is not None
+                    and nav_seen_at is not None
+                    and asyncio.get_event_loop().time() - nav_seen_at > NAV_GRACE_S
+                ):
+                    return ("url", nav_video_id)
                 if asyncio.get_event_loop().time() - start > timeout_s:
                     return None
                 await asyncio.sleep(1.0)
@@ -5098,13 +5129,24 @@ class GrokClient(ResponseParser):
 
         # Step 1: Make sure 图片 text-toggle is active. On fresh /imagine
         # loads this is the default, but if the Chrome was reused from
-        # a 视频 generation the toggle may still be on 视频.
+        # a 视频 generation the toggle may still be on 视频 — in which case
+        # a txt2img submit silently generates a VIDEO instead.
+        # 2026-07 UI: the mode segmented-control is [role="radio"] and its
+        # label moved to aria-label (inactive radios are icon-only, empty
+        # textContent). The old `innerText==='图片' && !aria-label` selector
+        # matched nothing → silent no-op → stuck in 视频. Match the radio by
+        # aria-label OR text, and skip the click if it's already active.
         await self._tab.evaluate(
             r"""
             (() => {
-                const b = Array.from(document.querySelectorAll('button'))
-                    .find(x => (x.innerText||'').trim() === '图片' && !x.getAttribute('aria-label'));
-                if (!b) return;
+                const cands = Array.from(
+                    document.querySelectorAll('[role="radio"], button')
+                );
+                const b = cands.find(x =>
+                    (x.getAttribute('aria-label')||'').trim() === '图片'
+                    || (x.innerText||'').trim() === '图片');
+                if (!b) return 'no-toggle';
+                if (b.getAttribute('aria-checked') === 'true') return 'already';
                 const r = b.getBoundingClientRect();
                 const x = r.x + r.width/2, y = r.y + r.height/2;
                 const o = {bubbles:true, cancelable:true, clientX:x, clientY:y,
@@ -5114,6 +5156,7 @@ class GrokClient(ResponseParser):
                 b.dispatchEvent(new PointerEvent('pointerup', o));
                 b.dispatchEvent(new MouseEvent('mouseup', o));
                 b.dispatchEvent(new MouseEvent('click', o));
+                return 'clicked';
             })()
             """
         )
@@ -6931,19 +6974,31 @@ class GrokClient(ResponseParser):
             submenu = ("火辣", "Spicy")
             use_composer = False  # 火辣 fires immediately, ignores settings
         elif non_default_settings:
-            submenu = ("添加提示", "Add prompt")
+            # 2026-07: submenu labels went English ("Add Prompt" /
+            # "Quick Animate"); keep the older zh / lowercase variants as
+            # fallbacks. _click_menuitem matches case-sensitively.
+            submenu = ("添加提示", "Add prompt", "Add Prompt")
             use_composer = True
         else:
-            submenu = ("快速动画化", "Quick animate")
+            submenu = ("快速动画化", "Quick animate", "Quick Animate")
             use_composer = False
 
         await enable_focus_emulation(self._tab)
 
-        async with CDPMonitor(self._tab, "/app-chat/conversations/new") as monitor:
+        # 2026-07: img2vid-from-post submits to POST
+        # /conversations/{id}/responses (append to the source post's
+        # existing conversation), NOT /conversations/new — same migration
+        # edit_image hit. Match the shared prefix + POST method so we catch
+        # the submit without latching onto the same-prefix GET hydration
+        # read that fires first on nav. The response HOISTS the video onto
+        # result.streamingVideoGenerationResponse (parse handles both).
+        async with CDPMonitor(self._tab, "/app-chat/conversations/", method="POST") as monitor:
             await asyncio.sleep(0.5 + random.uniform(0, 0.5))
 
-            # 1. Click 动画 → open submenu
-            await self._click_inline_post_button("动画", "Animate")
+            # 1. Click 制作视频 (Make Video) → open submenu. 2026-07 renamed
+            # this inline entry from 动画 / Animate; keep old labels as
+            # fallbacks for UI drift.
+            await self._click_inline_post_button("制作视频", "Make Video", "动画", "Animate")
             await asyncio.sleep(1.0 * self._ui_delay)
 
             # 2. Click submenu item
@@ -7019,12 +7074,12 @@ class GrokClient(ResponseParser):
 
             if not await monitor.wait_for_request(timeout=10):
                 raise GrokAPIError(
-                    "generate_video_from_current: clicked the 动画 submenu "
-                    "but no /conversations/new request fired within 10s. "
-                    "Possible causes: composer settings raced the submit "
-                    "click, the page lost focus (focus emulation should "
-                    "prevent this), or Grok silently disabled the submit "
-                    "(rate-limited)."
+                    "generate_video_from_current: clicked through the "
+                    "制作视频 submenu but no POST /conversations/{new,"
+                    "<id>/responses} request fired within 10s. Possible "
+                    "causes: composer settings raced the submit click, the "
+                    "page lost focus (focus emulation should prevent this), "
+                    "or Grok silently disabled the submit (rate-limited)."
                 )
             await monitor.wait_for_body(timeout=timeout)
 

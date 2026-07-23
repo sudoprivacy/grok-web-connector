@@ -256,8 +256,10 @@ async def get_current_mode(tab) -> str:
             const radios = document.querySelectorAll('[role="radio"]');
             for (const r of radios) {
                 if (r.getAttribute('aria-checked') === 'true') {
-                    const text = r.textContent.trim();
-                    if (text === '图片' || text === '视频') return text;
+                    // 2026-07 UI: label lives in aria-label (textContent may
+                    // be empty on icon-only radios). Fall back to textContent.
+                    const label = (r.getAttribute('aria-label') || r.textContent || '').trim();
+                    if (label === '图片' || label === '视频') return label;
                 }
             }
             return '';
@@ -287,13 +289,18 @@ async def set_mode(tab, mode: str, *, delay: float = 1.0) -> str:
     if current == target:
         return current
 
-    # Find and click the target radio
+    # Find and click the target radio.
+    # 2026-07 UI: the mode segmented-control keeps the label in aria-label;
+    # inactive radios render icon-only with EMPTY textContent (only the
+    # active radio surfaces its text). Match aria-label first, fall back to
+    # textContent for older UIs. A third mode ('代理'/Agent) now also exists.
     clicked = await tab.evaluate(
         f"""
         (function() {{
             const radios = document.querySelectorAll('[role="radio"]');
             for (const r of radios) {{
-                if (r.textContent.trim() === '{target}') {{
+                const label = (r.getAttribute('aria-label') || r.textContent || '').trim();
+                if (label === '{target}') {{
                     r.click();
                     return true;
                 }}

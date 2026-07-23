@@ -124,9 +124,18 @@ def parse_video_ndjson_response(
             if "conversation" in result:
                 conversation_id = result["conversation"].get("conversationId")
 
+            # 2026-07: the /conversations/{id}/responses endpoint (img2vid
+            # from an existing post, video-extend, and other append-to-
+            # conversation flows) HOISTS the payload onto
+            # result.streamingVideoGenerationResponse. The classic
+            # /conversations/new path (txt2vid, upload2vid) nests it under
+            # result.response.streamingVideoGenerationResponse. Handle both,
+            # mirroring the edit_image _ingest_edit_image_line dual-nesting.
             response = result.get("response", {})
-            if "streamingVideoGenerationResponse" in response:
+            if isinstance(response, dict) and "streamingVideoGenerationResponse" in response:
                 video_result = response["streamingVideoGenerationResponse"]
+            elif "streamingVideoGenerationResponse" in result:
+                video_result = result["streamingVideoGenerationResponse"]
         except json.JSONDecodeError:
             continue
 

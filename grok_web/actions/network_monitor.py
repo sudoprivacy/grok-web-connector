@@ -28,9 +28,20 @@ class CDPMonitor:
             statsig_id = monitor.statsig_id
     """
 
-    def __init__(self, tab, url_pattern: str):
+    def __init__(self, tab, url_pattern: str, *, method: str | None = None):
+        """Watch requests whose URL contains ``url_pattern``.
+
+        Args:
+            url_pattern: substring matched against the request URL.
+            method: if given (e.g. "POST"), only requests using that HTTP
+                method are tracked. Lets callers widen url_pattern to a
+                shared prefix (e.g. "/app-chat/conversations/" to catch both
+                /new and /{id}/responses submits) without also latching onto
+                same-prefix GET hydration reads. Defaults to any method.
+        """
         self.tab = tab
         self.url_pattern = url_pattern
+        self.method = method
         self.request_id: str | None = None
         self.body: str | None = None
         self.statsig_id: str | None = None
@@ -53,6 +64,10 @@ class CDPMonitor:
             if not monitor._active:
                 return
             url = event.request.url
+            if monitor.method is not None and (
+                getattr(event.request, "method", None) != monitor.method
+            ):
+                return
             if monitor.url_pattern in url:
                 monitor.request_id = event.request_id
                 headers = event.request.headers
