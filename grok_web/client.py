@@ -66,6 +66,68 @@ DEFAULT_STATSIG_ID = (
     "W6IFgVSv2YSVxFj5Yt971KvAL1ldD75XJoGIR285iLdGPIiPNM7S1C9An8vmKsYbR9N5sF963w2iXoRhwSHYizPczaEUWA"
 )
 
+# edit_image / edit_current completion. Grok's image-edit stream returned
+# 2 side-by-side candidates pre-2026-07 and a single edited image as of
+# 2026-07. The old hardcoded ``len(completed) >= 2`` gate therefore never
+# fired once Grok dropped to 1 image, so every edit waited the full
+# ``timeout`` (default 180s) even though the image was ready in ~30-40s.
+# We now return as soon as every image that has streamed has reached
+# progress=100 AND the stream has stayed quiet for this settle window —
+# adaptive to whether Grok sends 1 or 2 images.
+_EDIT_STREAM_SETTLE_S = 4.0
+
+
+def _is_edit_stream_url(url: str) -> bool:
+    """True for the endpoints that stream image-edit results.
+
+    2026-07: the post-page inline edit composer submits to
+    ``POST /rest/app-chat/conversations/{conversation_id}/responses``
+    (appending a response to the source's existing conversation) instead
+    of the old ``POST /rest/app-chat/conversations/new``. The direct-REST
+    primary path still targets ``/new`` (Grok's backend keeps accepting
+    it), so both must be recognized.
+    """
+    if "/app-chat/conversations/new" in url:
+        return True
+    return url.rstrip("/").endswith("/responses")
+
+
+def _ingest_edit_image_line(data: dict, images: dict) -> None:
+    """Populate ``images`` from one parsed NDJSON line of an edit stream.
+
+    Handles both Grok payload shapes seen in the wild:
+
+    * ``/conversations/new`` (REST):
+      ``result.response.streamingImageGenerationResponse``
+    * ``/conversations/{id}/responses`` (UI, 2026-07): the field is hoisted
+      directly onto ``result.streamingImageGenerationResponse``.
+
+    ``post_id`` is an alias for ``image_id`` — each edit output IS a Grok
+    post with the same UUID, so callers can feed results straight into
+    ``create_video({"images": ["post:<id>"]})``.
+    """
+    result = data.get("result")
+    if not isinstance(result, dict):
+        return
+    resp = result.get("response")
+    if isinstance(resp, dict) and "streamingImageGenerationResponse" in resp:
+        img_resp = resp["streamingImageGenerationResponse"]
+    else:
+        img_resp = result.get("streamingImageGenerationResponse")
+    if not isinstance(img_resp, dict):
+        return
+    image_id = img_resp.get("imageId")
+    if not image_id:
+        return
+    # Later lines carry the final status (progress=100, moderated) — overwrite.
+    images[image_id] = {
+        "image_id": image_id,
+        "post_id": image_id,
+        "image_url": img_resp.get("imageUrl", ""),
+        "moderated": img_resp.get("moderated", False),
+        "progress": img_resp.get("progress", 0),
+    }
+
 
 # =============================================================================
 # ai-dev-browser launch_chrome stderr patch
@@ -3609,30 +3671,13 @@ class GrokClient(ResponseParser):
                             result = data.get("result", {})
 
                             # Capture conversation ID
-                            if "conversation" in result:
+                            if isinstance(result, dict) and "conversation" in result:
                                 captured_data["conversation_id"] = result["conversation"].get(
                                     "conversationId"
                                 )
 
-                            # Capture image generation responses
-                            response = result.get("response", {})
-                            if "streamingImageGenerationResponse" in response:
-                                img_resp = response["streamingImageGenerationResponse"]
-                                image_id = img_resp.get("imageId")
-                                if image_id:
-                                    # Update image data (later responses have final status).
-                                    # `post_id` is an alias for image_id — each edit output
-                                    # IS a Grok post and the UUID is the same. Exposed as
-                                    # a distinct key so callers feeding results into
-                                    # create_video({"images": ["post:<id>"]}) don't have
-                                    # to remember that image_id == post_id.
-                                    captured_data["images"][image_id] = {
-                                        "image_id": image_id,
-                                        "post_id": image_id,
-                                        "image_url": img_resp.get("imageUrl", ""),
-                                        "moderated": img_resp.get("moderated", False),
-                                        "progress": img_resp.get("progress", 0),
-                                    }
+                            # Capture image generation responses (both nestings)
+                            _ingest_edit_image_line(data, captured_data["images"])
                         except json_mod.JSONDecodeError:
                             continue
                 except Exception:
@@ -3819,19 +3864,36 @@ class GrokClient(ResponseParser):
                 f"statsig_id={'present' if statsig_id else 'MISSING'}"
             )
 
-        # Wait for response with timeout
-        start_time = asyncio.get_event_loop().time()
-        while asyncio.get_event_loop().time() - start_time < timeout:
-            # Check if we have completed images (progress=100)
-            completed = [
-                img for img in captured_data["images"].values() if img.get("progress") == 100
-            ]
-            if len(completed) >= 2:  # Edit generates 2 images
+        # Wait for the edit stream to settle (see _EDIT_STREAM_SETTLE_S).
+        loop = asyncio.get_event_loop()
+        start_time = loop.time()
+        last_change = start_time
+        last_sig: tuple[int, int] | None = None
+        while loop.time() - start_time < timeout:
+            imgs = captured_data["images"]
+            completed = [img for img in imgs.values() if img.get("progress") == 100]
+            sig = (len(imgs), len(completed))
+            if sig != last_sig:
+                last_sig = sig
+                last_change = loop.time()
+            # Done when every streamed image is complete and the stream has
+            # gone quiet — adaptive to Grok sending 1 (2026-07) or 2 images.
+            if (
+                completed
+                and len(completed) == len(imgs)
+                and loop.time() - last_change >= _EDIT_STREAM_SETTLE_S
+            ):
                 break
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.5)
 
         # Build result
         images = list(captured_data["images"].values())
+        logger.info(
+            "edit_image REST: %d image(s) in %.1fs (%d completed)",
+            len(images),
+            loop.time() - start_time,
+            sum(1 for i in images if i.get("progress") == 100),
+        )
 
         return ImageEditResult(
             post_id=post_id,
@@ -3910,10 +3972,17 @@ class GrokClient(ResponseParser):
         await self._tab.send(cdp.network.enable())
 
         # request_ids is a SET (not single value) — Grok's 2026-06 UI
-        # fires the /conversations/new POST multiple times per submit
-        # click (observed: 1–3 calls per click; auto-like + edit + retry
-        # internal). The pre-2026-06 single-id capture overwrote and
-        # missed the real image-edit response in that race. Track all.
+        # fires the edit POST multiple times per submit click (observed:
+        # 1–3 calls per click; auto-like + edit + retry internal). The
+        # pre-2026-06 single-id capture overwrote and missed the real
+        # image-edit response in that race. Track all.
+        #
+        # 2026-07: the submit endpoint moved from /conversations/new to
+        # /conversations/{id}/responses (see _is_edit_stream_url). The
+        # same post page also *hydrates* that conversation on load, which
+        # replays the source's prior images through the identical stream
+        # shape — so we clear captured images right before the submit
+        # click (below) to avoid ingesting stale history as edit output.
         captured_data: dict[str, Any] = {
             "conversation_id": None,
             "images": {},
@@ -3923,7 +3992,7 @@ class GrokClient(ResponseParser):
 
         async def handle_response(event: cdp.network.ResponseReceived):
             url = event.response.url
-            if "/app-chat/conversations/new" in url:
+            if _is_edit_stream_url(url):
                 captured_data["request_ids"].add(event.request_id)
 
         async def handle_loading_finished(event: cdp.network.LoadingFinished):
@@ -3954,22 +4023,11 @@ class GrokClient(ResponseParser):
                     try:
                         data = json_mod.loads(line)
                         result = data.get("result", {})
-                        if "conversation" in result:
+                        if isinstance(result, dict) and "conversation" in result:
                             captured_data["conversation_id"] = result["conversation"].get(
                                 "conversationId"
                             )
-                        response = result.get("response", {})
-                        if "streamingImageGenerationResponse" in response:
-                            img_resp = response["streamingImageGenerationResponse"]
-                            image_id = img_resp.get("imageId")
-                            if image_id:
-                                captured_data["images"][image_id] = {
-                                    "image_id": image_id,
-                                    "post_id": image_id,
-                                    "image_url": img_resp.get("imageUrl", ""),
-                                    "moderated": img_resp.get("moderated", False),
-                                    "progress": img_resp.get("progress", 0),
-                                }
+                        _ingest_edit_image_line(data, captured_data["images"])
                     except json_mod.JSONDecodeError:
                         continue
             except Exception:
@@ -4139,6 +4197,14 @@ class GrokClient(ResponseParser):
                 raise GrokAPIError("Could not find prompt editor (ProseMirror)")
             await asyncio.sleep(1 * d)
 
+        # Drop anything captured during page hydration (the source
+        # conversation's prior images replay through the same stream shape
+        # on load). Only responses observed after this point are the edit
+        # output. Without this, /conversations/{id}/responses hydration
+        # would seed captured_data["images"] with stale history.
+        captured_data["images"].clear()
+        captured_data["request_ids"].clear()
+
         # 6. Click 编辑 / Edit submit. We deliberately do NOT fall back
         # to 生成视频 if 编辑 is missing — that would silently generate
         # a video using the edit prompt (wrong API semantics and an
@@ -4173,20 +4239,32 @@ class GrokClient(ResponseParser):
                 "the post id."
             )
 
-        # Wait for response with timeout. Exit early if (a) we have 2
-        # completed images, or (b) the server returned a typed error
-        # — silently waiting the full timeout on a known error is the
-        # exact silent-hang bug callers were hitting.
-        start_time = asyncio.get_event_loop().time()
-        while asyncio.get_event_loop().time() - start_time < timeout:
+        # Wait for the edit stream to settle. Exit early if the server
+        # returned a typed error — silently waiting the full timeout on a
+        # known error is the exact silent-hang bug callers were hitting.
+        # Otherwise return once every streamed image is complete and the
+        # stream has gone quiet (see _EDIT_STREAM_SETTLE_S); the old
+        # ``>= 2`` gate never fired once Grok dropped to 1 image per edit.
+        loop = asyncio.get_event_loop()
+        start_time = loop.time()
+        last_change = start_time
+        last_sig: tuple[int, int] | None = None
+        while loop.time() - start_time < timeout:
             if captured_data.get("server_error"):
                 break
-            completed = [
-                img for img in captured_data["images"].values() if img.get("progress") == 100
-            ]
-            if len(completed) >= 2:
+            imgs = captured_data["images"]
+            completed = [img for img in imgs.values() if img.get("progress") == 100]
+            sig = (len(imgs), len(completed))
+            if sig != last_sig:
+                last_sig = sig
+                last_change = loop.time()
+            if (
+                completed
+                and len(completed) == len(imgs)
+                and loop.time() - last_change >= _EDIT_STREAM_SETTLE_S
+            ):
                 break
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.5)
 
         server_error = captured_data.get("server_error")
         images = list(captured_data["images"].values())
