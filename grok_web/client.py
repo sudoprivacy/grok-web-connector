@@ -3018,7 +3018,14 @@ class GrokClient(ResponseParser):
         # when the window lacks OS focus.
         await enable_focus_emulation(self._tab)
 
-        async with CDPMonitor(self._tab, "/app-chat/conversations/new") as monitor:
+        # 2026-07: video extend submits to POST /conversations/{id}/responses
+        # (append to the source video's existing conversation), NOT
+        # /conversations/new — same migration edit_image / img2vid-from-post
+        # hit. Match the shared prefix + POST method to catch the submit
+        # without latching onto the same-prefix GET hydration read. The
+        # response HOISTS the video onto result.streamingVideoGenerationResponse
+        # (parse_video_ndjson_response handles both nestings).
+        async with CDPMonitor(self._tab, "/app-chat/conversations/", method="POST") as monitor:
             await asyncio.sleep(1 + random.uniform(0, 0.5))
 
             # 1. Click the inline 扩展/Extend button. As of 2026-06 the
@@ -3083,11 +3090,11 @@ class GrokClient(ResponseParser):
 
             if not await monitor.wait_for_request(timeout=10):
                 raise GrokAPIError(
-                    "Extend did not trigger a generation request after "
-                    "clicking 生成视频. The button may still be disabled "
-                    "(missing prompt? seed not selected?) or the UI changed. "
-                    "Inspect the tab DOM for the 扩展 / Extend button "
-                    "state to debug."
+                    "Extend did not trigger a POST /conversations/{new,"
+                    "<id>/responses} request after clicking 生成视频. The "
+                    "button may still be disabled (missing prompt? seed not "
+                    "selected?) or the UI changed. Inspect the tab DOM for "
+                    "the 扩展 / Extend button state to debug."
                 )
             await monitor.wait_for_body(timeout=timeout)
 
