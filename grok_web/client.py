@@ -2412,10 +2412,10 @@ class GrokClient(ResponseParser):
                 return True  # already deleted
             raise
 
-        # A deleted/nonexistent video REDIRECTS to /imagine home in the
-        # 2026-07 UI rather than rendering a 404 page, so the check in
-        # _navigate_to_post_safe won't catch it. If the URL no longer
-        # points at this post, it's already gone — stay idempotent.
+        # An already-gone video doesn't render a 404 page in the 2026-07
+        # UI, so _navigate_to_post_safe won't catch it — it either
+        # redirects to /imagine home OR renders a blank post page that
+        # keeps the id in the URL. Fast-path the redirect case here.
         landed = str(await self._tab.evaluate("location.href") or "")
         if video_id not in landed:
             return True
@@ -2423,11 +2423,23 @@ class GrokClient(ResponseParser):
         # 2026-07: open 更多选项 / More options, then click the 删除视频
         # menuitem inside it. The confirmation dialog reuses the 删除视频
         # label as its confirm button.
-        await self._click_inline_post_button("更多选项", "More options")
-        await asyncio.sleep(1 * d)
-        await self._click_menuitem("删除视频", "Delete video")
-        await asyncio.sleep(1 * d)
-        await self._click_confirm_button("删除视频", "Delete video", "删除", "Delete")
+        try:
+            await self._click_inline_post_button("更多选项", "More options")
+            await asyncio.sleep(1 * d)
+            await self._click_menuitem("删除视频", "Delete video")
+            await asyncio.sleep(1 * d)
+            await self._click_confirm_button("删除视频", "Delete video", "删除", "Delete")
+        except GrokAPIError:
+            # The delete controls are absent. This is expected when the
+            # video already expired/was deleted — the blank post page has
+            # no buttons. Confirm existence via REST before surfacing the
+            # error: if it's gone, deletion is a no-op success (idempotent);
+            # otherwise the UI genuinely changed and we re-raise.
+            try:
+                await self.get_post_details(video_id)
+            except GrokNotFoundError:
+                return True
+            raise
         await asyncio.sleep(1 * d)
         return True
 
