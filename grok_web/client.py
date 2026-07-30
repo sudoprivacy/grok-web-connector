@@ -2374,11 +2374,16 @@ class GrokClient(ResponseParser):
             raise GrokAPIError(f"Post {post_id} not found (404)")
 
     async def delete_video(self, video_id: str) -> bool:
-        """Use when: removing a single child video post (2026-06 UI).
+        """Use when: removing a single child video post (2026-07 UI).
 
-        Drives the post-page inline 删除视频/Delete video button +
-        confirmation dialog. Returns True even if the video was
-        already gone (404 navigate is idempotent).
+        Opens the post page's 更多选项 / More options dropdown, clicks the
+        删除视频 / Delete video menuitem, and confirms. Returns True even
+        if the video was already gone (404 navigate is idempotent).
+
+        2026-07 change: the 删除视频 affordance moved OFF the inline
+        button row and INTO the 更多选项 dropdown (it was a top-level
+        inline button in the 2026-06 UI). The confirmation dialog reuses
+        the 删除视频 label as its confirm button.
 
         Args:
             video_id: The child video UUID to delete.
@@ -2387,8 +2392,12 @@ class GrokClient(ResponseParser):
             True on success or if already deleted (404).
 
         Failure:
-            * Inline 删除视频 button not present (e.g. video is an
-              image-only post — wrong API surface) → GrokAPIError.
+            * 更多选项 button absent → GrokAPIError (post page layout
+              changed).
+            * 删除视频 menuitem not present in the dropdown (e.g. the
+              post is image-only — no delete surface) → GrokAPIError
+              whose message contains "删除视频" + "not found", which
+              :meth:`delete_post` keys off to explain the image-post case.
             * Confirmation dialog's "删除视频" button not found →
               GrokAPIError (Grok UI may have changed the confirm wording).
         """
@@ -2403,9 +2412,20 @@ class GrokClient(ResponseParser):
                 return True  # already deleted
             raise
 
-        # Inline 删除视频/Delete video button. Same label appears in the
-        # confirmation dialog — Grok uses it as both trigger and confirm.
-        await self._click_inline_post_button("删除视频", "Delete video")
+        # A deleted/nonexistent video REDIRECTS to /imagine home in the
+        # 2026-07 UI rather than rendering a 404 page, so the check in
+        # _navigate_to_post_safe won't catch it. If the URL no longer
+        # points at this post, it's already gone — stay idempotent.
+        landed = str(await self._tab.evaluate("location.href") or "")
+        if video_id not in landed:
+            return True
+
+        # 2026-07: open 更多选项 / More options, then click the 删除视频
+        # menuitem inside it. The confirmation dialog reuses the 删除视频
+        # label as its confirm button.
+        await self._click_inline_post_button("更多选项", "More options")
+        await asyncio.sleep(1 * d)
+        await self._click_menuitem("删除视频", "Delete video")
         await asyncio.sleep(1 * d)
         await self._click_confirm_button("删除视频", "Delete video", "删除", "Delete")
         await asyncio.sleep(1 * d)
