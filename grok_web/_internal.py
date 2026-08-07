@@ -85,6 +85,16 @@ MEDIA_POST_GET_ENDPOINT = "/rest/media/post/get"
 # is {"id": "<image_id>"}.
 MEDIA_POST_CREATE_ENDPOINT = "/rest/media/post/create"
 
+# 2026-08: "References" (Grok Imagine Video 1.5) — reusable saved subjects
+# (character / outfit / product / scene) for cross-generation consistency.
+# create body: {"kind": "MEDIA_REFERENCE_KIND_<CATEGORY>", "name": "<title>",
+#               "assetIds": ["<grok-image-id>", ...]}  (a Grok image_id IS a
+# valid assetId — in-Grok, no upload). Returns {"reference": {...}}.
+# list body: {"limit": <n>} -> {"references": [...]}. delete body: {"id": ...}.
+MEDIA_REFERENCE_CREATE_ENDPOINT = "/rest/media/reference/create"
+MEDIA_REFERENCE_LIST_ENDPOINT = "/rest/media/reference/list"
+MEDIA_REFERENCE_DELETE_ENDPOINT = "/rest/media/reference/delete"
+
 # =============================================================================
 # Shared Utilities
 # =============================================================================

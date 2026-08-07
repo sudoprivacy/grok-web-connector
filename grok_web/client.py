@@ -11,6 +11,7 @@ Public API:
 import json
 import logging
 import random
+import re
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,9 @@ from ._internal import (
     MEDIA_POST_LIKE_ENDPOINT,
     MEDIA_POST_LIST_ENDPOINT,
     MEDIA_POST_UNLIKE_ENDPOINT,
+    MEDIA_REFERENCE_CREATE_ENDPOINT,
+    MEDIA_REFERENCE_DELETE_ENDPOINT,
+    MEDIA_REFERENCE_LIST_ENDPOINT,
     ResponseParser,
     parse_video_ndjson_response,
 )
@@ -65,6 +69,19 @@ MODERATED_THUMBNAIL_UUID = "21d8b635-e385-4cff-8faf-6716975dbd2a"
 DEFAULT_STATSIG_ID = (
     "W6IFgVSv2YSVxFj5Yt971KvAL1ldD75XJoGIR285iLdGPIiPNM7S1C9An8vmKsYbR9N5sF963w2iXoRhwSHYizPczaEUWA"
 )
+
+# References (2026-08). category <-> Grok's MEDIA_REFERENCE_KIND_* enum.
+_REFERENCE_KIND = {
+    "character": "MEDIA_REFERENCE_KIND_CHARACTER",
+    "outfit": "MEDIA_REFERENCE_KIND_OUTFIT",
+    "product": "MEDIA_REFERENCE_KIND_PRODUCT",
+    "scene": "MEDIA_REFERENCE_KIND_SCENE",
+}
+_REFERENCE_CATEGORY = {v: k for k, v in _REFERENCE_KIND.items()}
+_UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
 
 # edit_image / edit_current completion. Grok's image-edit stream returned
 # 2 side-by-side candidates pre-2026-07 and a single edited image as of
@@ -1396,6 +1413,142 @@ class GrokClient(ResponseParser):
     async def unfavorite_post(self, post_id: str) -> bool:
         """Remove a post from favorites."""
         await self._api_request("POST", MEDIA_POST_UNLIKE_ENDPOINT, {"id": post_id})
+        return True
+
+    async def create_reference(self, params: dict) -> dict:
+        """Save a reusable reference subject (character / outfit / product /
+        scene) from a Grok-native image, to keep it consistent across
+        generations.
+
+        Use when: you'll reuse the same subject across multiple generations
+        (e.g. one character through a long video). Mint once, reuse forever —
+        the returned ``reference_id`` is durable (unlike ephemeral image ids).
+        Sources are **in-Grok** (a Grok ``image_id`` IS a valid asset id), so
+        this uploads nothing and stays on the low-moderation path — do NOT
+        pass a local file path (that's the high-mod external-upload route).
+        Mutates your account (saves a reference); pair with delete_reference.
+
+        Args:
+            params: Dict with keys from REFERENCE_KEYS (see grok_web.schema).
+                Per-key descriptions below are generated from
+                ``grok_web.schema.PARAMS`` (SSOT).
+
+                <SCHEMA_ARGS>
+
+        Returns:
+            dict: ``{reference_id, name, category, asset_ids}``. ``name`` is
+            the @handle to mention in prompts. You do NOT need to call
+            list_references to confirm — the id and handle are here.
+
+        Failure:
+            * ``images`` empty → needs >=1 in-Grok subject image
+              (``'post:<image_id>'`` or a bare ``<image_id>`` from
+              create_image).
+            * a local file path in ``images`` → not supported (external
+              upload spikes moderation); pass an in-Grok image id instead.
+            * unknown ``category`` → one of character / outfit / product /
+              scene.
+        """
+        from .prompt_parser import classify_image_source
+        from .schema import REFERENCE_KEYS, validate_params
+
+        p = validate_params(params, REFERENCE_KEYS)
+        images = list(p.get("images") or [])
+        title = p.get("title")
+        if not images:
+            raise GrokAPIError(
+                "create_reference: 'images' is required — >=1 in-Grok subject "
+                "image, e.g. 'post:<image_id>' (or a bare image_id) from "
+                "create_image."
+            )
+        if not title:
+            raise GrokAPIError("create_reference: 'title' is required (becomes the @handle).")
+        category = str(p.get("category") or "character").lower()
+        kind = _REFERENCE_KIND.get(category)
+        if not kind:
+            raise GrokAPIError(
+                f"create_reference: category must be one of "
+                f"{sorted(_REFERENCE_KIND)}; got {category!r}."
+            )
+
+        asset_ids: list[str] = []
+        for src in images:
+            src_kind, val = classify_image_source(src)
+            if src_kind in ("post", "upload"):
+                asset_ids.append(val)  # 'post:<id>' / 'file:<id>' -> id is the asset id
+            elif src_kind == "file" and _UUID_RE.match(val):
+                asset_ids.append(val)  # bare uuid -> asset id
+            elif src_kind == "file":
+                raise GrokAPIError(
+                    "create_reference: local file paths are not supported "
+                    "(external upload spikes moderation). Pass an in-Grok "
+                    "image id instead, e.g. 'post:<image_id>' from "
+                    "create_image."
+                )
+            else:  # video
+                raise GrokAPIError(
+                    "create_reference: 'video:' sources are not supported; use image ids."
+                )
+
+        body: dict[str, Any] = {"kind": kind, "name": title, "assetIds": asset_ids}
+        if p.get("description"):
+            body["description"] = p["description"]
+        res = await self._api_request("POST", MEDIA_REFERENCE_CREATE_ENDPOINT, body)
+        ref = res.get("reference", {}) if isinstance(res, dict) else {}
+        return {
+            "reference_id": ref.get("id"),
+            "name": ref.get("name", title),
+            "category": _REFERENCE_CATEGORY.get(ref.get("kind"), category),
+            "asset_ids": [a.get("assetId") for a in ref.get("assets", []) if isinstance(a, dict)]
+            or asset_ids,
+        }
+
+    async def list_references(self, limit: int = 50) -> list[dict]:
+        """List your saved references (newest first). Returns a list you
+        iterate directly.
+
+        Use when: you need a reference's ``reference_id`` / ``name`` to reuse
+        or delete it.
+
+        Args:
+            limit: Max references to return (default 50).
+
+        Returns:
+            list[dict]: each ``{reference_id, name, category, asset_ids}``.
+        """
+        res = await self._api_request("POST", MEDIA_REFERENCE_LIST_ENDPOINT, {"limit": limit})
+        refs = res.get("references", []) if isinstance(res, dict) else []
+        out = []
+        for r in refs:
+            if not isinstance(r, dict):
+                continue
+            out.append(
+                {
+                    "reference_id": r.get("id"),
+                    "name": r.get("name"),
+                    "category": _REFERENCE_CATEGORY.get(r.get("kind"), r.get("kind")),
+                    "asset_ids": [
+                        a.get("assetId") for a in r.get("assets", []) if isinstance(a, dict)
+                    ],
+                }
+            )
+        return out
+
+    async def delete_reference(self, reference_id: str) -> bool:
+        """Delete a saved reference. Idempotent — returns True if it was
+        already gone.
+
+        Args:
+            reference_id: The reference's id (from create_reference /
+                list_references).
+
+        Returns:
+            True on success or if already deleted.
+        """
+        try:
+            await self._api_request("POST", MEDIA_REFERENCE_DELETE_ENDPOINT, {"id": reference_id})
+        except GrokNotFoundError:
+            return True
         return True
 
     async def _download_url_to_file(self, url: str, dest: Path) -> bool:
@@ -7420,6 +7573,7 @@ def _splice_all_docstrings() -> None:
         EDIT_KEYS,
         EXTEND_KEYS,
         IMAGE_KEYS,
+        REFERENCE_KEYS,
         SELECT_POST_KEYS,
         UPLOAD_KEYS,
         VIDEO_KEYS,
@@ -7436,6 +7590,7 @@ def _splice_all_docstrings() -> None:
         ("download_video", DOWNLOAD_KEYS),
         ("select_post", SELECT_POST_KEYS),
         ("wait_for_video_completion", WAIT_FOR_COMPLETION_KEYS),
+        ("create_reference", REFERENCE_KEYS),
     ]:
         method = getattr(GrokClient, method_name, None)
         if method is None:

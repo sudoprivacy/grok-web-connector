@@ -319,6 +319,27 @@ PARAMS: dict[str, dict[str, Any]] = {
         ),
         "type": "str",
     },
+    # --- 2026-08 References (create_reference / list_references) ---
+    "title": {
+        "desc": (
+            "Reference name. This becomes the @handle you mention in prompts "
+            "(Grok shows 'Type @<title> to use this reference')."
+        ),
+        "type": "str",
+    },
+    "category": {
+        "desc": (
+            "Reference category: 'character' (default), 'outfit', 'product', "
+            "or 'scene'. Maps to Grok's MEDIA_REFERENCE_KIND_<CATEGORY>."
+        ),
+        "type": "str",
+        "default": "character",
+    },
+    "description": {
+        "desc": "Optional free-text description of the reference.",
+        "type": "str",
+        "default": "",
+    },
 }
 
 # =============================================================================
@@ -375,6 +396,16 @@ EDIT_KEYS = [
 
 UPLOAD_KEYS = [
     "images",
+]
+
+# Keys accepted by create_reference({...}). `images` = 1+ subject images,
+# each an in-Grok Grok image id ('post:<id>' or a bare image_id/asset id) —
+# a Grok image_id IS a valid assetId, so this stays in-Grok (no upload).
+REFERENCE_KEYS = [
+    "images",
+    "title",
+    "category",
+    "description",
 ]
 
 # Keys accepted by download_video({...}) — dict-style as of v0.19.0.
