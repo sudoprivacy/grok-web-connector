@@ -27,6 +27,7 @@ from ._internal import (
     MEDIA_REFERENCE_CREATE_ENDPOINT,
     MEDIA_REFERENCE_DELETE_ENDPOINT,
     MEDIA_REFERENCE_LIST_ENDPOINT,
+    MEDIA_SEGMENT_ENDPOINT,
     ResponseParser,
     parse_video_ndjson_response,
 )
@@ -1550,6 +1551,63 @@ class GrokClient(ResponseParser):
         except GrokNotFoundError:
             return True
         return True
+
+    async def get_segments(self, image: str, cached_only: bool = False) -> list[dict]:
+        """Auto-detect labeled objects (segments) in a Grok image — the
+        2026-08 "分段" / Segments panel.
+
+        Use when: you want the objects Grok detects in an image — names +
+        bounding boxes + masks — e.g. to know what's in a generated image or
+        to feed a region into a masked edit. In-Grok (no upload): pass a
+        Grok image id. A Grok txt2img ``image_id`` IS the ``assetId``.
+
+        Args:
+            image: A Grok image source — ``'post:<image_id>'`` or a bare
+                ``image_id`` / asset id.
+            cached_only: If True, return only already-computed segments
+                (fast, may be empty). Default False computes them.
+
+        Returns:
+            list[dict]: one per detected object, each with keys ``name``,
+            ``box`` (``[x1, y1, x2, y2]``), ``score``, ``mask_rle``
+            (``{size:[h,w], counts:<rle>}``), and ``mask_url``. Ordered by
+            Grok's detection confidence.
+
+        Failure:
+            * ``image`` not resolvable to a Grok asset id → GrokAPIError
+              (pass ``'post:<image_id>'`` or a bare image_id, not a local
+              path).
+        """
+        from .prompt_parser import classify_image_source
+
+        src_kind, val = classify_image_source(image)
+        if src_kind in ("post", "upload") or src_kind == "file" and _UUID_RE.match(val):
+            asset_id = val
+        else:
+            raise GrokAPIError(
+                "get_segments: 'image' must be an in-Grok image id "
+                "('post:<image_id>' or a bare image_id), not a local path."
+            )
+        res = await self._api_request(
+            "POST",
+            MEDIA_SEGMENT_ENDPOINT,
+            {"assetId": asset_id, "cachedOnly": cached_only, "maskFormat": "rle"},
+        )
+        objects = ((res.get("map") or {}).get("objects") or []) if isinstance(res, dict) else []
+        out = []
+        for o in objects:
+            if not isinstance(o, dict):
+                continue
+            out.append(
+                {
+                    "name": o.get("name"),
+                    "box": o.get("boxXyxy"),
+                    "score": o.get("score"),
+                    "mask_rle": o.get("maskRle"),
+                    "mask_url": o.get("maskUrl") or None,
+                }
+            )
+        return out
 
     async def _download_url_to_file(self, url: str, dest: Path) -> bool:
         """Download a URL via page-context fetch and write bytes to ``dest``.

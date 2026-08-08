@@ -95,6 +95,13 @@ MEDIA_REFERENCE_CREATE_ENDPOINT = "/rest/media/reference/create"
 MEDIA_REFERENCE_LIST_ENDPOINT = "/rest/media/reference/list"
 MEDIA_REFERENCE_DELETE_ENDPOINT = "/rest/media/reference/delete"
 
+# 2026-08: image segmentation — the "分段"/Segments panel. Auto-detects
+# labeled objects (with bounding boxes + masks) in a Grok image.
+# body: {"assetId": "<image_id>", "cachedOnly": false, "maskFormat": "rle"}
+# -> {"cached": bool, "map": {"objects": [{"name","boxXyxy":[x1,y1,x2,y2],
+#     "score","maskUrl","maskRle":{"size":[h,w],"counts":"<rle>"}}, ...]}}
+MEDIA_SEGMENT_ENDPOINT = "/rest/media/segment"
+
 # =============================================================================
 # Shared Utilities
 # =============================================================================

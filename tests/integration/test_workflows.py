@@ -348,3 +348,74 @@ async def test_pool_parallel_generation():
             if r.success and r.data and r.data.get("video_id"):
                 with contextlib.suppress(Exception):
                     await cleanup_client.delete_video(r.data["video_id"])
+
+
+# ---------------------------------------------------------------------------
+# Scenario: segment_generated_image (2026-08 Segments / 分段)
+# ---------------------------------------------------------------------------
+@pytest.mark.integration
+async def test_segment_generated_image(client):
+    """create_image -> get_segments: generate a multi-object image and confirm
+    Grok auto-detects labeled objects with boxes + masks (data flows
+    image_id -> get_segments)."""
+    gen = await client.create_image(
+        {
+            "prompt": (
+                "a red apple, a yellow banana, and a green pear on a plain white table, flat lay"
+            ),
+            "min_success": 1,
+            "max_scroll": 3,
+        }
+    )
+    clean = [i for i in gen.images if not i.get("moderated")]
+    assert clean, "need a non-moderated image to segment"
+    image_id = clean[0]["image_id"]
+
+    segments = await client.get_segments(f"post:{image_id}")
+    assert isinstance(segments, list), "get_segments returns a list"
+    assert len(segments) >= 1, "expected at least one detected object"
+
+    seg = segments[0]
+    assert {"name", "box", "score", "mask_rle"} <= set(seg), f"segment keys: {list(seg)}"
+    assert seg["name"], "segment has a label"
+    assert isinstance(seg["box"], list) and len(seg["box"]) == 4, f"box: {seg['box']}"
+
+    labels = " ".join((s.get("name") or "").lower() for s in segments)
+    assert any(k in labels for k in ("apple", "banana", "pear")), (
+        f"expected fruit labels from the prompt, got: {labels!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Scenario: reference_lifecycle (2026-08 References)
+# ---------------------------------------------------------------------------
+@pytest.mark.integration
+async def test_reference_lifecycle(client):
+    """create_image -> create_reference (in-Grok) -> list_references ->
+    delete_reference. Confirms a Grok image_id works as an assetId and the
+    reference round-trips (created id appears in list, gone after delete)."""
+    gen = await client.create_image(
+        {"prompt": "a bright red apple on white, product photo", "min_success": 1, "max_scroll": 3}
+    )
+    clean = [i for i in gen.images if not i.get("moderated")]
+    assert clean, "need a non-moderated image"
+    image_id = clean[0]["image_id"]
+
+    ref = await client.create_reference(
+        {"images": [f"post:{image_id}"], "title": "itest-ref", "category": "character"}
+    )
+    ref_id = ref["reference_id"]
+    assert ref_id, f"create_reference returned no id: {ref}"
+    assert ref["asset_ids"] == [image_id], f"asset_ids: {ref['asset_ids']}"
+
+    try:
+        refs = await client.list_references(limit=50)
+        assert isinstance(refs, list)
+        assert any(r["reference_id"] == ref_id for r in refs), "created ref missing from list"
+    finally:
+        assert await client.delete_reference(ref_id) is True
+
+    refs_after = await client.list_references(limit=50)
+    assert not any(r["reference_id"] == ref_id for r in refs_after), (
+        "ref still present after delete"
+    )
