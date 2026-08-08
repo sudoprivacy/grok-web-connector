@@ -5469,7 +5469,12 @@ class GrokClient(ResponseParser):
             click_js = r"""
                 (() => {
                     const want = "__LABEL__";
-                    const items = Array.from(document.querySelectorAll('[role="menuitem"]'));
+                    // 2026-08: Grok changed the aspect popup items from
+                    // [role=menuitem] to [role=option] (the popup now also
+                    // carries speed/quality options). Match both so this
+                    // survives the role rename.
+                    const items = Array.from(document.querySelectorAll(
+                        '[role="menuitem"], [role="option"], [role="menuitemradio"]'));
                     if (items.length === 0) {
                         return JSON.stringify({ok: false, populated: false, available: []});
                     }
