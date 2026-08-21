@@ -567,3 +567,73 @@ async def test_create_image_in_grok_img2img(client):
     assert done, "in-Grok img2img returned no non-moderated image"
     assert done[0].get("image_id"), "edited image missing image_id"
     assert done[0]["image_id"] != hero_id, "should be a NEW image, not the source"
+
+
+# ---------------------------------------------------------------------------
+# Scenario: create_image_in_grok_multi_compose (2026-08 multi-asset img2img)
+# ---------------------------------------------------------------------------
+@pytest.mark.integration
+async def test_create_image_in_grok_multi_compose(client):
+    """create_image with MULTIPLE Grok-native refs → in-Grok imageToImage
+    composition, referenced BY ID (no gallery, works for ephemeral gens).
+
+    Needs a warm conversations/new statsig token, which create_image /
+    edit_image do NOT mint — so we first run a create_video (which does), then
+    compose. Data flows (id_a, id_b) -> [post:a, post:b] -> composed image.
+    """
+    a = await client.create_image(
+        {
+            "prompt": "a red cartoon superhero mascot, full body, plain white background",
+            "min_success": 1,
+            "max_scroll": 3,
+        }
+    )
+    b = await client.create_image(
+        {
+            "prompt": "a blue cartoon robot mascot, full body, plain white background",
+            "min_success": 1,
+            "max_scroll": 3,
+        }
+    )
+    clean_a = [i for i in a.images if not i.get("moderated")]
+    clean_b = [i for i in b.images if not i.get("moderated")]
+    assert clean_a and clean_b, "need two non-moderated source images"
+    id_a, id_b = clean_a[0]["image_id"], clean_b[0]["image_id"]
+
+    # Warm the compose token (create_video POSTs conversations/new).
+    warm = await client.create_video(
+        {"prompt": "a waving cartoon character", "duration": "6s", "resolution": "480p"}
+    )
+    try:
+        out = await client.create_image(
+            {
+                "images": [f"post:{id_a}", f"post:{id_b}"],
+                "prompt": "the two characters standing side by side in a sunny park, wide shot",
+            }
+        )
+        assert isinstance(out, ImageGenerationResult)
+        done = [i for i in out.images if not i.get("moderated")]
+        assert done, "multi-ref composition returned no non-moderated image"
+        assert done[0].get("image_id"), "composed image missing image_id"
+        assert done[0]["image_id"] not in (id_a, id_b), "should be a NEW composed image"
+    finally:
+        if warm.video_id:
+            with contextlib.suppress(Exception):
+                await client.delete_video(warm.video_id)
+
+
+@pytest.mark.integration
+async def test_create_image_multi_compose_cold_hint(client):
+    """When the compose token is cold, multi-ref composition raises a clear
+    warming hint (Failure -> hint) rather than silently failing."""
+    from grok_web import GrokAPIError
+
+    # Fresh client: no create_video has warmed conversations/new yet.
+    if client._statsig_snitch is not None:
+        client._statsig_snitch._by_endpoint.pop("/rest/app-chat/conversations/new", None)
+    with pytest.raises(GrokAPIError, match="create_video|warm"):
+        await client._create_image_via_imagetoimage(
+            ["00000000-0000-0000-0000-000000000000", "11111111-1111-1111-1111-111111111111"],
+            "compose",
+            30,
+        )

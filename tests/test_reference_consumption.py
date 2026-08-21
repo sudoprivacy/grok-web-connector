@@ -178,16 +178,6 @@ class TestCreateImageInGrokImg2Img:
             _run(c.create_image({"images": ["post:hero"]}))
         c.edit_image.assert_not_awaited()
 
-    def test_multi_ref_not_delegated(self):
-        c = _client()
-        c.edit_image = AsyncMock()
-        c._ui_delay = 0
-        c._persistence_hinted = True
-        c._tab = _StopNavTab()
-        with pytest.raises(RuntimeError, match="STOP-NAV"):
-            _run(c.create_image({"images": ["post:a", "post:b"], "prompt": "x"}))
-        c.edit_image.assert_not_awaited()
-
     def test_local_file_not_delegated(self):
         c = _client()
         c.edit_image = AsyncMock()
@@ -196,4 +186,50 @@ class TestCreateImageInGrokImg2Img:
         c._tab = _StopNavTab()
         with pytest.raises(RuntimeError, match="STOP-NAV"):
             _run(c.create_image({"images": ["./hero.png"], "prompt": "x"}))
+        c.edit_image.assert_not_awaited()
+
+
+class TestCreateImageMultiCompose:
+    """Multiple all-Grok refs → in-Grok imageToImage COMPOSITION by id
+    (_create_image_via_imagetoimage). Cold token surfaces a warming hint;
+    mixed sets fall through; single-ref stays on the edit_image path."""
+
+    def test_multi_grok_refs_compose_by_id(self):
+        c = _client()
+        c._create_image_via_imagetoimage = AsyncMock(
+            return_value=[{"image_id": "c1", "image_url": "u", "moderated": False}]
+        )
+        c.edit_image = AsyncMock()
+        out = _run(c.create_image({"images": ["post:a", "post:b"], "prompt": "two together"}))
+        c._create_image_via_imagetoimage.assert_awaited_once()
+        args = c._create_image_via_imagetoimage.call_args[0]
+        assert args[0] == ["a", "b"]  # ordered ids passed as inputAssets
+        assert args[1] == "two together"
+        c.edit_image.assert_not_awaited()  # not the single-ref path
+        assert isinstance(out, ImageGenerationResult)
+        assert out.images[0]["image_id"] == "c1"
+
+    def test_cold_token_raises_warming_hint(self):
+        c = _client()
+
+        class _ColdSnitch:
+            _by_endpoint: dict = {}
+
+            async def get(self, *a, **k):
+                return None  # no signed conversations/new token cached
+
+        c._statsig_snitch = _ColdSnitch()
+        with pytest.raises(GrokAPIError, match="create_video|warm|warmed"):
+            _run(c._create_image_via_imagetoimage(["a", "b"], "compose", 60))
+
+    def test_multi_mixed_grok_and_local_not_composed(self):
+        c = _client()
+        c._create_image_via_imagetoimage = AsyncMock()
+        c.edit_image = AsyncMock()
+        c._ui_delay = 0
+        c._persistence_hinted = True
+        c._tab = _StopNavTab()
+        with pytest.raises(RuntimeError, match="STOP-NAV"):
+            _run(c.create_image({"images": ["post:a", "./b.png"], "prompt": "x"}))
+        c._create_image_via_imagetoimage.assert_not_awaited()  # not all-Grok
         c.edit_image.assert_not_awaited()

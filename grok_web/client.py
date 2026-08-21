@@ -5446,6 +5446,166 @@ class GrokClient(ResponseParser):
         """)
         return list(result) if result else []
 
+    # Warming hint shared by the multi-image compose path (Failure -> hint).
+    _COMPOSE_WARM_HINT = (
+        "multi-image in-Grok composition needs a warm session token. Grok's "
+        "/rest/app-chat/conversations/new requires a frontend-signed x-statsig-id "
+        "that create_image (WebSocket) and edit_image (/responses) do NOT mint — "
+        "only create_video / img2vid / video-extend do. Run ANY create_video(...) "
+        "once in THIS session first (it mints + caches the token, reusable for a "
+        "while), then retry this call. A single 'post:<id>' reference composes "
+        "without warming (it goes through edit_image)."
+    )
+
+    async def _create_image_via_imagetoimage(
+        self, image_ids: list[str], prompt: str, timeout: int = 300
+    ) -> list[dict]:
+        """Compose N Grok-native images into a new image, in-Grok, by id.
+
+        POSTs the 2026-08 composer payload
+        ``mediaGenInput.imageToImage{inputAssets:[image_ids]}`` to
+        conversations/new (verified: composes N Grok assets, NO ``/upload-file``
+        request — references by id, so it works for EPHEMERAL generations that
+        aren't in the gallery). Reuses the same x-statsig-id + NDJSON capture
+        machinery as edit_image. Raises GrokAPIError with a warming hint if no
+        signed conversations/new token is cached (see class ``_COMPOSE_WARM_HINT``).
+        """
+        import asyncio
+        import contextlib
+        import json as _json
+
+        from ai_dev_browser import cdp
+
+        statsig_id = None
+        if self._statsig_snitch is not None:
+            statsig_id = await self._statsig_snitch.get(
+                "/rest/app-chat/conversations/new", timeout=0.1
+            )
+        if not statsig_id:
+            raise GrokAPIError("create_image: " + self._COMPOSE_WARM_HINT)
+
+        d = self._ui_delay
+        cur = await self._tab.evaluate("window.location.href", await_promise=False)
+        if not cur or "grok.com" not in str(cur):
+            await self._tab.get(f"{self.BASE_URL}/imagine")
+            await asyncio.sleep(3 * d)
+
+        await self._tab.send(cdp.network.enable())
+        captured: dict = {"images": {}, "conversation_id": None, "gen_rid": None}
+
+        async def on_resp(ev: cdp.network.ResponseReceived):
+            if "/app-chat/conversations/new" in ev.response.url:
+                captured["gen_rid"] = ev.request_id
+
+        async def on_finished(ev: cdp.network.LoadingFinished):
+            if captured.get("gen_rid") == ev.request_id:
+                try:
+                    b = await self._tab.send(
+                        cdp.network.get_response_body(request_id=ev.request_id)
+                    )
+                    body = b[0] if isinstance(b, tuple) else str(b)
+                    for line in body.strip().split("\n"):
+                        if not line:
+                            continue
+                        try:
+                            data = _json.loads(line)
+                            result = data.get("result", {})
+                            if isinstance(result, dict) and "conversation" in result:
+                                captured["conversation_id"] = result["conversation"].get(
+                                    "conversationId"
+                                )
+                            _ingest_edit_image_line(data, captured["images"])
+                        except _json.JSONDecodeError:
+                            continue
+                except Exception:
+                    pass
+
+        self._tab.add_handler(cdp.network.ResponseReceived, on_resp)
+        self._tab.add_handler(cdp.network.LoadingFinished, on_finished)
+        try:
+            request_body = {
+                "temporary": True,
+                "modelName": "imagine-image-edit",
+                "message": prompt,
+                "enableImageStreaming": True,
+                "enableSideBySide": True,
+                "sendFinalMetadata": True,
+                "responseMetadata": {
+                    "modelConfigOverride": {"modelMap": {"imageEditModel": "imagine"}}
+                },
+                "mediaGenInput": {
+                    "imageToImage": {"prompt": prompt, "inputAssets": list(image_ids)}
+                },
+                "kind": "CONVERSATION_KIND_IMAGINE",
+            }
+            fetch_js = r"""
+                (async (body, sid) => {
+                    try {
+                        const headers = {'Content-Type': 'application/json'};
+                        if (sid) headers['x-statsig-id'] = sid;
+                        const r = await fetch('/rest/app-chat/conversations/new', {
+                            method: 'POST', headers: headers, body: body, credentials: 'include',
+                        });
+                        const text = await r.text();
+                        return JSON.stringify({status: r.status, ok: r.ok, body: text.slice(0, 300)});
+                    } catch (e) {
+                        return JSON.stringify({ok: false, error: String(e)});
+                    }
+                })(__BODY__, __SID__)
+                """.replace("__BODY__", _json.dumps(_json.dumps(request_body))).replace(
+                "__SID__", _json.dumps(statsig_id)
+            )
+            raw = await self._tab.evaluate(fetch_js, await_promise=True)
+            res = _json.loads(raw) if isinstance(raw, str) else {}
+            if not res.get("ok"):
+                body_preview = str(res.get("body") or res.get("error") or "")
+                # Stale/invalid signed token → invalidate cache so the next
+                # warm re-populates it, and steer the caller to re-warm.
+                if self._statsig_snitch is not None:
+                    self._statsig_snitch._by_endpoint.pop("/rest/app-chat/conversations/new", None)
+                low = body_preview.lower()
+                if res.get("status") in (401, 403) or "out of date" in low or "statsig" in low:
+                    raise GrokAPIError(
+                        "create_image: cached compose token was rejected — "
+                        + self._COMPOSE_WARM_HINT
+                        + f" (server: {body_preview[:120]!r})"
+                    )
+                raise GrokAPIError(
+                    "create_image: in-Grok compose POST failed "
+                    f"(status={res.get('status')}): {body_preview[:200]!r}"
+                )
+
+            loop = asyncio.get_event_loop()
+            start = loop.time()
+            last_change = start
+            last_sig: tuple[int, int] | None = None
+            while loop.time() - start < timeout:
+                imgs = captured["images"]
+                completed = [i for i in imgs.values() if i.get("progress") == 100]
+                sig = (len(imgs), len(completed))
+                if sig != last_sig:
+                    last_sig = sig
+                    last_change = loop.time()
+                if (
+                    completed
+                    and len(completed) == len(imgs)
+                    and loop.time() - last_change >= _EDIT_STREAM_SETTLE_S
+                ):
+                    break
+                await asyncio.sleep(0.5)
+            images = list(captured["images"].values())
+            if not images:
+                raise GrokAPIError(
+                    "create_image: in-Grok compose accepted the request but no "
+                    "images streamed back (prompt/reference may have been "
+                    "moderated, or the stream stalled)."
+                )
+            return images
+        finally:
+            with contextlib.suppress(Exception):
+                self._tab.remove_handler(cdp.network.ResponseReceived, on_resp)
+                self._tab.remove_handler(cdp.network.LoadingFinished, on_finished)
+
     async def create_image(
         self,
         params: dict,
@@ -5471,14 +5631,36 @@ class GrokClient(ResponseParser):
         Returns:
             ImageGenerationResult with image URLs and generation info.
 
+        In-Grok img2img: passing Grok-native ``images`` ('post:<id>' or a bare
+        image_id) makes a NEW image FROM those, referenced by id server-side —
+        NO download/re-upload (low moderation). ONE ref = img2img from it (via
+        edit_image); MULTIPLE all-Grok refs = compose them in one gen. Local
+        files / a Grok+local mix use the upload path. 'ref:<id>' (a saved
+        Reference) is rejected — those are video-only (see create_video).
+
+        Failure:
+            * MULTIPLE Grok-native refs but the compose token is cold →
+              GrokAPIError telling you to run any ``create_video(...)`` once
+              this session first, then retry. Grok's compose endpoint needs a
+              frontend-signed x-statsig-id that only video gen mints; a single
+              'post:<id>' ref composes without warming.
+            * 'ref:<id>' in images → rejected; saved References are video-only,
+              use create_video({'images': ['ref:<id>'], ...}).
+
         Examples:
             await client.create_image({"prompt": "a cat wearing sunglasses"})
 
+            # in-Grok img2img — reuse a hero across new scenes (low-mod)
             await client.create_image({
-                "prompt": "a cat",
-                "aspect_ratio": "portrait",
-                "min_success": 10,
-                "max_scroll": 8,
+                "images": ["post:<hero_image_id>"],
+                "prompt": "the same character sitting on a park bench",
+            })
+
+            # compose TWO Grok images (needs a warmed session — do a
+            # create_video first; see Failure above)
+            await client.create_image({
+                "images": ["post:<hero_a>", "post:<hero_b>"],
+                "prompt": "the two characters standing together in a park",
             })
         """
         from .schema import IMAGE_KEYS, validate_params
@@ -5525,6 +5707,33 @@ class GrokClient(ResponseParser):
                     images=edit.images,
                     conversation_id=edit.conversation_id,
                 )
+
+        # MULTIPLE all-Grok-native refs → in-Grok imageToImage COMPOSITION,
+        # referenced BY ID (works for ephemeral gens, no gallery). Needs a
+        # warm conversations/new statsig token; if cold it raises with a clear
+        # warming hint (Failure -> hint) rather than silently degrading.
+        if len(ref_specs) >= 2 and prompt:
+            from .prompt_parser import classify_image_source as _classify
+
+            grok_ids: list[str] = []
+            all_grok = True
+            for _spec in ref_specs:
+                _k, _v = _classify(_spec)
+                if _k == "post" or (_k == "file" and _UUID_RE.match(_v)):
+                    grok_ids.append(_v)
+                else:
+                    all_grok = False
+                    break
+            if all_grok:
+                logger.info(
+                    "[create_image] %d Grok-native refs → in-Grok imageToImage "
+                    "composition by id (no re-upload, low-mod).",
+                    len(grok_ids),
+                )
+                composed = await self._create_image_via_imagetoimage(
+                    grok_ids, prompt, p.get("timeout", 300)
+                )
+                return ImageGenerationResult(prompt=prompt, images=composed, conversation_id=None)
 
         aspect_ratio = p.get("aspect_ratio", "2:3")
         min_success = p.get("min_success", 1)
