@@ -18,7 +18,7 @@ import pytest
 
 from grok_web import GrokClient
 from grok_web.exceptions import GrokAPIError
-from grok_web.models import VideoGenerationResult
+from grok_web.models import ImageEditResult, ImageGenerationResult, VideoGenerationResult
 from grok_web.prompt_parser import classify_image_source
 
 
@@ -123,3 +123,77 @@ class TestImageEditReject:
             GrokAPIError, match="ref:<id>.*not supported|not from another reference"
         ):
             _run(c.create_reference({"images": ["ref:abc"], "title": "T"}))
+
+
+class _StopNavTab:
+    """Tab stub whose evaluate() aborts create_image right after the
+    in-Grok-delegation decision (the first thing create_image awaits on the
+    tab is window.location.href), so we can assert delegation did/didn't fire
+    without a real browser."""
+
+    async def evaluate(self, *a, **k):
+        raise RuntimeError("STOP-NAV")
+
+
+class TestCreateImageInGrokImg2Img:
+    """A single Grok-native ref ('post:<id>' / bare uuid) + prompt is served
+    in-Grok via edit_image's imageToImage (no re-upload). Everything else
+    (no prompt, multi-ref, local files) falls through to the upload path."""
+
+    def _edit_result(self):
+        return ImageEditResult(
+            post_id="src",
+            edit_prompt="p",
+            images=[{"image_id": "out1", "image_url": "u", "moderated": False}],
+            conversation_id="conv1",
+        )
+
+    def test_single_post_ref_delegates_in_grok(self):
+        c = _client()
+        c.edit_image = AsyncMock(return_value=self._edit_result())
+        out = _run(c.create_image({"images": ["post:hero"], "prompt": "on a bench"}))
+        c.edit_image.assert_awaited_once()
+        sent = c.edit_image.call_args[0][0]
+        assert sent["images"] == ["post:hero"]
+        assert sent["prompt"] == "on a bench"
+        assert isinstance(out, ImageGenerationResult)
+        assert out.images[0]["image_id"] == "out1"
+        assert out.conversation_id == "conv1"
+
+    def test_bare_uuid_ref_delegates_in_grok(self):
+        c = _client()
+        c.edit_image = AsyncMock(return_value=self._edit_result())
+        _run(c.create_image({"images": ["b2db5daf-7da7-4856-aac4-5c22b5c361c2"], "prompt": "x"}))
+        assert c.edit_image.call_args[0][0]["images"] == [
+            "post:b2db5daf-7da7-4856-aac4-5c22b5c361c2"
+        ]
+
+    def test_no_prompt_not_delegated(self):
+        c = _client()
+        c.edit_image = AsyncMock()
+        c._ui_delay = 0
+        c._persistence_hinted = True
+        c._tab = _StopNavTab()
+        with pytest.raises(RuntimeError, match="STOP-NAV"):
+            _run(c.create_image({"images": ["post:hero"]}))
+        c.edit_image.assert_not_awaited()
+
+    def test_multi_ref_not_delegated(self):
+        c = _client()
+        c.edit_image = AsyncMock()
+        c._ui_delay = 0
+        c._persistence_hinted = True
+        c._tab = _StopNavTab()
+        with pytest.raises(RuntimeError, match="STOP-NAV"):
+            _run(c.create_image({"images": ["post:a", "post:b"], "prompt": "x"}))
+        c.edit_image.assert_not_awaited()
+
+    def test_local_file_not_delegated(self):
+        c = _client()
+        c.edit_image = AsyncMock()
+        c._ui_delay = 0
+        c._persistence_hinted = True
+        c._tab = _StopNavTab()
+        with pytest.raises(RuntimeError, match="STOP-NAV"):
+            _run(c.create_image({"images": ["./hero.png"], "prompt": "x"}))
+        c.edit_image.assert_not_awaited()

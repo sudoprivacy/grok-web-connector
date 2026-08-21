@@ -5492,12 +5492,40 @@ class GrokClient(ResponseParser):
         # instead of silently ignoring it or emitting a video.
         if any(str(s).startswith("ref:") for s in ref_specs):
             raise GrokAPIError(
-                "create_image: 'ref:<id>' reference sources are not supported "
-                "for image generation — Grok consumes references only in "
-                "video gen. Use create_video({'images': ['ref:<id>'], "
-                "'prompt': ...}) to generate a video with a consistent "
-                "referenced character."
+                "create_image: 'ref:<id>' (a saved Reference) is video-only — "
+                "Grok consumes saved References only in video gen; use "
+                "create_video({'images': ['ref:<id>'], 'prompt': ...}). To make "
+                "a NEW image FROM a Grok image (in-Grok img2img, low-mod), pass "
+                "the image itself as 'post:<image_id>' instead."
             )
+
+        # In-Grok img2img: a SINGLE Grok-native reference ('post:<id>' or a
+        # bare image_id) with a prompt is served via edit_image's imageToImage
+        # path — it references the source's media URL server-side (NO download
+        # / re-upload → low moderation), unlike the multi/local upload path.
+        # This makes "the same character in a new scene" low-mod: the Grok
+        # image_id rides in the gen payload directly. (Verified 2026-08: the
+        # composer's 生成-gallery attach emits mediaGenInput.imageToImage with
+        # the Grok asset id and issues NO /upload-file request.)
+        if len(ref_specs) == 1 and prompt:
+            from .prompt_parser import classify_image_source as _classify
+
+            _k, _v = _classify(ref_specs[0])
+            if _k == "post" or (_k == "file" and _UUID_RE.match(_v)):
+                logger.info(
+                    "[create_image] single Grok-native ref post:%s → in-Grok "
+                    "imageToImage (no re-upload, low-mod).",
+                    _v,
+                )
+                edit = await self.edit_image(
+                    {"images": [f"post:{_v}"], "prompt": prompt, "timeout": p.get("timeout", 300)}
+                )
+                return ImageGenerationResult(
+                    prompt=prompt,
+                    images=edit.images,
+                    conversation_id=edit.conversation_id,
+                )
+
         aspect_ratio = p.get("aspect_ratio", "2:3")
         min_success = p.get("min_success", 1)
         max_scroll = p.get("max_scroll", 5)
@@ -5881,6 +5909,11 @@ class GrokClient(ResponseParser):
         # than appends. Each upload becomes @1, @2, ... in Grok's @
         # popup (no implicit source on the Imagine homepage, unlike
         # edit_image's edit panel where @1 is the source).
+        #
+        # NOTE: a SINGLE pure-Grok-native ref ('post:<id>' / bare image_id) is
+        # intercepted far earlier and served IN-GROK via edit_image's
+        # imageToImage path (no download/re-upload → low moderation). Anything
+        # reaching here (local files, multi-ref, mixed) uses the upload path.
         ref_paths: list[Path] = []
         ref_tmpdir: Path | None = None
         if ref_specs:

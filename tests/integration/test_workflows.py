@@ -529,3 +529,41 @@ async def test_reference_rejected_for_image(client):
                 "prompt": "x",
             }
         )
+
+
+# ---------------------------------------------------------------------------
+# Scenario: create_image_in_grok_img2img (2026-08 in-Grok image->image)
+# ---------------------------------------------------------------------------
+@pytest.mark.integration
+async def test_create_image_in_grok_img2img(client):
+    """create_image with a single Grok-native ref → in-Grok imageToImage.
+
+    A 'post:<id>' reference is served via edit_image's imageToImage path —
+    referencing the Grok image server-side with NO download / re-upload (low
+    moderation), producing a NEW image. Data flows image_id -> post: -> new
+    image (the 'same character in a new scene' workflow).
+    """
+    gen = await client.create_image(
+        {
+            "prompt": "a friendly cartoon superhero mascot, full body, plain white background",
+            "min_success": 1,
+            "max_scroll": 3,
+        }
+    )
+    clean = [i for i in gen.images if not i.get("moderated")]
+    assert clean, "need a non-moderated hero image"
+    hero_id = clean[0]["image_id"]
+
+    out = await client.create_image(
+        {
+            "images": [f"post:{hero_id}"],
+            "prompt": "the same character sitting on a park bench in a green park, wide shot",
+            "min_success": 1,
+            "max_scroll": 3,
+        }
+    )
+    assert isinstance(out, ImageGenerationResult)
+    done = [i for i in out.images if not i.get("moderated")]
+    assert done, "in-Grok img2img returned no non-moderated image"
+    assert done[0].get("image_id"), "edited image missing image_id"
+    assert done[0]["image_id"] != hero_id, "should be a NEW image, not the source"
