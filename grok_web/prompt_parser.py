@@ -64,14 +64,18 @@ def classify_image_source(source: str) -> tuple[str, str]:
           * ``'video:<uuid>'`` — existing Grok VIDEO post (video-extend)
           * ``'file:<uuid>'``  — previously uploaded asset
                                  (direct REST, no re-upload needed)
+          * ``'ref:<uuid>'``   — saved reference subject (from
+                                 create_reference); consumed by create_video
+                                 to keep a character consistent (video-only)
           * bare local file path (will be uploaded)
 
     Returns:
         Tuple of (source_type, value):
-          * ``('post', '<uuid>')``    → img2vid from an existing image post
-          * ``('video', '<uuid>')``   → video-extend from an existing video post
-          * ``('upload', '<uuid>')``  → direct REST using a prior upload
-          * ``('file', '<path>')``    → local file to upload and use
+          * ``('post', '<uuid>')``      → img2vid from an existing image post
+          * ``('video', '<uuid>')``     → video-extend from an existing video post
+          * ``('upload', '<uuid>')``    → direct REST using a prior upload
+          * ``('reference', '<uuid>')`` → reference-conditioned video gen
+          * ``('file', '<path>')``      → local file to upload and use
 
     Examples:
         >>> classify_image_source('post:8ddd91f6-abcd-1234-5678-abcdef012345')
@@ -80,6 +84,8 @@ def classify_image_source(source: str) -> tuple[str, str]:
         ('video', 'db00bb5d-fb4b-4ec8-ab1b-97f81f46a484')
         >>> classify_image_source('file:477c03f8-f4ca-4226-989a-040ed21ef7ec')
         ('upload', '477c03f8-f4ca-4226-989a-040ed21ef7ec')
+        >>> classify_image_source('ref:60116c2c-fa70-435a-a01b-139dc4cf9364')
+        ('reference', '60116c2c-fa70-435a-a01b-139dc4cf9364')
         >>> classify_image_source('./frame1.jpg')
         ('file', './frame1.jpg')
     """
@@ -89,4 +95,6 @@ def classify_image_source(source: str) -> tuple[str, str]:
         return ("video", source[6:])
     if source.startswith("file:"):
         return ("upload", source[5:])
+    if source.startswith("ref:"):
+        return ("reference", source[4:])
     return ("file", source)

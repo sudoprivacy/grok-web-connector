@@ -456,3 +456,76 @@ async def test_precise_edit_segment(client):
     done = [i for i in result.images if i.get("progress") == 100]
     assert done, f"no completed edit image: {result.images}"
     assert done[0].get("post_id"), "edited image missing post_id"
+
+
+# ---------------------------------------------------------------------------
+# Scenario: reference_to_video (2026-08 reference consumption)
+# ---------------------------------------------------------------------------
+@pytest.mark.integration
+async def test_reference_to_video(client):
+    """create_image -> create_reference -> create_video(['ref:<id>']).
+
+    Confirms reference CONSUMPTION: a saved character reference conditions a
+    video generation (Grok's referenceToVideo path). Data flows
+    image_id -> reference_id -> ref:<id> -> video. Cleans up the reference
+    and the generated video.
+    """
+    gen = await client.create_image(
+        {
+            "prompt": "a friendly cartoon superhero mascot, full body, plain white background",
+            "min_success": 1,
+            "max_scroll": 3,
+        }
+    )
+    clean = [i for i in gen.images if not i.get("moderated")]
+    assert clean, "need a non-moderated hero image"
+    image_id = clean[0]["image_id"]
+
+    ref = await client.create_reference(
+        {"images": [f"post:{image_id}"], "title": "itest-hero", "category": "character"}
+    )
+    ref_id = ref["reference_id"]
+    assert ref_id, f"create_reference returned no id: {ref}"
+
+    video = None
+    try:
+        video = await client.create_video(
+            {
+                "images": [f"ref:{ref_id}"],
+                "prompt": "the hero waves hello in a sunny park",
+                "resolution": "480p",
+                "duration": "6s",
+            }
+        )
+        assert isinstance(video, VideoGenerationResult)
+        assert video.video_id, "reference-conditioned gen must return a video_id"
+        assert video.mode == "reference", f"expected mode='reference', got {video.mode!r}"
+    finally:
+        if video and video.video_id:
+            with contextlib.suppress(Exception):
+                await client.delete_video(video.video_id)
+        with contextlib.suppress(Exception):
+            await client.delete_reference(ref_id)
+
+
+# ---------------------------------------------------------------------------
+# Scenario: reference_rejected_for_image (guardrail — references are video-only)
+# ---------------------------------------------------------------------------
+@pytest.mark.integration
+async def test_reference_rejected_for_image(client):
+    """create_image / edit_image must reject 'ref:<id>' with a clear pointer
+    to create_video — references are consumed by video generation only."""
+    from grok_web import GrokAPIError
+
+    with pytest.raises(GrokAPIError, match="create_video"):
+        await client.create_image(
+            {"images": ["ref:00000000-0000-0000-0000-000000000000"], "prompt": "x"}
+        )
+
+    with pytest.raises(GrokAPIError, match="create_video"):
+        await client.edit_image(
+            {
+                "images": ["post:11111111-1111-1111-1111-111111111111", "ref:2222"],
+                "prompt": "x",
+            }
+        )

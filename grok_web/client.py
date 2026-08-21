@@ -1517,6 +1517,13 @@ class GrokClient(ResponseParser):
                     "image id instead, e.g. 'post:<image_id>' from "
                     "create_image."
                 )
+            elif src_kind == "reference":
+                raise GrokAPIError(
+                    "create_reference: 'ref:<id>' sources are not supported "
+                    "(a reference is built FROM images, not from another "
+                    "reference); pass an in-Grok image id, e.g. "
+                    "'post:<image_id>' from create_image."
+                )
             else:  # video
                 raise GrokAPIError(
                     "create_reference: 'video:' sources are not supported; use image ids."
@@ -4069,6 +4076,15 @@ class GrokClient(ResponseParser):
         post_id = source_value
         edit_prompt = canonical_prompt
         ref_specs: list[str] = list(canonical_images[1:])
+        # References are consumed by VIDEO generation only — reject 'ref:<id>'
+        # among the edit reference images with a clear pointer.
+        if any(str(s).startswith("ref:") for s in ref_specs):
+            raise GrokAPIError(
+                "edit_image: 'ref:<id>' reference sources are not supported — "
+                "Grok consumes references only in video gen. Use "
+                "create_video({'images': ['ref:<id>'], 'prompt': ...}) to "
+                "generate a video with a consistent referenced character."
+            )
 
         timeout = p.get("timeout", 60)
 
@@ -5471,6 +5487,17 @@ class GrokClient(ResponseParser):
 
         prompt = p.get("prompt", "")
         ref_specs: list[str] = list(p.get("images") or [])
+        # References are consumed by VIDEO generation only (Grok has no
+        # reference→image path). Reject 'ref:<id>' here with a clear pointer
+        # instead of silently ignoring it or emitting a video.
+        if any(str(s).startswith("ref:") for s in ref_specs):
+            raise GrokAPIError(
+                "create_image: 'ref:<id>' reference sources are not supported "
+                "for image generation — Grok consumes references only in "
+                "video gen. Use create_video({'images': ['ref:<id>'], "
+                "'prompt': ...}) to generate a video with a consistent "
+                "referenced character."
+            )
         aspect_ratio = p.get("aspect_ratio", "2:3")
         min_success = p.get("min_success", 1)
         max_scroll = p.get("max_scroll", 5)
@@ -7020,6 +7047,240 @@ class GrokClient(ResponseParser):
             mode="text",  # txt2vid mode
         )
 
+    async def _attach_reference_mention(self, name: str, *, delay: float = 1.0) -> bool:
+        """Attach one saved reference to the composer via the ``@`` popup.
+
+        Types ``@`` + the reference name into the ProseMirror editor, waits
+        for the mention popup, and clicks the item whose text matches
+        ``name`` — creating the mention node that the composer serializes
+        into ``mediaGenInput.referenceToVideo.mediaReferences``.
+
+        Returns True if the mention was inserted (verified by the name
+        appearing in the editor text), False otherwise.
+        """
+        import asyncio
+
+        from ai_dev_browser import cdp
+
+        # Focus the editor and type "@" then the name (filters the popup).
+        # insert_text sends an InputEvent ProseMirror honors; a raw
+        # key-char dispatch does not update its internal model.
+        await self._tab.evaluate(
+            '(document.querySelector(".tiptap.ProseMirror") || '
+            "document.querySelector('[contenteditable=\"true\"]')).focus()",
+            await_promise=False,
+        )
+        await asyncio.sleep(0.2 * delay)
+        await self._tab.send(cdp.input_.insert_text(text="@"))
+        await asyncio.sleep(0.4 * delay)
+        await self._tab.send(cdp.input_.insert_text(text=name))
+        await asyncio.sleep(0.6 * delay)
+
+        # Click the popup item matching the name. Scope to the composer
+        # region (x > 300) so we never hit the left-rail nav / account row.
+        import json as _json
+
+        click_js = (
+            "((nm)=>{const vis=el=>{const r=el.getBoundingClientRect();"
+            " return r.width>2&&r.height>2&&r.x>300;};"
+            " const items=[...document.querySelectorAll('button,[role=option],[role=menuitem],li')].filter(vis);"
+            " let it=items.find(e=>(e.textContent||'').trim()===nm);"
+            " if(!it)it=items.find(e=>(e.textContent||'').trim().includes(nm)&&(e.textContent||'').trim().length<nm.length+8);"
+            " if(!it)return false; it.click(); return true;})(__NAME__)"
+        ).replace("__NAME__", _json.dumps(name))
+        did_click = False
+        start = asyncio.get_event_loop().time()
+        while asyncio.get_event_loop().time() - start < 4:
+            if await self._tab.evaluate(click_js, await_promise=False):
+                did_click = True
+                await asyncio.sleep(0.4 * delay)
+                break
+            await asyncio.sleep(0.3)
+        if not did_click:
+            # Never found a popup item — DON'T trust the editor text here: the
+            # raw "@name" we typed would still be present as plain text (not a
+            # mention node → no mediaReferences). Report failure so the caller
+            # raises instead of silently submitting a reference-less gen.
+            return False
+
+        # Confirm the mention rendered into the editor.
+        editor_text = await self._tab.evaluate(
+            "((ed)=>ed?ed.innerText:'')"
+            "(document.querySelector('.tiptap.ProseMirror')||document.querySelector('[contenteditable=\"true\"]'))",
+            await_promise=False,
+        )
+        return bool(editor_text and name in str(editor_text))
+
+    async def _set_video_pills(self, duration: int, resolution: str) -> None:
+        """Best-effort: click the Video-mode duration / resolution toolbar
+        pills (6s/10s/15s, 480p/720p). Silent no-op if a pill isn't present —
+        the composer default (captured as 6s / 720p) then applies.
+        """
+        import json as _json
+
+        labels = [f"{int(duration)}s", str(resolution)]
+        pills_js = (
+            "((wants)=>{const vis=el=>{const r=el.getBoundingClientRect();"
+            " return r.width>2&&r.height>2&&r.x>300;};"
+            " const btns=[...document.querySelectorAll('button')].filter(vis);"
+            " for(const w of wants){const b=btns.find(x=>(x.textContent||'').trim()===w); if(b)b.click();}"
+            " return true;})(__WANTS__)"
+        ).replace("__WANTS__", _json.dumps(labels))
+        try:
+            await self._tab.evaluate(pills_js, await_promise=False)
+        except Exception as e:  # noqa: BLE001 — cosmetic pill-setting, never fatal
+            logger.debug("[_set_video_pills] skipped: %s", e)
+
+    async def _create_video_from_reference(
+        self,
+        reference_ids: list[str],
+        prompt: str = "",
+        duration: int = 6,
+        resolution: str = "720p",
+        timeout: int = 600,
+    ) -> VideoGenerationResult:
+        """Generate a video conditioned on saved reference(s) — the
+        ``create_video({"images": ["ref:<id>"], ...})`` path.
+
+        Grok consumes references ONLY in video generation: attaching a saved
+        reference forces ``mediaGenInput.referenceToVideo`` (there is no
+        reference→image gen). This drives the composer's ``@``-mention popup
+        (the reference travels as an ``@<refId>`` mention → ``mediaReferences``
+        array), then captures the streamed ``/app-chat/conversations/new``
+        NDJSON via CDPMonitor + ``parse_video_ndjson_response`` (reference gen
+        streams inline — it does NOT redirect to ``/imagine/post/{id}`` like
+        txt2vid). Aspect ratio follows the composer default (2:3) — references
+        are portrait-first.
+        """
+        import asyncio
+        import re
+
+        from .actions.imagine_input import click_submit, set_mode, set_prompt
+
+        # Resolve ref ids -> names (the @-popup lists references by name).
+        # Fail fast before any UI setup if an id is unknown.
+        refs = await self.list_references(limit=100)
+        name_by_id = {r.get("reference_id"): r.get("name") for r in refs if r.get("reference_id")}
+        missing = [rid for rid in reference_ids if rid not in name_by_id]
+        if missing:
+            raise GrokAPIError(
+                "create_video: reference id(s) not found: "
+                f"{missing}. Create one with create_reference() (from an "
+                "in-Grok image), or list existing ids with list_references()."
+            )
+
+        d = self._ui_delay
+        await self._tab.get(f"{self.BASE_URL}/imagine")
+        if not await self._wait_for_selector(".tiptap.ProseMirror", timeout=30):
+            raise GrokAPIError(
+                "Prompt editor (ProseMirror) did not mount within 30s "
+                "(Grok /imagine hydration slow or page structure changed)."
+            )
+        await asyncio.sleep(1.5 * d)
+
+        # Ensure Video mode. References force video anyway, but setting it
+        # explicitly surfaces the duration/resolution pills.
+        import contextlib
+
+        with contextlib.suppress(Exception):  # mode segmented-control label churn
+            await set_mode(self._tab, "Video", delay=d)
+        await asyncio.sleep(0.5 * d)
+        await self._set_video_pills(duration, resolution)
+
+        if prompt:
+            await set_prompt(self._tab, prompt, delay=d)
+            await asyncio.sleep(0.3 * d)
+
+        # Attach each reference via the @-mention popup.
+        for rid in reference_ids:
+            ok = await self._attach_reference_mention(name_by_id[rid], delay=d)
+            if not ok:
+                raise GrokAPIError(
+                    f"create_video: could not attach reference @{name_by_id[rid]} "
+                    f"({rid}) via the composer @-menu. The reference may still "
+                    "be indexing (retry in a few seconds) or its name may be "
+                    "ambiguous — rename it via the References panel."
+                )
+
+        await asyncio.sleep(0.4 * d)
+
+        # Submit and capture the streamed NDJSON from conversations/new.
+        # referenceToVideo does NOT redirect to /imagine/post/{id} like
+        # txt2vid — it streams inline (enableImageStreaming / side-by-side).
+        # Reuse the proven CDPMonitor + parser the upload2vid path uses;
+        # fall back to post-page nav recovery if the SPA aborts the XHR.
+        from .actions.network_monitor import CDPMonitor
+
+        post_re = re.compile(r"/imagine/post/([0-9a-f-]{36})")
+        async with CDPMonitor(self._tab, "/app-chat/conversations/new") as monitor:
+            await click_submit(self._tab, delay=d)
+            if not await monitor.wait_for_request(timeout=8):
+                raise GrokAPIError(
+                    "Submit did not trigger reference-video generation — the "
+                    "@-mention may not have registered or the composer rejected "
+                    "the submit (prompt/reference moderated)."
+                )
+            body = None
+            nav_video_id = None
+            start_time = asyncio.get_event_loop().time()
+            while asyncio.get_event_loop().time() - start_time < timeout:
+                if monitor.body is not None:
+                    body = monitor.body
+                    break
+                if monitor.failed_reason is not None:
+                    raise GrokAPIError(
+                        "Reference-video request failed at transport level "
+                        f"(CDP: {monitor.failed_reason}) — often Grok anti-abuse "
+                        "rate limiting; retry shortly."
+                    )
+                if nav_video_id is None:
+                    try:
+                        cur = await asyncio.wait_for(
+                            self._tab.evaluate(
+                                "window.location.href", await_promise=False, return_by_value=True
+                            ),
+                            timeout=2.0,
+                        )
+                    except Exception:  # noqa: BLE001 — transient CDP read
+                        cur = ""
+                    m = post_re.search(cur) if isinstance(cur, str) else None
+                    if m:
+                        nav_video_id = m.group(1)
+                await asyncio.sleep(1.0)
+
+        if body is not None:
+            result = parse_video_ndjson_response(
+                body, parent_post_id="", statsig_id=monitor.statsig_id
+            )
+        elif nav_video_id:
+            # SPA aborted the XHR before the body landed — recover via REST.
+            try:
+                details = await asyncio.wait_for(self.get_post_details(nav_video_id), timeout=15.0)
+                raw = details.raw_data.get("post", details.raw_data) if details.raw_data else {}
+                result = VideoGenerationResult(
+                    video_id=nav_video_id,
+                    source_post_id=raw.get("originalPostId") or nav_video_id,
+                    parent_post_id=raw.get("originalPostId") or nav_video_id,
+                    moderated=False,
+                    progress=100,
+                    mode="reference",
+                    statsig_id=monitor.statsig_id,
+                )
+            except Exception as e:  # noqa: BLE001
+                raise GrokAPIError(
+                    f"Reference-video created (id={nav_video_id}) but NDJSON body "
+                    f"missing and REST recovery failed: {e}."
+                ) from e
+        else:
+            raise GrokAPIError(
+                "Timed out waiting for reference-video response (no NDJSON body "
+                "and no post-page navigation). The reference mention may not have "
+                "registered, or the prompt/reference was moderated."
+            )
+
+        result.mode = "reference"
+        return await self._reclassify_or_return(result)
+
     # =========================================================================
     # Unified Video Generation API (dict-based, SSOT from schema.py)
     # =========================================================================
@@ -7087,6 +7348,19 @@ class GrokClient(ResponseParser):
             await client.create_video({
                 "images": ["post:8ddd91f6-..."],
                 "prompt": "slow orbit around @1",
+            })
+
+            # reference-conditioned video: keep a saved character consistent
+            # (mint once with create_reference, then reuse the ref id). Grok
+            # consumes references ONLY in video gen — there is no ref→image.
+            ref = await client.create_reference({
+                "images": ["post:<hero_image_id>"],
+                "title": "Hero",
+            })
+            vid = await client.create_video({
+                "images": [f"ref:{ref['reference_id']}"],
+                "prompt": "the hero waves hello in a sunny park",
+                "duration": "6s",
             })
 
             # upload2vid with multiple images
@@ -7257,6 +7531,19 @@ class GrokClient(ResponseParser):
                     model_name=extend_res.model_name,
                     conversation_id=extend_res.conversation_id,
                     statsig_id=extend_res.statsig_id,
+                )
+            elif kind == "reference":
+                # reference-conditioned video — keep a saved character/subject
+                # (from create_reference) consistent. Grok consumes references
+                # ONLY in video generation (there is no reference→image path):
+                # attaching a reference forces mediaGenInput.referenceToVideo.
+                reference_ids = [s[1] for s in sources]
+                result = await self._create_video_from_reference(
+                    reference_ids=reference_ids,
+                    prompt=prompt,
+                    duration=duration,
+                    resolution=resolution,
+                    timeout=timeout,
                 )
             elif kind == "upload":
                 # Previously uploaded file IDs — direct REST path.
