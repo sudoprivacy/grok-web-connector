@@ -98,6 +98,7 @@ Note: Actual style variations depend on the source image content and what moveme
 ```python
 # Generation algorithm (matches Statsig SDK):
 import base64, os
+
 stable_id = base64.b64encode(os.urandom(70)).decode().rstrip("=")
 # Result: 94-character base64 string
 ```

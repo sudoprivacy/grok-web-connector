@@ -293,8 +293,9 @@ print(result.statsig_id)  # 返回使用的 ID
 
 # 复现风格（指定已知的 ID）
 result = client.create_video_from_image(
-    image_url, parent_id,
-    statsig_id="ztbNHMzMR1nE1m/ZUYn3/..."  # 之前成功的 ID
+    image_url,
+    parent_id,
+    statsig_id="ztbNHMzMR1nE1m/ZUYn3/...",  # 之前成功的 ID
 )
 ```
 

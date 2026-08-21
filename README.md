@@ -40,13 +40,13 @@ async with get_client() as client:
     details = await client.get_post_details(post_id)
 
     # Video (mode auto-detected from images)
-    await client.create_video({"prompt": "a cat dancing"})                       # txt2vid
+    await client.create_video({"prompt": "a cat dancing"})  # txt2vid
     await client.create_video({"images": ["post:" + pid], "prompt": "zoom in"})  # img2vid
-    await client.create_video({"images": ["./frame.jpg"], "prompt": "orbit @1"}) # upload2vid
+    await client.create_video({"images": ["./frame.jpg"], "prompt": "orbit @1"})  # upload2vid
 
     # Extend / upgrade existing video
     await client.extend_video({"video_id": vid, "prompt": "continue the motion"})
-    await client.upgrade_video(vid)                                          # upscale to HD
+    await client.upgrade_video(vid)  # upscale to HD
 
     # Image
     await client.create_image({"prompt": "sunset over mountains"})
@@ -94,14 +94,18 @@ For direct API access without a browser (requires [xAI API key](https://console.
 from grok_web import get_api_client
 
 async with get_api_client() as client:
-    result = await client.create_image({
-        "prompt": "a cat",
-        "model": "grok-imagine-image",
-    })
-    video = await client.create_video({
-        "prompt": "a cat dancing",
-        "model": "grok-imagine-video",
-    })
+    result = await client.create_image(
+        {
+            "prompt": "a cat",
+            "model": "grok-imagine-image",
+        }
+    )
+    video = await client.create_video(
+        {
+            "prompt": "a cat dancing",
+            "model": "grok-imagine-video",
+        }
+    )
 ```
 
 Set `XAI_API_KEY` as an environment variable, or add `"xai_api_key"` to `~/.grok-config.json`.
