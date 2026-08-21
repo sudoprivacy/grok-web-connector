@@ -1143,16 +1143,24 @@ class GrokClient(ResponseParser):
         source: str | None = "favorites",
         include_raw_data: bool = False,
         safe_for_work: bool = True,
+        media_type: str | None = None,
     ) -> list[PostSummary]:
         """List posts with basic metadata, with automatic pagination.
 
         Args:
             limit: Maximum number of posts to return, or None for all.
-                Pagination is handled automatically via cursor.
+                Pagination is handled automatically via cursor. With
+                ``media_type`` set this is the count of MATCHING posts.
             source: Filter by source type:
                 - "favorites": Your saved/favorited posts (default)
                 - None: All public posts
             include_raw_data: Include raw API response in each PostSummary
+            media_type: Keep only image or video posts — ``"image"`` /
+                ``"video"`` (or the raw ``"MEDIA_POST_TYPE_IMAGE"`` /
+                ``"MEDIA_POST_TYPE_VIDEO"``); None = both. Filtered
+                CLIENT-SIDE — Grok's list endpoint ignores a server-side
+                media-type filter (verified), so pages are fetched in full
+                and filtered here.
             safe_for_work: When False, sets Grok's ``safeForWork: false``
                 filter parameter to match what the Grok web UI sends by
                 default. Empirically this does NOT broaden the result
@@ -1169,6 +1177,17 @@ class GrokClient(ResponseParser):
         if source == "favorites":
             api_source = "MEDIA_POST_SOURCE_LIKED"
 
+        # Map user-friendly media_type to Grok's enum (client-side filter).
+        want_type: str | None = None
+        if media_type:
+            mt = str(media_type).lower()
+            want_type = {
+                "image": "MEDIA_POST_TYPE_IMAGE",
+                "video": "MEDIA_POST_TYPE_VIDEO",
+                "media_post_type_image": "MEDIA_POST_TYPE_IMAGE",
+                "media_post_type_video": "MEDIA_POST_TYPE_VIDEO",
+            }.get(mt, media_type)
+
         filter_data: dict[str, Any] = {}
         if api_source:
             filter_data["source"] = api_source
@@ -1183,7 +1202,13 @@ class GrokClient(ResponseParser):
         cursor: str | None = None
 
         while True:
-            page_limit = 2000 if limit is None else min(limit - len(posts), 2000)
+            # When filtering client-side (media_type), fetch full pages —
+            # len(posts) counts only MATCHING posts, so limit-based page sizing
+            # would under-fetch.
+            if limit is None or want_type:
+                page_limit = 2000
+            else:
+                page_limit = min(limit - len(posts), 2000)
             json_data: dict[str, Any] = {"limit": page_limit, "filter": filter_data}
             if cursor:
                 json_data["cursor"] = cursor
@@ -1197,9 +1222,11 @@ class GrokClient(ResponseParser):
             for item in page_posts:
                 try:
                     summary = self._parse_post_summary(item, include_raw_data=include_raw_data)
-                    posts.append(summary)
                 except Exception:
                     continue
+                if want_type and summary.media_type != want_type:
+                    continue
+                posts.append(summary)
 
             if limit is not None and len(posts) >= limit:
                 break
@@ -1208,13 +1235,55 @@ class GrokClient(ResponseParser):
             if not cursor:
                 break
 
-        return posts
+        return posts if limit is None else posts[:limit]
 
     async def get_post_details(self, post_id: str) -> PostDetails:
-        """Get full details of a post including all child videos."""
+        """Get full details of a post including all child videos.
+
+        Returns a PostDetails whose ``original_post_id`` is the IMMEDIATE
+        parent (None at the root) and ``children`` are the immediate children.
+        To walk the WHOLE lineage up to the root (e.g. find the source image
+        behind a video), use :meth:`get_post_ancestry`.
+        """
         data = await self._api_request("POST", MEDIA_POST_GET_ENDPOINT, {"id": post_id})
         post_data = data.get("post", data)
         return self._parse_post_details(post_data, post_id, raw_data=data)
+
+    async def get_post_ancestry(self, post_id: str, max_depth: int = 32) -> list[PostDetails]:
+        """Walk a post's edit lineage up to the ROOT — use when you have a
+        DERIVED post (e.g. a video) and need its SOURCE (the root image), or the
+        full chain between them. Returns the ANCESTORS root-first; the queried
+        post is NOT included, so ``ancestry[0]`` is the root source and ``[]``
+        means ``post_id`` is already a root (e.g. a txt2vid / txt2img).
+
+        Grok links its edit tree by ``originalPostId`` (immediate parent, None
+        at root); this walks those links via :meth:`get_post_details`, guarding
+        against cycles and capping at ``max_depth``. Costs one REST read per
+        level.
+
+        Args:
+            post_id: The post to walk up from (any image or video post id).
+            max_depth: Safety cap on chain length (default 32).
+
+        Returns:
+            list[PostDetails]: ancestors ordered root-first → immediate-parent
+            last. Empty list if ``post_id`` is a root (no parent).
+
+        Failure:
+            * ``post_id`` (or a link in the chain) not found → GrokAPIError
+              from get_post_details; the chain returned so far is discarded.
+        """
+        ancestry: list[PostDetails] = []
+        seen: set[str] = {post_id}
+        details = await self.get_post_details(post_id)
+        parent_id = details.original_post_id
+        while parent_id and parent_id not in seen and len(ancestry) < max_depth:
+            seen.add(parent_id)
+            parent = await self.get_post_details(parent_id)
+            ancestry.append(parent)
+            parent_id = parent.original_post_id
+        ancestry.reverse()  # root first, immediate parent last
+        return ancestry
 
     async def check_video_moderated(self, video_id: str) -> bool:
         """Check whether a generated video was moderated by Grok.

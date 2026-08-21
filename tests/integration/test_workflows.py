@@ -637,3 +637,59 @@ async def test_create_image_multi_compose_cold_hint(client):
             "compose",
             30,
         )
+
+
+# ---------------------------------------------------------------------------
+# Scenario: ancestry_find_source_image_from_video (post enumeration APIs)
+# ---------------------------------------------------------------------------
+@pytest.mark.integration
+async def test_ancestry_find_source_image_from_video(client):
+    """get_post_details(root image) -> pick a video child -> get_post_ancestry
+    walks that video back to the root image. The 'I have a video, find its
+    SOURCE image' journey. Data flows: image -> child video -> ancestry -> root.
+    """
+    root = await client.get_post_details(TEST_SOURCE_POST_ID)
+    videos = [c for c in root.children if c.is_video]
+    assert videos, f"{TEST_SOURCE_POST_ID} should have video children to walk from"
+    video_id = videos[0].id
+
+    ancestry = await client.get_post_ancestry(video_id)
+    assert ancestry, "a derived video must have at least the root image as ancestor"
+    assert ancestry[0].id == TEST_SOURCE_POST_ID, "ancestry[0] is the root SOURCE image"
+    assert ancestry[0].media_type == "MEDIA_POST_TYPE_IMAGE", "the source is an image"
+    assert all(a.id != video_id for a in ancestry), "queried post is NOT included"
+
+
+@pytest.mark.integration
+async def test_get_post_ancestry_root_returns_empty(client):
+    """A root post (no parent) has empty ancestry — it IS the source."""
+    ancestry = await client.get_post_ancestry(TEST_SOURCE_POST_ID)
+    assert ancestry == [], f"{TEST_SOURCE_POST_ID} is a root → no ancestors"
+
+
+# ---------------------------------------------------------------------------
+# Scenario: list_posts_media_type_filter (client-side media_type)
+# ---------------------------------------------------------------------------
+@pytest.mark.integration
+async def test_list_posts_media_type_filter(client):
+    """list_posts(media_type='video'|'image') returns ONLY that type (Grok's
+    list endpoint ignores a server-side media-type filter, so it's client-side).
+    Cross-checks against the unfiltered list so an empty result can't pass
+    vacuously.
+    """
+    both = await client.list_posts(limit=40, source="favorites")
+    have_video = any(p.media_type == "MEDIA_POST_TYPE_VIDEO" for p in both)
+    have_image = any(p.media_type == "MEDIA_POST_TYPE_IMAGE" for p in both)
+
+    videos = await client.list_posts(limit=20, source="favorites", media_type="video")
+    images = await client.list_posts(limit=20, source="favorites", media_type="image")
+    assert all(p.media_type == "MEDIA_POST_TYPE_VIDEO" for p in videos), [
+        p.media_type for p in videos
+    ]
+    assert all(p.media_type == "MEDIA_POST_TYPE_IMAGE" for p in images), [
+        p.media_type for p in images
+    ]
+    if have_video:
+        assert videos, "favorites contain video posts but the video filter returned none"
+    if have_image:
+        assert images, "favorites contain image posts but the image filter returned none"
