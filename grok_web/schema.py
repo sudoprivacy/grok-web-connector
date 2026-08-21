@@ -340,6 +340,17 @@ PARAMS: dict[str, dict[str, Any]] = {
         "type": "str",
         "default": "",
     },
+    # --- 2026-08 precise_edit (region/mask inpaint) ---
+    "region": {
+        "desc": (
+            "The region to edit (masked inpaint). Either a segment dict from "
+            "get_segments (its bounding box is used as the region), or a "
+            "normalized box [x1, y1, x2, y2] with values in 0-1 (fractions of "
+            "image width/height). Only this region changes; the rest of the "
+            "image is preserved."
+        ),
+        "type": "dict | list[float]",
+    },
 }
 
 # =============================================================================
@@ -406,6 +417,14 @@ REFERENCE_KEYS = [
     "title",
     "category",
     "description",
+]
+
+# Keys accepted by precise_edit({...}) — region-scoped ("精确编辑") inpaint.
+PRECISE_EDIT_KEYS = [
+    "images",
+    "prompt",
+    "region",
+    "timeout",
 ]
 
 # Keys accepted by download_video({...}) — dict-style as of v0.19.0.

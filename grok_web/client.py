@@ -110,6 +110,37 @@ def _is_edit_stream_url(url: str) -> bool:
     return url.rstrip("/").endswith("/responses")
 
 
+def _region_to_norm_box(region: object) -> tuple[float, float, float, float]:
+    """Resolve a precise_edit ``region`` to a normalized box (x1,y1,x2,y2) in 0-1.
+
+    Accepts a get_segments segment dict (uses its pixel ``box`` + ``mask_rle``
+    size to normalize) or an already-normalized ``[x1,y1,x2,y2]`` list.
+    """
+    if isinstance(region, dict) and region.get("box") and region.get("mask_rle"):
+        box = region["box"]
+        size = (region.get("mask_rle") or {}).get("size") or []
+        if len(box) == 4 and len(size) == 2 and size[0] and size[1]:
+            h, w = float(size[0]), float(size[1])
+            return (box[0] / w, box[1] / h, box[2] / w, box[3] / h)
+        raise GrokAPIError("precise_edit: segment region missing usable box / mask_rle.size.")
+    if (
+        isinstance(region, (list, tuple))
+        and len(region) == 4
+        and all(isinstance(v, (int, float)) for v in region)
+    ):
+        if all(0 <= v <= 1 for v in region):
+            return (float(region[0]), float(region[1]), float(region[2]), float(region[3]))
+        raise GrokAPIError(
+            "precise_edit: a raw box must be NORMALIZED (0-1). Pass a "
+            "get_segments segment (which carries its dimensions) or normalize "
+            "the box by the image's width/height yourself."
+        )
+    raise GrokAPIError(
+        "precise_edit: 'region' must be a get_segments segment dict or a "
+        "normalized [x1, y1, x2, y2] box (values 0-1)."
+    )
+
+
 def _ingest_edit_image_line(data: dict, images: dict) -> None:
     """Populate ``images`` from one parsed NDJSON line of an edit stream.
 
@@ -1608,6 +1639,221 @@ class GrokClient(ResponseParser):
                 }
             )
         return out
+
+    async def precise_edit(self, params: dict) -> ImageEditResult:
+        """Region-scoped ("precise" / inpaint) edit of a Grok image — the
+        2026-08 精确编辑 flow. Only the selected region changes; the rest of
+        the image is preserved.
+
+        Use when: you want to change ONE object/region and leave the rest
+        untouched — pair with get_segments to target a detected object (pass a
+        segment as ``region``). In-Grok: pass a Grok image id as the source
+        (no upload). The region is painted from its box, committed as a
+        selection, then your prompt is applied. This drives the UI (the edit
+        streams through Grok's own signed request), so it takes ~30-60s.
+
+        Args:
+            params: Dict with keys from PRECISE_EDIT_KEYS (see grok_web.schema).
+                Per-key descriptions below are generated from
+                ``grok_web.schema.PARAMS`` (SSOT).
+
+                <SCHEMA_ARGS>
+
+        Returns:
+            ImageEditResult with the edited image(s). ``images[i]['post_id']``
+            is the new image id — feed it onward to create_video / another
+            precise_edit / get_segments.
+
+        Failure:
+            * ``images`` / ``prompt`` / ``region`` missing → GrokAPIError.
+            * ``region`` is neither a get_segments segment nor a normalized
+              ``[x1,y1,x2,y2]`` box → GrokAPIError.
+            * The 精确编辑 / 添加到选区 / 应用 controls aren't found (the post
+              isn't an editable image, or Grok's UI changed) → GrokAPIError.
+        """
+        import asyncio
+        import contextlib
+        import json as json_mod
+
+        from ai_dev_browser import cdp
+        from ai_dev_browser.core.elements import click_by_text
+
+        from .actions.post_media import switch_to_image_view
+        from .prompt_parser import classify_image_source
+        from .schema import PRECISE_EDIT_KEYS, validate_params
+
+        p = validate_params(params, PRECISE_EDIT_KEYS)
+        images = list(p.get("images") or [])
+        prompt = p.get("prompt")
+        region = p.get("region")
+        timeout = p.get("timeout", 120)
+        if not images:
+            raise GrokAPIError("precise_edit: 'images' is required (the source image).")
+        if not prompt:
+            raise GrokAPIError("precise_edit: 'prompt' is required (the edit description).")
+        if region is None:
+            raise GrokAPIError(
+                "precise_edit: 'region' is required — a get_segments segment "
+                "or a normalized [x1,y1,x2,y2] box."
+            )
+
+        src_kind, src_val = classify_image_source(images[0])
+        if src_kind in ("post", "upload") or (src_kind == "file" and _UUID_RE.match(src_val)):
+            source_id = src_val
+        else:
+            raise GrokAPIError(
+                "precise_edit: images[0] must be an in-Grok image id "
+                "('post:<id>' or a bare image_id), not a local path."
+            )
+        nx1, ny1, nx2, ny2 = _region_to_norm_box(region)
+
+        d = self._ui_delay
+        captured: dict[str, Any] = {"images": {}, "request_ids": set()}
+
+        async def handle_response(event):
+            if _is_edit_stream_url(event.response.url):
+                captured["request_ids"].add(event.request_id)
+
+        async def handle_loading_finished(event):
+            if event.request_id not in captured["request_ids"]:
+                return
+            try:
+                body_result = await self._tab.send(
+                    cdp.network.get_response_body(request_id=event.request_id)
+                )
+                body = body_result[0] if isinstance(body_result, tuple) else body_result
+                if isinstance(body, dict):
+                    body = body.get("body")
+                for line in str(body).strip().split("\n"):
+                    if not line:
+                        continue
+                    try:
+                        _ingest_edit_image_line(json_mod.loads(line), captured["images"])
+                    except json_mod.JSONDecodeError:
+                        continue
+            except Exception:
+                pass
+
+        # Click a visible button whose aria-label/innerText matches a regex —
+        # reliable for Grok's Chinese labels where click_by_text's text search
+        # is flaky.
+        click_js = (
+            "((rx) => { const re = new RegExp(rx);"
+            "  const vis = el => { const r = el.getBoundingClientRect();"
+            "    return r.width > 0 && r.height > 0; };"
+            "  const b = [...document.querySelectorAll('button')].filter(vis)"
+            "    .find(x => re.test((x.getAttribute('aria-label')||'') + ' ' + x.innerText));"
+            "  if (!b) return 'not-found'; b.click(); return 'clicked'; })"
+        )
+
+        await self._tab.send(cdp.network.enable())
+        self._tab.add_handler(cdp.network.ResponseReceived, handle_response)
+        self._tab.add_handler(cdp.network.LoadingFinished, handle_loading_finished)
+        try:
+            await self.select_post({"post_id": source_id})
+            await asyncio.sleep(3 * d)
+            with contextlib.suppress(Exception):
+                await switch_to_image_view(self._tab, delay=d)
+            await asyncio.sleep(1 * d)
+
+            # Enter 精确编辑 / Precise Edit.
+            try:
+                await click_by_text(self._tab, "精确编辑", timeout=5)
+            except Exception as e:
+                raise GrokAPIError(
+                    "precise_edit: could not enter 精确编辑 mode (post may not "
+                    f"be an editable image): {e}"
+                ) from e
+            await asyncio.sleep(2 * d)
+
+            # Locate the edit canvas.
+            rect_raw = await self._tab.evaluate(
+                "(() => { const vis = el => { const r = el.getBoundingClientRect();"
+                "  return r.width > 200 && r.height > 200; };"
+                "  const el = [...document.querySelectorAll('canvas')].filter(vis)[0];"
+                "  if (!el) return 'null'; const r = el.getBoundingClientRect();"
+                "  return JSON.stringify({x:r.x, y:r.y, w:r.width, h:r.height}); })()"
+            )
+            if not isinstance(rect_raw, str) or rect_raw == "null":
+                raise GrokAPIError("precise_edit: image canvas not found in 精确编辑 mode.")
+            R = json_mod.loads(rect_raw)
+
+            # Paint the region with trusted mouse drags (a canvas brush ignores
+            # synthetic DOM events; tab.mouse_drag dispatches real CDP input).
+            rows = 10
+            for i in range(rows):
+                ty = ny1 + (ny2 - ny1) * (i + 0.5) / rows
+                await self._tab.mouse_drag(
+                    (R["x"] + R["w"] * nx1, R["y"] + R["h"] * ty),
+                    (R["x"] + R["w"] * nx2, R["y"] + R["h"] * ty),
+                    steps=12,
+                )
+                await asyncio.sleep(0.05)
+            await asyncio.sleep(0.6 * d)
+
+            # Commit the painted stroke into the selection (添加到选区).
+            add = await self._tab.evaluate(click_js + f"({json.dumps('选区|Add to sel')})")
+            if str(add).startswith("not"):
+                raise GrokAPIError(
+                    "precise_edit: '添加到选区' (Add to Selection) button not "
+                    "found — the painted region may not have registered."
+                )
+            await asyncio.sleep(1.5 * d)
+
+            # Fill the edit prompt.
+            escaped = prompt.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
+            await self._tab.evaluate(
+                "(() => { const ta = [...document.querySelectorAll("
+                "'textarea,[contenteditable=\"true\"],.tiptap.ProseMirror')]"
+                "  .find(e => e.getBoundingClientRect().width > 0);"
+                "  if (!ta) return; ta.focus();"
+                "  if (ta.tagName === 'TEXTAREA') { const s = Object."
+                "getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype,'value').set;"
+                f"    s.call(ta, `{escaped}`); ta.dispatchEvent(new Event('input',{{bubbles:true}})); }}"
+                f"  else {{ document.execCommand('insertText', false, `{escaped}`); }} }})()"
+            )
+            await asyncio.sleep(1 * d)
+
+            # Reset capture, then Apply (应用) to submit the edit.
+            captured["images"].clear()
+            captured["request_ids"].clear()
+            sub = await self._tab.evaluate(click_js + f"({json.dumps('应用|Apply')})")
+            if str(sub).startswith("not"):
+                raise GrokAPIError("precise_edit: '应用' (Apply) button not found.")
+
+            # Wait for the edit stream to settle (see _EDIT_STREAM_SETTLE_S).
+            loop = asyncio.get_event_loop()
+            start = loop.time()
+            last_change = start
+            last_sig: tuple[int, int] | None = None
+            while loop.time() - start < timeout:
+                imgs = captured["images"]
+                done = [i for i in imgs.values() if i.get("progress") == 100]
+                sig = (len(imgs), len(done))
+                if sig != last_sig:
+                    last_sig = sig
+                    last_change = loop.time()
+                if (
+                    done
+                    and len(done) == len(imgs)
+                    and loop.time() - last_change >= _EDIT_STREAM_SETTLE_S
+                ):
+                    break
+                await asyncio.sleep(0.5)
+            images_out = list(captured["images"].values())
+        finally:
+            try:
+                self._tab.remove_handler(cdp.network.ResponseReceived, handle_response)
+                self._tab.remove_handler(cdp.network.LoadingFinished, handle_loading_finished)
+            except Exception:
+                pass
+
+        return ImageEditResult(
+            post_id=source_id,
+            edit_prompt=prompt,
+            images=images_out,
+            conversation_id=captured.get("conversation_id"),
+        )
 
     async def _download_url_to_file(self, url: str, dest: Path) -> bool:
         """Download a URL via page-context fetch and write bytes to ``dest``.
@@ -7636,6 +7882,7 @@ def _splice_all_docstrings() -> None:
         EDIT_KEYS,
         EXTEND_KEYS,
         IMAGE_KEYS,
+        PRECISE_EDIT_KEYS,
         REFERENCE_KEYS,
         SELECT_POST_KEYS,
         UPLOAD_KEYS,
@@ -7654,6 +7901,7 @@ def _splice_all_docstrings() -> None:
         ("select_post", SELECT_POST_KEYS),
         ("wait_for_video_completion", WAIT_FOR_COMPLETION_KEYS),
         ("create_reference", REFERENCE_KEYS),
+        ("precise_edit", PRECISE_EDIT_KEYS),
     ]:
         method = getattr(GrokClient, method_name, None)
         if method is None:

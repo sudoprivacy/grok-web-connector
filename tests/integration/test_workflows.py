@@ -419,3 +419,40 @@ async def test_reference_lifecycle(client):
     assert not any(r["reference_id"] == ref_id for r in refs_after), (
         "ref still present after delete"
     )
+
+
+# ---------------------------------------------------------------------------
+# Scenario: precise_edit_segment (2026-08 精确编辑 / region inpaint)
+# ---------------------------------------------------------------------------
+@pytest.mark.integration
+async def test_precise_edit_segment(client):
+    """create_image -> get_segments -> precise_edit one detected object's
+    region. Region-scoped edit returns a new edited image (data flows
+    image_id -> segment -> region-scoped edit)."""
+    gen = await client.create_image(
+        {
+            "prompt": "a red apple and a green pear on a plain white table, flat lay",
+            "min_success": 1,
+            "max_scroll": 3,
+        }
+    )
+    clean = [i for i in gen.images if not i.get("moderated")]
+    assert clean, "need a non-moderated image"
+    image_id = clean[0]["image_id"]
+
+    segs = await client.get_segments(f"post:{image_id}")
+    assert segs, "expected detected segments"
+    target = next((s for s in segs if s.get("box") and s.get("mask_rle")), segs[0])
+
+    result = await client.precise_edit(
+        {
+            "images": [f"post:{image_id}"],
+            "prompt": "make it a shiny metallic silver object",
+            "region": target,
+            "timeout": 150,
+        }
+    )
+    assert result.images, "precise_edit returned no images"
+    done = [i for i in result.images if i.get("progress") == 100]
+    assert done, f"no completed edit image: {result.images}"
+    assert done[0].get("post_id"), "edited image missing post_id"

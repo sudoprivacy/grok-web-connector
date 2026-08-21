@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from grok_web import GrokClient
+from grok_web.client import _region_to_norm_box
 from grok_web.exceptions import GrokAPIError
 
 
@@ -94,3 +95,26 @@ class TestGetSegments:
         c = _client()
         c._api_request = AsyncMock(return_value={"cached": True, "map": {}})
         assert _run(c.get_segments("post:x")) == []
+
+
+class TestRegionToNormBox:
+    def test_segment_dict_normalized_by_size(self):
+        seg = {
+            "name": "apple",
+            "box": [76.8, 115.2, 384.0, 576.0],
+            "mask_rle": {"size": [1152, 768]},
+        }  # size = [h, w]
+        assert _region_to_norm_box(seg) == pytest.approx((0.1, 0.1, 0.5, 0.5))
+
+    def test_normalized_box_passthrough(self):
+        assert _region_to_norm_box([0.1, 0.2, 0.5, 0.6]) == (0.1, 0.2, 0.5, 0.6)
+
+    def test_pixel_box_rejected(self):
+        with pytest.raises(GrokAPIError, match="NORMALIZED"):
+            _region_to_norm_box([76, 115, 384, 576])
+
+    def test_bad_region_rejected(self):
+        with pytest.raises(GrokAPIError, match="region"):
+            _region_to_norm_box("apple")
+        with pytest.raises(GrokAPIError, match="region"):
+            _region_to_norm_box([0.1, 0.2, 0.3])
