@@ -5832,9 +5832,11 @@ class GrokClient(ResponseParser):
             )
             self._persistence_hinted = True
         quality = p.get("quality", "speed")
-        if quality not in {"speed", "quality"}:
+        # 'quality' and 'v2' both select the 2026-08 "质量 (v2.0)" tier (Image
+        # 2.0, Grok's most powerful image model); 'speed' selects "速度".
+        if quality not in {"speed", "quality", "v2", "v2.0"}:
             logger.warning(
-                f"Unknown quality {quality!r} (known: 'speed', 'quality'); "
+                f"Unknown quality {quality!r} (known: 'speed', 'quality'/'v2'); "
                 "passing through — Grok UI may reject."
             )
         import asyncio
@@ -5991,19 +5993,27 @@ class GrokClient(ResponseParser):
         )
         await asyncio.sleep(0.5 * d)
 
-        # Step 1b: Select speed/quality (new in 2026-04). Default is
-        # 'speed'; Grok's UI persists the last choice, so we always
-        # explicitly click to avoid inheriting a prior 'quality'
-        # selection from a previous session in the same Chrome.
-        quality_label = (
-            "速度" if quality == "speed" else ("质量" if quality == "quality" else quality)
-        )
-        await self._tab.evaluate(
+        # Step 1b: Select the speed/quality tier (new in 2026-04). Default is
+        # 'speed'; Grok's UI persists the last choice, so we always explicitly
+        # click. Match the chip by label PREFIX — the 2026-08 Image 2.0 UI
+        # renders the quality tier as "质量 (v2.0)" (not bare "质量"), so an
+        # exact match silently missed it. quality accepts speed | quality | v2
+        # (v2 == the "质量 (v2.0)" tier); English "Speed"/"Quality" too.
+        import json as _json_q
+
+        if quality == "speed":
+            quality_prefixes = ["速度", "Speed"]
+        elif quality in ("quality", "v2", "v2.0"):
+            quality_prefixes = ["质量", "Quality"]
+        else:
+            quality_prefixes = [quality]
+        q_click = await self._tab.evaluate(
             r"""
-            (() => {
-                const want = "__LABEL__";
+            ((prefixes) => {
+                const norm = s => (s||'').trim();
                 const b = Array.from(document.querySelectorAll('button'))
-                    .find(x => (x.innerText||'').trim() === want);
+                    .find(x => prefixes.some(p => norm(x.innerText).startsWith(p)
+                                                || norm(x.getAttribute('aria-label')).startsWith(p)));
                 if (!b) return 'not-found';
                 const r = b.getBoundingClientRect();
                 const x = r.x + r.width/2, y = r.y + r.height/2;
@@ -6014,10 +6024,17 @@ class GrokClient(ResponseParser):
                 b.dispatchEvent(new PointerEvent('pointerup', o));
                 b.dispatchEvent(new MouseEvent('mouseup', o));
                 b.dispatchEvent(new MouseEvent('click', o));
-                return 'ok';
-            })()
-            """.replace("__LABEL__", quality_label)
+                return 'clicked:' + norm(b.innerText).slice(0, 20);
+            })(__PREFIXES__)
+            """.replace("__PREFIXES__", _json_q.dumps(quality_prefixes))
         )
+        if q_click == "not-found":
+            logger.warning(
+                "[create_image] quality tier chip %r not found (prefixes=%r) — "
+                "Grok may have renamed it again; using whatever tier is active.",
+                quality,
+                quality_prefixes,
+            )
         await asyncio.sleep(0.3 * d)
 
         # Step 2: Set aspect ratio. The 宽高比 button opens a popup of
@@ -6868,6 +6885,29 @@ class GrokClient(ResponseParser):
                 f"candidate_messages={candidate_messages!r}. "
                 f"Wait several minutes before retrying."
             )
+        # BEFORE blaming a throttle: an EMPTY prompt editor disables submit
+        # exactly the same way. If the prompt never got typed in, this is a
+        # UI-not-ready / prompt-fill failure (e.g. the 2026-08 Image 2.0
+        # redesign broke a fill path) — NOT a server-side throttle.
+        # Misreporting it as an hourly throttle sends users to wait 24h for
+        # nothing (the reported symptom). Type it distinctly + retryable.
+        prompt_text = await self._tab.evaluate(
+            "((e)=>e?(e.innerText||'').trim():null)("
+            "document.querySelector('.tiptap.ProseMirror')"
+            "||document.querySelector('[contenteditable=\"true\"]'))",
+            await_promise=False,
+        )
+        if prompt_text is not None and not str(prompt_text).strip():
+            return GrokAPIError(
+                f"{action}: submit is disabled because the prompt editor is "
+                f"EMPTY — the prompt never got typed in (this is NOT a "
+                f"throttle). Usually a Grok UI change breaking the prompt-fill "
+                f"(e.g. the 2026-08 Image 2.0 redesign). Fix/retry the call — "
+                f"do NOT wait out a 24h throttle. Probe: "
+                f"submit_aria={submit_state.get('submit_aria')!r}, "
+                f"submit_text={submit_state.get('submit_text')!r}."
+            )
+
         # Silently disabled — no banner / dialog text recognised. Most
         # common cause as of 2026-06 is Grok's hourly anti-abuse
         # throttle, which disables the submit button without rendering

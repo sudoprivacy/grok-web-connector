@@ -116,11 +116,12 @@ PARAMS: dict[str, dict[str, Any]] = {
     },
     "quality": {
         "desc": (
-            "Generation quality preset: 'speed' (faster, lower quality, "
-            "default — matches Grok Imagine's default) or 'quality' "
-            "(slower, higher fidelity). Grok added this toggle in 2026-04; "
-            "unknown values are passed through with a warning so future "
-            "additions like 'ultra' don't hard-break."
+            "Generation quality tier: 'speed' (faster, lower quality, default "
+            "— the '速度' chip) or 'quality'/'v2' (slower, higher fidelity — the "
+            "'质量 (v2.0)' chip, Grok Imagine's 2026-08 Image 2.0 model, its "
+            "most powerful). Grok added this toggle in 2026-04 and renamed the "
+            "high tier to '(v2.0)' in 2026-08; the connector matches the chip "
+            "by label prefix. Unknown values pass through with a warning."
         ),
         "type": "str",
         "default": "speed",

@@ -693,3 +693,26 @@ async def test_list_posts_media_type_filter(client):
         assert videos, "favorites contain video posts but the video filter returned none"
     if have_image:
         assert images, "favorites contain image posts but the image filter returned none"
+
+
+# ---------------------------------------------------------------------------
+# Scenario: create_image_quality_v2 (2026-08 Image 2.0 tier)
+# ---------------------------------------------------------------------------
+@pytest.mark.integration
+async def test_create_image_quality_v2(client):
+    """create_image(quality='v2') selects the 2026-08 '质量 (v2.0)' tier
+    (Grok Imagine Image 2.0) and generates. Regression guard for the
+    label-PREFIX match — the old exact '质量' match silently missed the
+    renamed '质量 (v2.0)' chip, leaving the wrong tier selected.
+    """
+    res = await client.create_image(
+        {
+            "prompt": "a friendly cartoon superhero mascot, plain white background",
+            "quality": "v2",
+            "min_success": 1,
+            "max_scroll": 2,
+        }
+    )
+    assert isinstance(res, ImageGenerationResult)
+    done = [i for i in res.images if not i.get("moderated")]
+    assert done, "quality='v2' (Image 2.0 tier) produced no non-moderated image"
