@@ -35,6 +35,7 @@ Coverage — maps 1:1 to scenarios.json:
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import os
 from pathlib import Path
@@ -48,6 +49,7 @@ from grok_web import (
     VideoGenerationResult,
     VideoMatchResult,
     get_client,
+    reap_orphan_chrome,
 )
 
 # ---------------------------------------------------------------------------
@@ -716,3 +718,56 @@ async def test_create_image_quality_v2(client):
     assert isinstance(res, ImageGenerationResult)
     done = [i for i in res.images if not i.get("moderated")]
     assert done, "quality='v2' (Image 2.0 tier) produced no non-moderated image"
+
+
+# ---------------------------------------------------------------------------
+# Scenario: chrome_no_orphans (Chrome-lifecycle fix — sequential sessions)
+# ---------------------------------------------------------------------------
+def _count_profile_chrome() -> int:
+    """Count chrome.exe whose command line references the connector profile dir."""
+    import platform
+    import subprocess
+
+    prof_dir = str(Path.home() / ".grok-web-connector" / "profiles" / "grok-chrome")
+    if platform.system() != "Windows":
+        out = subprocess.run(["pgrep", "-f", prof_dir], capture_output=True, text=True)
+        return len([x for x in out.stdout.splitlines() if x.strip().isdigit()])
+    esc = prof_dir.replace("'", "''")
+    ps = (
+        "$d='" + esc + "'.ToLower(); @(Get-CimInstance Win32_Process -Filter "
+        "\"name='chrome.exe'\" | Where-Object { $_.CommandLine -and "
+        "$_.CommandLine.ToLower().Contains($d) }).Count"
+    )
+    out = subprocess.run(
+        ["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True, timeout=15
+    )
+    s = (out.stdout or "").strip()
+    return int(s) if s.isdigit() else 0
+
+
+@pytest.mark.integration
+async def test_chrome_no_orphans():
+    """Two sequential get_client() sessions: the first closes its Chrome on
+    exit (no orphan), and the second launches successfully — even if a
+    leftover Chrome is holding the profile lock (auto-reaped on launch).
+    Regression for the orphan-accumulation → profile-lock launch failure.
+    """
+    reap_orphan_chrome()  # clean slate
+    await asyncio.sleep(1)
+
+    async with get_client() as c:  # default close_chrome=True
+        assert await c.list_posts(limit=1, source="favorites") is not None
+    await asyncio.sleep(2)
+    assert _count_profile_chrome() == 0, "default session must not orphan Chrome"
+
+    # A leftover Chrome (kept alive) must not block the next launch.
+    async with get_client(close_chrome=False) as c:
+        assert await c.list_posts(limit=1, source="favorites") is not None
+    await asyncio.sleep(2)
+    assert _count_profile_chrome() >= 1, "close_chrome=False should keep Chrome alive"
+
+    async with get_client() as c:  # must auto-reap the orphan, not fail
+        posts = await c.list_posts(limit=1, source="favorites")
+    assert posts is not None, "session after an orphan must launch (auto-reap)"
+    await asyncio.sleep(2)
+    assert _count_profile_chrome() == 0, "orphan should be reaped + this session closed"

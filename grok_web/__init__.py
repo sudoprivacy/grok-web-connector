@@ -15,7 +15,7 @@ from pathlib import Path
 
 from .agent_client import GrokAgentClient
 from .auth import load_api_key, load_cookies, save_cookies
-from .client import GrokClient
+from .client import GROK_CHROME_PROFILE, GrokClient
 from .exceptions import (
     GrokAPIError,
     GrokAuthError,
@@ -91,6 +91,7 @@ def get_client(
     startup_timeout: float = 30.0,
     extra_chrome_args: list[str] | None = None,
     user_data_dir: "str | Path | None" = None,
+    close_chrome: bool = True,
 ) -> GrokClient:
     """
     Get the Grok API client.
@@ -103,6 +104,13 @@ def get_client(
         browser_host: Chrome debugging host (optional, defaults to 127.0.0.1)
         browser_port: Chrome debugging port (optional, defaults to 9350)
         headless: Run browser in headless mode (default: False)
+        close_chrome: Close the auto-launched Chrome when the ``async with``
+            block exits (default True) so sessions don't orphan chrome.exe
+            holding the profile lock (which makes the NEXT launch fail on the
+            Singleton lock). Set False to keep Chrome alive for cross-session
+            reuse (batch); a Chrome you attached to (existing debug port) is
+            never closed. Orphans from a crashed/older session are auto-reaped
+            (namespace-scoped) on the next launch regardless.
         profile: Chrome profile name (optional, defaults to "grok-chrome")
         startup_timeout: Seconds to wait for Chrome to bind its debug port on
             auto-launch (default: 30.0). Raise on slow / crowded Windows
@@ -144,7 +152,33 @@ def get_client(
         startup_timeout=startup_timeout,
         extra_chrome_args=extra_chrome_args,
         user_data_dir=user_data_dir,
+        close_chrome=close_chrome,
     )
+
+
+def reap_orphan_chrome(
+    profile: str | None = None,
+    user_data_dir: "str | Path | None" = None,
+) -> int:
+    """Deterministically reap orphaned connector Chrome processes.
+
+    Namespace-scoped: kills ONLY chrome.exe whose ``--user-data-dir`` is the
+    connector's profile dir (never a blanket kill of the user's browser), and
+    clears the profile's ``Singleton*`` lockfiles. Call between runs if a
+    crashed session left a Chrome holding the profile lock. Returns the number
+    of processes killed.
+
+    Sessions now close their own Chrome on exit (``close_chrome=True`` default)
+    and auto-reap stale same-profile orphans on the next launch, so this is a
+    manual escape hatch — rarely needed.
+    """
+    prof = profile or GROK_CHROME_PROFILE
+    udir = (
+        Path(user_data_dir)
+        if user_data_dir
+        else (Path.home() / ".grok-web-connector" / "profiles" / prof)
+    )
+    return GrokClient._reap_profile_chrome(udir)
 
 
 def get_agent_client(
@@ -213,6 +247,7 @@ __all__ = [
     # Factory functions (main entry points)
     "get_client",
     "get_agent_client",
+    "reap_orphan_chrome",
     "get_api_client",
     # Client classes
     "GrokClient",

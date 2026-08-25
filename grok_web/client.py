@@ -284,6 +284,7 @@ class GrokClient(ResponseParser):
         startup_timeout: float = 30.0,
         extra_chrome_args: list[str] | None = None,
         user_data_dir: str | Path | None = None,
+        close_chrome: bool = True,
     ):
         """
         Initialize GrokClient.
@@ -348,6 +349,7 @@ class GrokClient(ResponseParser):
         self._tab = None
         self._initialized = False
         self._chrome_process = None  # Track Chrome process we launched
+        self._reused_chrome = False  # True if we attached to an existing Chrome
         self._ui_delay = ui_delay
         # One-shot flag so create_image's "you're not persisting" nudge
         # fires at most once per client — avoids log spam on batch runs
@@ -373,6 +375,11 @@ class GrokClient(ResponseParser):
         self._remote_port = port  # None = let start_browser auto-assign
         self._auto_launch = auto_launch
         self._force_new_chrome = force_new_chrome
+        # Close the Chrome WE launched on __aexit__ (default True) so sessions
+        # don't orphan chrome.exe holding the profile lock. Set False to keep
+        # it alive for cross-session reuse (batch); a reused/attached Chrome is
+        # never closed regardless of this flag.
+        self._close_chrome = close_chrome
         self._profile = profile
         self._startup_timeout = startup_timeout
         self._extra_chrome_args = list(extra_chrome_args) if extra_chrome_args else None
@@ -402,6 +409,72 @@ class GrokClient(ResponseParser):
 
             config = load_config(self._config_path)
             return config["cookies"]
+
+    @staticmethod
+    def _reap_profile_chrome(user_data_dir: Path) -> int:
+        """Namespace-scoped reap of stale chrome.exe holding OUR profile dir.
+
+        Kills only Chrome processes whose command line references
+        ``user_data_dir`` (never a blanket ``taskkill /IM chrome.exe`` — that
+        would kill the user's real browser), then removes the profile's
+        ``Singleton*`` lockfiles so a fresh launch can bind. Returns the number
+        of processes killed. Best-effort — swallows all errors.
+        """
+        import contextlib
+        import platform
+        import subprocess
+
+        udir = str(Path(user_data_dir))
+        killed = 0
+        try:
+            if platform.system() == "Windows":
+                # Match CommandLine containing our --user-data-dir path
+                # (case-insensitive). Embed the path directly — `-args` after
+                # `-Command` does NOT populate $args (that's `-File` only), so
+                # a $args-based match silently ran against an empty path.
+                esc = udir.replace("'", "''")
+                ps = (
+                    "$d='" + esc + "'.ToLower(); Get-CimInstance Win32_Process "
+                    "-Filter \"name='chrome.exe'\" | Where-Object { $_.CommandLine "
+                    "-and $_.CommandLine.ToLower().Contains($d) } | ForEach-Object "
+                    "{ $_.ProcessId }"
+                )
+                out = subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", ps],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                for line in out.stdout.splitlines():
+                    pid = line.strip()
+                    if pid.isdigit():
+                        with contextlib.suppress(Exception):
+                            subprocess.run(
+                                ["taskkill", "/F", "/T", "/PID", pid],
+                                capture_output=True,
+                                timeout=10,
+                            )
+                            killed += 1
+            else:
+                import os
+                import signal
+
+                out = subprocess.run(
+                    ["pgrep", "-f", udir], capture_output=True, text=True, timeout=10
+                )
+                for line in out.stdout.splitlines():
+                    pid = line.strip()
+                    if pid.isdigit():
+                        with contextlib.suppress(Exception):
+                            os.kill(int(pid), signal.SIGKILL)
+                            killed += 1
+        except Exception:
+            pass
+        # Remove the profile lockfiles that block a fresh launch.
+        for lock in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+            with contextlib.suppress(Exception):
+                (Path(user_data_dir) / lock).unlink()
+        return killed
 
     def _launch_or_reuse_chrome(
         self,
@@ -449,48 +522,66 @@ class GrokClient(ResponseParser):
                 f"{requested_port}) on whatever owns it."
             )
 
-        process = launch_chrome(
-            port=port,
-            headless=headless,
-            user_data_dir=str(user_data_dir),
-            extra_args=extra_args,
-        )
-
-        # Wait for the debug port to bind. Mirror browser_start's polling
-        # cadence so user-perceived behaviour is identical.
-        deadline = _time.time() + startup_timeout
-        while _time.time() < deadline:
-            if is_port_in_use(port=port):
-                # Briefly track the process handle so __aexit__ can decide
-                # whether to leave it running (current default — same as
-                # ai-dev-browser's "keep-alive after disconnect").
-                self._chrome_process = process
-                return port, False
-            if process.poll() is not None:
-                raise RuntimeError(
-                    f"Chrome (PID {process.pid}) exited before binding port "
-                    f"{port}. Likely causes: profile dir locked by another "
-                    f"chrome.exe, insufficient permissions on {user_data_dir}, "
-                    f"or Chrome rejected one of the launch flags."
-                )
-            _time.sleep(0.2)
-
-        # Timed out — kill the process so its profile lockfile releases.
         import contextlib
 
-        try:
-            process.terminate()
-            process.wait(timeout=5)
-        except Exception:
-            with contextlib.suppress(Exception):
-                process.kill()
-        raise RuntimeError(
-            f"Chrome started (PID {process.pid}) but port {port} not "
-            f"listening after {startup_timeout}s — process killed to "
-            f"release profile lockfile. Retry with startup_timeout=<larger> "
-            f"if your environment is slow (Windows + main Chrome running, "
-            f"first-time profile init, AV scanning, etc.)."
-        )
+        def _launch_and_wait(bind_port: int):
+            """Launch Chrome and poll until its debug port binds. Returns the
+            process on success; returns None if the process exited before
+            binding (profile-lock symptom — caller may reap + retry)."""
+            proc = launch_chrome(
+                port=bind_port,
+                headless=headless,
+                user_data_dir=str(user_data_dir),
+                extra_args=extra_args,
+            )
+            deadline = _time.time() + startup_timeout
+            while _time.time() < deadline:
+                if is_port_in_use(port=bind_port):
+                    return proc
+                if proc.poll() is not None:
+                    return None  # exited before binding — likely profile lock
+                _time.sleep(0.2)
+            # Timed out — kill so its profile lockfile releases.
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+            except Exception:
+                with contextlib.suppress(Exception):
+                    proc.kill()
+            raise RuntimeError(
+                f"Chrome started (PID {proc.pid}) but port {bind_port} not "
+                f"listening after {startup_timeout}s — process killed to "
+                f"release profile lockfile. Retry with startup_timeout=<larger> "
+                f"if your environment is slow (Windows + main Chrome running, "
+                f"first-time profile init, AV scanning, etc.)."
+            )
+
+        process = _launch_and_wait(port)
+        if process is None:
+            # The launched Chrome exited before binding — almost always a
+            # stale same-profile chrome.exe (orphaned by a prior session that
+            # didn't close it) holding the profile lock. Reap it (namespace-
+            # scoped — only OUR profile dir, never a blanket kill) and retry
+            # once. This is the auto-recovery for accumulated orphans.
+            reaped = self._reap_profile_chrome(user_data_dir)
+            logger.warning(
+                "Chrome exited before binding port %d — reaped %d stale "
+                "same-profile chrome.exe holding %s, retrying launch once.",
+                port,
+                reaped,
+                user_data_dir,
+            )
+            _time.sleep(0.5)
+            process = _launch_and_wait(port)
+        if process is None:
+            raise RuntimeError(
+                f"Chrome exited before binding port {port} even after reaping "
+                f"stale same-profile processes. Likely causes: insufficient "
+                f"permissions on {user_data_dir}, or Chrome rejected a launch "
+                f"flag. (Not orphan accumulation — that was auto-recovered.)"
+            )
+        self._chrome_process = process
+        return port, False
 
     async def __aenter__(self):
         import asyncio
@@ -545,6 +636,7 @@ class GrokClient(ResponseParser):
                     force_new=self._force_new_chrome,
                     startup_timeout=self._startup_timeout,
                 )
+                self._reused_chrome = reused
                 if reused:
                     logger.info(
                         f"Reusing Chrome on port {actual_port} "
@@ -776,10 +868,6 @@ class GrokClient(ResponseParser):
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        # Don't stop Chrome - keep it running for reuse by subsequent calls
-        # The Chrome process stays open in background, which is the desired behavior
-        # for fast batch processing
-
         # Auto-save cookies on successful exit (no exception)
         # Use timeout to avoid hanging if Chrome was already killed
         if exc_type is None and self._initialized and self._browser:
@@ -790,8 +878,7 @@ class GrokClient(ResponseParser):
             except Exception:
                 pass  # Ignore errors (Chrome may already be dead)
 
-        # Disconnect from tab to release attached state and allow Chrome reuse
-        # This properly detaches from the page target, making is_chrome_in_use() return False
+        # Disconnect from tab to release attached state.
         if self._tab:
             try:
                 import asyncio
@@ -799,6 +886,30 @@ class GrokClient(ResponseParser):
                 await asyncio.wait_for(self._tab.disconnect(), timeout=5.0)
             except Exception:
                 pass  # Ignore disconnect errors (including timeout)
+
+        # Close the Chrome WE launched (default) so it doesn't orphan and hold
+        # the profile lock — the accumulation bug. Skipped when close_chrome
+        # is False (batch keep-alive) or when we ATTACHED to an existing Chrome
+        # (never kill someone else's browser). A /T tree-kill on Windows also
+        # takes the renderer children; POSIX terminate() lets them reap with
+        # the parent.
+        if self._close_chrome and self._chrome_process is not None and not self._reused_chrome:
+            import contextlib
+            import platform
+            import subprocess
+
+            proc = self._chrome_process
+            with contextlib.suppress(Exception):
+                if platform.system() == "Windows":
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                        capture_output=True,
+                        timeout=10,
+                    )
+                else:
+                    proc.terminate()
+                proc.wait(timeout=5)
+            self._chrome_process = None
 
     async def _auto_save_cookies(self) -> None:
         """Extract cookies from browser and save to config file."""
