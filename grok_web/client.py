@@ -6203,6 +6203,14 @@ class GrokClient(ResponseParser):
                 f"Unknown quality {quality!r} (known: 'speed', 'quality'/'v2'); "
                 "passing through — Grok UI may reject."
             )
+        # Image 2.0 'quality'/'v2' tiers deliver a FIXED batch per submit
+        # (~4 images) and do NOT infinite-scroll to generate more (verified
+        # live 2026-08: the gallery sits at scroll-bottom and wheel events add
+        # nothing). So on these tiers we accumulate toward min_success by
+        # RE-SUBMITTING the prompt (each submit = one fresh batch; 提交 stays
+        # enabled between batches). 'speed' keeps the proven infinite-scroll
+        # path. max_scroll is reinterpreted as the max number of extra batches.
+        is_batch_tier = quality in ("quality", "v2", "v2.0")
         import asyncio
         import json as json_mod
 
@@ -6745,19 +6753,91 @@ class GrokClient(ResponseParser):
                 f"coords."
             )
 
-        # Step 6: Wait for initial batch of images via WebSocket
+        # Step 6: Wait for the initial batch to finish. Batch size is
+        # tier-dependent (speed ≈ 6, Image 2.0 'quality'/'v2' ≈ 4), so DON'T
+        # hard-code a count — a fixed `>= 6` made v2 (batch of 4) wait the full
+        # `timeout` every call for a 6th image that never arrives (BR 2026-08).
+        # Break when the batch has settled: all registered jobs are complete
+        # and the completed count has stopped growing, or min_success is met.
         start_time = asyncio.get_event_loop().time()
+        settle_ok = 0
+        prev_completed = -1
         while asyncio.get_event_loop().time() - start_time < timeout:
-            completed = [
-                job for job in captured_data["jobs"].values() if job.get("progress") == 100
-            ]
-            # Wait for at least 6 images (first batch is usually 6)
-            if len(completed) >= 6:
+            all_jobs = list(captured_data["jobs"].values())
+            completed = [job for job in all_jobs if job.get("progress") == 100]
+            if len(completed) >= min_success:
                 break
+            # Settled = ≥1 done, every registered job done, count stable a few
+            # checks (catches images that register slightly after the first).
+            if all_jobs and len(completed) == len(all_jobs) and len(completed) == prev_completed:
+                settle_ok += 1
+                if settle_ok >= 3:
+                    break
+            else:
+                settle_ok = 0
+            prev_completed = len(completed)
             await asyncio.sleep(1)
 
-        # Step 7: Scroll down to generate more if needed
-        # min_success means non-moderated images, so we keep scrolling until we have enough
+        async def _resubmit_batch() -> bool:
+            """Re-fill the prompt and click 提交 to trigger another fixed batch.
+
+            Image 2.0 'quality'/'v2' tiers have no infinite-scroll (verified
+            live 2026-08: 提交 stays enabled between batches and each click
+            yields a fresh ~4-image batch). In-page, NO reload. Returns True if
+            the click fired, False if the submit button is absent/disabled.
+            """
+            escaped = prompt.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
+            filled = await self._tab.evaluate(
+                f"""
+                (() => {{
+                    const ed = document.querySelector('.tiptap.ProseMirror');
+                    if (!ed) return 'not-found';
+                    ed.focus();
+                    document.execCommand('selectAll');
+                    document.execCommand('delete');
+                    document.execCommand('insertText', false, `{escaped}`);
+                    return 'ok';
+                }})()
+                """
+            )
+            if filled != "ok":
+                return False
+            await asyncio.sleep(0.5 * d)
+            rect_raw = await self._tab.evaluate(
+                r"""
+                JSON.stringify((() => {
+                    const b = document.querySelector('button[aria-label="提交"]');
+                    if (!b) return null;
+                    const r = b.getBoundingClientRect();
+                    return {x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2),
+                            disabled: b.disabled || b.getAttribute('aria-disabled') === 'true'};
+                })())
+                """
+            )
+            rect = json_mod.loads(rect_raw) if isinstance(rect_raw, str) else rect_raw
+            if not rect or rect.get("disabled"):
+                return False
+            for _ev, _btn, _cc in [
+                ("mouseMoved", cdp.input_.MouseButton.NONE, 0),
+                ("mousePressed", cdp.input_.MouseButton.LEFT, 1),
+                ("mouseReleased", cdp.input_.MouseButton.LEFT, 1),
+            ]:
+                await self._tab.send(
+                    cdp.input_.dispatch_mouse_event(
+                        type_=_ev,
+                        x=float(rect["x"]),
+                        y=float(rect["y"]),
+                        button=_btn,
+                        click_count=_cc,
+                        pointer_type="mouse",
+                    )
+                )
+                await asyncio.sleep(0.05)
+            return True
+
+        # Step 7: generate more until min_success.
+        #   * speed tier  -> scroll the gallery (infinite-scroll loads more).
+        #   * batch tiers -> re-submit the prompt (no infinite-scroll; BR 2026-08).
         # Note: Grok rate-limits generation - new batches appear every 2-3 minutes
         # We use exponential backoff when scroll doesn't generate new jobs
         scroll_count = 0
@@ -6816,6 +6896,59 @@ class GrokClient(ResponseParser):
             if success_count >= min_success:
                 logger.info(f"[scroll] reached min_success={min_success}, stopping")
                 break
+
+            # Image 2.0 batch tiers ('quality'/'v2'): no infinite-scroll — get
+            # more by RE-SUBMITTING the prompt (each submit = one fresh batch),
+            # not by scrolling. Verified live 2026-08. This is the internalised
+            # form of the reporter's "loop create_image N times" workaround, so
+            # create_image(quality='v2', min_success=N) just works.
+            if is_batch_tier:
+                jobs_before = len(captured_data["jobs"])
+                fired = await _resubmit_batch()
+                if not fired:
+                    # 提交 gone/disabled → distinguish throttle vs simply done.
+                    typed = await self._classify_submit_block(action="create_image")
+                    if typed is not None:
+                        raise typed
+                    logger.info(
+                        "[create_image] batch tier: 提交 no longer fireable "
+                        "(disabled/absent); stopping at success=%d",
+                        success_count,
+                    )
+                    break
+                logger.info(
+                    "[create_image] batch tier: re-submitted for another batch "
+                    "(success=%d, target=%d, batch %d/%d)",
+                    success_count,
+                    min_success,
+                    scroll_count + 1,
+                    max_scroll,
+                )
+                # Wait for the new batch to register + fully render before the
+                # next iteration recounts (bounded so a stalled batch can't
+                # hang). The loop-top stability wait then confirms completion.
+                batch_deadline = asyncio.get_event_loop().time() + min(timeout, 200)
+                while asyncio.get_event_loop().time() < batch_deadline:
+                    all_jobs = list(captured_data["jobs"].values())
+                    if len(all_jobs) > jobs_before and all(
+                        j.get("progress") == 100 for j in all_jobs
+                    ):
+                        break
+                    await asyncio.sleep(2)
+                if len(captured_data["jobs"]) == jobs_before:
+                    # Re-submit fired but produced no new jobs — treat like the
+                    # scroll no-progress case: classify throttle, else stop.
+                    typed = await self._classify_submit_block(action="create_image")
+                    if typed is not None:
+                        raise typed
+                    logger.warning(
+                        "[create_image] batch tier: re-submit produced no new "
+                        "jobs; stopping at success=%d",
+                        success_count,
+                    )
+                    break
+                scroll_count += 1
+                continue
 
             # Check if scrolling is generating new jobs
             if scroll_count > 0 and len(completed) == jobs_before_scroll:

@@ -844,6 +844,43 @@ async def test_create_image_quality_v2(client):
     assert done, "quality='v2' (Image 2.0 tier) produced no non-moderated image"
 
 
+@pytest.mark.integration
+async def test_create_image_v2_batch_accumulates(client):
+    """BR 2026-08: create_image(quality='v2') used to STALL at 4 images — the
+    v2 tier delivers a FIXED batch (~4) with no infinite-scroll, so the old
+    scroll-to-load-more loop (and the hard-coded '>=6' first-batch wait) never
+    accumulated past the first batch. The fix re-SUBMITS the prompt per batch.
+
+    Assert min_success=8 now accumulates BEYOND one v2 batch (>=5 proves a
+    second batch was generated), and that it completes in bounded time rather
+    than hanging. Data flows: batch1(4) -> re-submit -> batch2 -> >=8.
+    """
+    import time
+
+    t0 = time.perf_counter()
+    res = await client.create_image(
+        {
+            "prompt": "a friendly cartoon superhero mascot, full body, plain white background",
+            "quality": "v2",
+            "aspect_ratio": "9:16",
+            "min_success": 8,
+            "max_scroll": 4,
+            "timeout": 240,
+        }
+    )
+    elapsed = time.perf_counter() - t0
+    assert isinstance(res, ImageGenerationResult)
+    done = [i for i in res.images if not i.get("moderated")]
+    # A single v2 batch is ~4; >=5 proves the re-submit accumulation fired.
+    assert len(done) >= 5, (
+        f"v2 accumulation broken: got {len(done)} non-moderated (expected >=5 via "
+        f"re-submit; a single batch is ~4). Total jobs={len(res.images)}."
+    )
+    # Guard against the old full-timeout hang: two v2 batches render well under
+    # 4 * timeout. (Sanity only — generation speed varies.)
+    assert elapsed < 240 * 3, f"took {elapsed:.0f}s — unexpectedly close to a timeout hang"
+
+
 # ---------------------------------------------------------------------------
 # Scenario: chrome_no_orphans (Chrome-lifecycle fix — sequential sessions)
 # ---------------------------------------------------------------------------

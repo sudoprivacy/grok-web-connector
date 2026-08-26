@@ -151,13 +151,24 @@ PARAMS: dict[str, dict[str, Any]] = {
             "'质量 (v2.0)' chip, Grok Imagine's 2026-08 Image 2.0 model, its "
             "most powerful). Grok added this toggle in 2026-04 and renamed the "
             "high tier to '(v2.0)' in 2026-08; the connector matches the chip "
-            "by label prefix. Unknown values pass through with a warning."
+            "by label prefix. Unknown values pass through with a warning. "
+            "ACCUMULATION DIFFERS BY TIER (handled internally — you always just "
+            "set min_success): 'speed' streams into an infinite-scroll gallery; "
+            "'quality'/'v2' deliver a FIXED batch (~4) per submit with no "
+            "infinite-scroll, so the connector re-submits the prompt per batch "
+            "to reach min_success."
         ),
         "type": "str",
         "default": "speed",
     },
     "max_scroll": {
-        "desc": "Max scroll attempts for more images.",
+        "desc": (
+            "Cap on how many extra 'load-more' rounds to do to reach "
+            "min_success. On 'speed' this is the max gallery-scroll attempts; "
+            "on 'quality'/'v2' (fixed ~4-image batches, no infinite-scroll) it "
+            "is the max number of prompt RE-SUBMITS (each yields one more "
+            "batch). Either way the loop stops early once min_success is met."
+        ),
         "type": "int",
         "default": 5,
     },
