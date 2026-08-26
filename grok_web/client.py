@@ -35,6 +35,7 @@ from .auth import DEFAULT_CONFIG_PATH, load_config, save_cookies
 from .exceptions import GrokAPIError, GrokAuthError, GrokConfigError, GrokNotFoundError
 from .models import (
     MODE_TXT2VID,
+    GenerationMedia,
     GrokCookies,
     ImageEditResult,
     ImageGenerationResult,
@@ -1038,12 +1039,14 @@ class GrokClient(ResponseParser):
             "x-statsig-id": "{statsig_id}"
         }}"""
 
+        # GET/HEAD requests must NOT carry a body (fetch throws otherwise).
+        body_line = "" if method.upper() in ("GET", "HEAD") else f"body: '{payload_escaped}',"
         js_code = f"""
         (async () => {{
             const resp = await fetch("{url}", {{
                 method: "{method.upper()}",
                 headers: {headers_js},
-                body: '{payload_escaped}',
+                {body_line}
                 credentials: "include"
             }});
             const text = await resp.text();
@@ -1347,6 +1350,103 @@ class GrokClient(ResponseParser):
                 break
 
         return posts if limit is None else posts[:limit]
+
+    async def list_generations(
+        self,
+        limit: int | None = 100,
+        media_type: str | None = None,
+        max_conversations: int = 300,
+    ) -> list["GenerationMedia"]:
+        """Use when: enumerating the user's OWN generated media (images/videos).
+
+        ``list_posts`` reads the LEGACY ``/rest/media/post/list`` surface, which
+        holds only LIKED posts — a user's own 2026 Imagine creations are
+        INVISIBLE to it. Those live under the 2026 canvas/conversation model:
+        this walks ``GET /rest/app-chat/conversations`` -> per-conversation
+        ``.../{id}/responses`` and deep-scans each response for Grok-hosted
+        media URLs (classified image/video/audio by extension, so a video is
+        caught whichever field carries it). Returns newest-first.
+
+        Args:
+            limit: Max media items to return (None = all found). Newest first.
+            media_type: Keep only ``'image'`` / ``'video'`` / ``'audio'``;
+                None = all.
+            max_conversations: Safety cap on how many conversations to scan
+                (each is one extra REST call).
+
+        Returns:
+            list[GenerationMedia] — each has ``url``, ``media_type``,
+            ``asset_id`` (the download-filename id, for resolving a downloaded
+            file back to its source — see :meth:`find_generation_by_id`),
+            ``conversation_id``, ``response_id``, ``created_at``.
+
+        Failure:
+            * A single conversation's ``/responses`` failing is skipped (best
+              effort) rather than aborting the whole enumeration.
+            * Grok's conversation list may be capped server-side; if you have
+              more conversations than are returned in one page, some older
+              media may be missed (no cursor is exposed on this endpoint as of
+              2026-08). Raise ``max_conversations`` won't help past that cap.
+        """
+        from ._internal import (
+            APP_CHAT_CONVERSATIONS_ENDPOINT,
+            extract_generation_media,
+        )
+
+        want = str(media_type).lower() if media_type else None
+
+        convo_data = await self._api_request(
+            "GET", f"{APP_CHAT_CONVERSATIONS_ENDPOINT}?pageSize={max_conversations}"
+        )
+        conversations = convo_data.get("conversations", []) if isinstance(convo_data, dict) else []
+
+        items: list[dict] = []
+        for convo in conversations[:max_conversations]:
+            conv_id = convo.get("conversationId") or convo.get("id")
+            if not conv_id:
+                continue
+            try:
+                resp_data = await self._api_request(
+                    "GET", f"{APP_CHAT_CONVERSATIONS_ENDPOINT}/{conv_id}/responses"
+                )
+            except GrokAPIError:
+                continue
+            items.extend(extract_generation_media(resp_data, conv_id))
+
+        if want:
+            items = [it for it in items if it["media_type"] == want]
+
+        # Newest first (createTime is ISO-8601, so lexical sort == chronological).
+        items.sort(key=lambda it: it.get("created_at") or "", reverse=True)
+        if limit is not None:
+            items = items[:limit]
+        return [GenerationMedia(**it) for it in items]
+
+    async def find_generation_by_id(self, asset_id: str) -> "GenerationMedia | None":
+        """Use when: resolving a downloaded media file back to its source.
+
+        A ``grok-video-<uuid>.mp4`` download-filename id (or a bare id, or any
+        ``.../<id>.<ext>`` URL) 404s on ``/rest/media/post/get`` — those ids are
+        NOT on the legacy post surface. This enumerates the user's generations
+        (:meth:`list_generations`) and matches ``asset_id`` against each media
+        URL's filename stem.
+
+        Args:
+            asset_id: A download filename (``grok-video-<uuid>.mp4``), a bare
+                id, or a media URL — normalized to the bare id for matching.
+
+        Returns:
+            The matching GenerationMedia, or None if not found in the user's
+            enumerable generations (e.g. deleted, or beyond the conversation
+            list cap — see :meth:`list_generations` Failure).
+        """
+        from ._internal import normalize_asset_id
+
+        target = normalize_asset_id(asset_id)
+        for media in await self.list_generations(limit=None):
+            if media.asset_id and normalize_asset_id(media.asset_id) == target:
+                return media
+        return None
 
     async def get_post_details(self, post_id: str) -> PostDetails:
         """Get full details of a post including all child videos.

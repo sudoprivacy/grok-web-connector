@@ -121,6 +121,27 @@ class PostSummary(BaseModel):
         return f"https://grok.com/imagine/post/{self.id}"
 
 
+class GenerationMedia(BaseModel):
+    """One generated media asset from list_generations().
+
+    The user's OWN creation, enumerated via the 2026 canvas/conversation
+    surface (NOT /rest/media/post/list, which only holds LIKED posts). Use
+    ``asset_id`` (the media-URL filename stem = the download-filename id) to
+    resolve a downloaded ``grok-video-<id>.mp4`` back to its source.
+    """
+
+    url: str = Field(..., description="Direct media URL (image/video/audio) on Grok's CDN")
+    media_type: str = Field(..., description="'image', 'video', or 'audio' (by URL extension)")
+    asset_id: str | None = Field(
+        None, description="URL filename stem — matches the download-file id"
+    )
+    conversation_id: str | None = Field(
+        None, description="Owning app-chat conversationId (the enumeration key)"
+    )
+    response_id: str | None = Field(None, description="Owning responseId within the conversation")
+    created_at: datetime | None = Field(None, description="Response creation time (UTC)")
+
+
 class PostDetails(BaseModel):
     """Full details of a post for get_post_details() response."""
 

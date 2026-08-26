@@ -822,6 +822,42 @@ async def test_list_posts_media_type_filter(client):
 
 
 # ---------------------------------------------------------------------------
+# Scenario: list_generations (2026 canvas/conversation own-media enumeration)
+# ---------------------------------------------------------------------------
+@pytest.mark.integration
+async def test_list_generations_enumerates_own_media(client):
+    """list_generations() surfaces the user's OWN generated media via the 2026
+    app-chat conversation surface — the generations that legacy list_posts
+    (LIKED-only) can't see. Verifies real items with fetchable CDN URLs, and
+    that find_generation_by_id round-trips a download-filename id.
+
+    Skips (not fails) if the test account has no enumerable generations — the
+    surface + extraction are also covered by tests/test_generation_enumeration.
+    """
+    from grok_web import GenerationMedia
+
+    gens = await client.list_generations(limit=25)
+    if not gens:
+        pytest.skip("test account has no enumerable generations")
+    assert all(isinstance(g, GenerationMedia) for g in gens)
+    assert all(g.media_type in ("image", "video", "audio") for g in gens)
+    assert all(g.asset_id and g.url.startswith("https://") for g in gens)
+
+    # The enumerated URL must be real + sized (the consumer's size-match relies
+    # on this). Use the connector's own auth'd HEAD — assets.grok.com 403s a
+    # naked request; get_asset_file_size fetches with the session credentials.
+    top = gens[0]
+    size = await client.get_asset_file_size(top.url)
+    assert size > 0, f"enumerated URL returned no size: {top.url}"
+
+    # Resolver round-trip: a download-style filename for an enumerated asset
+    # resolves back to that same item.
+    ext = "mp4" if top.media_type == "video" else "jpg"
+    hit = await client.find_generation_by_id(f"grok-{top.media_type}-{top.asset_id}.{ext}")
+    assert hit is not None and hit.asset_id == top.asset_id
+
+
+# ---------------------------------------------------------------------------
 # Scenario: create_image_quality_v2 (2026-08 Image 2.0 tier)
 # ---------------------------------------------------------------------------
 @pytest.mark.integration

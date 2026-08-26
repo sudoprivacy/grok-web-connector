@@ -102,6 +102,169 @@ MEDIA_REFERENCE_DELETE_ENDPOINT = "/rest/media/reference/delete"
 #     "score","maskUrl","maskRle":{"size":[h,w],"counts":"<rle>"}}, ...]}}
 MEDIA_SEGMENT_ENDPOINT = "/rest/media/segment"
 
+# 2026 canvas/conversation model — the user's OWN generations live here, NOT in
+# /rest/media/post/list (that endpoint holds only LIKED posts, ~700 + residual;
+# a user's own 2026 Imagine creations are invisible to it). Discovered live
+# 2026-08 (consumer CDP capture + our recon): the Imagine UI enumerates via
+#   GET  /rest/app-chat/conversations                     -> {"conversations":[{conversationId,mediaTypes,latestAssetMetadata,kind,...}]}
+#   GET  /rest/app-chat/conversations/{id}/responses      -> {"responses":[{responseId,generatedImageUrls,fileUris,imageEditUris,...}]}
+# and a parallel canvas surface: /rest/media/canvas/{list,get}. The actual media
+# URLs live in the per-response payload; see extract_generation_media().
+APP_CHAT_CONVERSATIONS_ENDPOINT = "/rest/app-chat/conversations"
+MEDIA_CANVAS_LIST_ENDPOINT = "/rest/media/canvas/list"
+MEDIA_CANVAS_GET_ENDPOINT = "/rest/media/canvas/get"
+
+# Media-URL classification for generation enumeration. We deep-scan response
+# payloads for Grok-hosted media URLs and classify by extension rather than by
+# field name — the field a video URL lands in varies (generatedImageUrls /
+# fileUris / imageEditUris / latestAssetMetadata), and new fields appear as the
+# UI churns, but the CDN host + extension are stable.
+_GEN_MEDIA_EXT = {
+    "video": (".mp4", ".webm", ".mov", ".m4v"),
+    "image": (".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif"),
+    "audio": (".mp3", ".wav", ".m4a", ".ogg", ".opus"),
+}
+# Restrict to Grok/xAI asset hosts so we never mistake a web-search result URL
+# (news sites, etc. — those also appear in chat responses) for the user's media.
+_GEN_MEDIA_HOSTS = ("grok.com", "x.ai")
+_GEN_UUID_RE = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE
+)
+
+
+def _asset_url(uri: str | None) -> str | None:
+    """Turn a Grok asset reference into a full CDN URL.
+
+    Response payloads carry RELATIVE paths ('users/<uid>/generated/<id>/image.jpg')
+    — the same convention ImageGenerationResult.image_urls templates against
+    https://assets.grok.com/. Full URLs pass through unchanged.
+    """
+    if not uri:
+        return None
+    return uri if uri.startswith("http") else "https://assets.grok.com/" + uri.lstrip("/")
+
+
+def _mime_to_type(mime: str | None) -> str | None:
+    """image/jpeg -> 'image'; video/mp4 -> 'video'; audio/* -> 'audio'; else None."""
+    if not mime:
+        return None
+    top = mime.split("/", 1)[0].lower()
+    return top if top in ("image", "video", "audio") else None
+
+
+def classify_media_url(url: str) -> tuple[str | None, str | None]:
+    """Return (media_type, asset_id) for a Grok media URL/path, else (None, None).
+
+    media_type by extension; asset_id is the ``generated/<id>/`` segment when
+    present (the fileMetadataId = the download-filename id), else the filename
+    stem. Accepts full URLs and relative 'users/.../generated/...' paths.
+    """
+    base = url.split("?")[0]
+    low = base.lower()
+    # For a full URL, keep it Grok-hosted; relative paths (no scheme) are ours.
+    if "://" in low:
+        try:
+            host = low.split("/", 3)[2]
+        except IndexError:
+            return None, None
+        if not any(host.endswith(h) or ("." + h) in host for h in _GEN_MEDIA_HOSTS):
+            return None, None
+    mtype = None
+    for cand, exts in _GEN_MEDIA_EXT.items():
+        if low.endswith(exts):
+            mtype = cand
+            break
+    if not mtype:
+        return None, None
+    parts = base.split("/")
+    asset_id = None
+    if "generated" in parts:
+        i = parts.index("generated")
+        if i + 1 < len(parts):
+            asset_id = parts[i + 1]
+    if not asset_id:
+        asset_id = parts[-1].rsplit(".", 1)[0] if parts else None
+    return mtype, (asset_id or None)
+
+
+def extract_generation_media(responses_payload, conversation_id):
+    """Extract the user's generated media from a /responses payload.
+
+    Field-aware (the media a response carries is structured, not just loose
+    URLs): primary source is ``fileAttachmentsMetadata`` (each entry has
+    ``fileMetadataId`` = the asset/download id, ``fileMimeType`` = reliable
+    type, ``fileUri`` = relative CDN path); ``generatedImageUrls`` (relative
+    paths, may include videos) is folded in and classified by extension.
+    Dedup by asset_id. Returns list of dicts:
+    {url, media_type, asset_id, response_id, conversation_id, created_at}.
+    Pure/deterministic — unit-tested against captured payload samples.
+    """
+    out: list[dict] = []
+    seen: set[str] = set()
+
+    def _add(asset_id, media_type, url, rid, created):
+        if not asset_id or not media_type or asset_id in seen:
+            return
+        seen.add(asset_id)
+        out.append(
+            {
+                "url": url,
+                "media_type": media_type,
+                "asset_id": asset_id,
+                "response_id": rid,
+                "conversation_id": conversation_id,
+                "created_at": created,
+            }
+        )
+
+    responses = (
+        responses_payload.get("responses", []) if isinstance(responses_payload, dict) else []
+    )
+    for resp in responses:
+        if not isinstance(resp, dict):
+            continue
+        rid = resp.get("responseId")
+        created = resp.get("createTime")
+
+        # Primary: fileAttachmentsMetadata carries mime + id + relative uri.
+        for meta in resp.get("fileAttachmentsMetadata") or []:
+            if not isinstance(meta, dict):
+                continue
+            mtype = _mime_to_type(meta.get("fileMimeType"))
+            if not mtype:
+                # fall back to extension of the file name / uri
+                mtype, _ = classify_media_url(meta.get("fileName") or meta.get("fileUri") or "")
+            _add(meta.get("fileMetadataId"), mtype, _asset_url(meta.get("fileUri")), rid, created)
+
+        # Secondary: generatedImageUrls (relative paths; can include videos).
+        for path in resp.get("generatedImageUrls") or []:
+            if not isinstance(path, str):
+                continue
+            mtype, asset_id = classify_media_url(path)
+            _add(asset_id, mtype, _asset_url(path), rid, created)
+
+    return out
+
+
+def normalize_asset_id(value: str) -> str:
+    """Reduce a download filename / id to its bare asset id for matching.
+
+    'grok-video-<uuid>.mp4' / 'grok-image-<uuid>.jpg' / '<uuid>.mp4' / a bare
+    '<uuid>' all normalize to '<uuid>'. Falls back to the extension-stripped
+    basename when no UUID is present.
+    """
+    s = str(value or "").strip()
+    # A UUID anywhere (download filename, full URL path, or bare id) IS the id.
+    m = _GEN_UUID_RE.search(s)
+    if m:
+        return m.group(0).lower()
+    # No UUID: fall back to the extension-stripped basename.
+    v = s.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].split("?")[0]
+    if "." in v:
+        v = v.rsplit(".", 1)[0]
+    return v.lower()
+
+
 # =============================================================================
 # Shared Utilities
 # =============================================================================
