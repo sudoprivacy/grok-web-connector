@@ -50,6 +50,36 @@ PARAMS: dict[str, dict[str, Any]] = {
         ),
         "type": "list[str]",
     },
+    # --- v0.20 role-explicit source params (replace the overloaded `images`) ---
+    "source": {
+        "desc": (
+            "ONE source image for img2img / animate — a Grok-native "
+            "'post:<image_id>' (or a bare image_id; in-Grok, no re-upload, low "
+            "moderation) or a local file path (uploaded)."
+        ),
+        "type": "str",
+    },
+    "sources": {
+        "desc": (
+            "TWO OR MORE Grok-native images to compose into one — each a "
+            "'post:<image_id>' or bare image_id. In-Grok (no re-upload)."
+        ),
+        "type": "list[str]",
+    },
+    "frame": {
+        "desc": (
+            "ONE starting image for a video (img2vid) — a Grok-native "
+            "'post:<image_id>' (or bare image_id) or a local file path."
+        ),
+        "type": "str",
+    },
+    "references": {
+        "desc": (
+            "Saved Reference id(s) (from create_reference) to condition a video "
+            "on — keeps a character/subject consistent. Video-only."
+        ),
+        "type": "list[str]",
+    },
     "prompt": {
         "desc": "Text prompt. Use @1, @2... to reference images by position in 'images' list.",
         "type": "str",
@@ -404,6 +434,45 @@ IMAGE_KEYS = [
     "timeout",
     "auto_favorite",
     "thumbnail_selector",
+]
+
+# v0.20 role-explicit generation methods (single-purpose; replace the
+# overloaded `images=` on create_image/create_video — see docs/API_v0.20_redesign.md).
+IMG2IMG_KEYS = [
+    "source",
+    "prompt",
+    "aspect_ratio",
+    "quality",
+    "timeout",
+]
+
+COMPOSE_KEYS = [
+    "sources",
+    "prompt",
+    "aspect_ratio",
+    "quality",
+    "timeout",
+]
+
+ANIMATE_IMAGE_KEYS = [
+    "frame",
+    "prompt",
+    "resolution",
+    "duration",
+    "aspect_ratio",
+    "preset",
+    "timeout",
+    "wait_for_video",
+    "verify_final",
+]
+
+REFERENCE_VIDEO_KEYS = [
+    "references",
+    "prompt",
+    "resolution",
+    "duration",
+    "aspect_ratio",
+    "timeout",
 ]
 
 EDIT_KEYS = [

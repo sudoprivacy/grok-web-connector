@@ -642,6 +642,130 @@ async def test_create_image_multi_compose_cold_hint(client):
 
 
 # ---------------------------------------------------------------------------
+# Scenario: v0.20 orthogonal API — the role-explicit methods, live
+# (img2img / compose / animate / reference_video). Each routes to an already
+# live-verified internal path; these confirm the NEW public surface end-to-end.
+# ---------------------------------------------------------------------------
+@pytest.mark.integration
+async def test_img2img_new_method(client):
+    """img2img({'source': 'post:<id>', ...}) — the role-explicit replacement
+    for create_image(images=[...]). Same in-Grok imageToImage result, cleaner
+    call. Data flows image_id -> source -> new image (no re-upload)."""
+    gen = await client.create_image(
+        {
+            "prompt": "a friendly cartoon superhero mascot, full body, plain white background",
+            "min_success": 1,
+            "max_scroll": 3,
+        }
+    )
+    clean = [i for i in gen.images if not i.get("moderated")]
+    assert clean, "need a non-moderated hero image"
+    hero_id = clean[0]["image_id"]
+
+    out = await client.img2img(
+        {
+            "source": f"post:{hero_id}",
+            "prompt": "the same character sitting on a park bench in a green park, wide shot",
+        }
+    )
+    assert isinstance(out, ImageGenerationResult)
+    done = [i for i in out.images if not i.get("moderated")]
+    assert done, "img2img returned no non-moderated image"
+    assert done[0]["image_id"] != hero_id, "should be a NEW image, not the source"
+
+
+@pytest.mark.integration
+async def test_compose_new_method(client):
+    """compose({'sources': [a, b], ...}) — the role-explicit replacement for
+    create_image(images=[a, b]). Warm-gated (create_video mints the token)."""
+    a = await client.create_image(
+        {"prompt": "a red cartoon superhero mascot, plain white background", "min_success": 1}
+    )
+    b = await client.create_image(
+        {"prompt": "a blue cartoon robot mascot, plain white background", "min_success": 1}
+    )
+    id_a = next(i["image_id"] for i in a.images if not i.get("moderated"))
+    id_b = next(i["image_id"] for i in b.images if not i.get("moderated"))
+
+    warm = await client.create_video(
+        {"prompt": "a waving cartoon character", "duration": "6s", "resolution": "480p"}
+    )
+    try:
+        out = await client.compose(
+            {
+                "sources": [id_a, id_b],
+                "prompt": "the two characters standing side by side in a sunny park",
+            }
+        )
+        assert isinstance(out, ImageGenerationResult)
+        done = [i for i in out.images if not i.get("moderated")]
+        assert done, "compose returned no non-moderated image"
+        assert done[0]["image_id"] not in (id_a, id_b), "should be a NEW composed image"
+    finally:
+        if warm.video_id:
+            with contextlib.suppress(Exception):
+                await client.delete_video(warm.video_id)
+
+
+@pytest.mark.integration
+async def test_animate_new_method(client):
+    """animate({'frame': 'post:<id>', ...}) — the role-explicit replacement for
+    create_video(images=['post:<id>']) / animate_post. Data flows
+    image post -> frame -> video child."""
+    video = None
+    try:
+        video = await client.animate(
+            {
+                "frame": f"post:{TEST_SOURCE_POST_ID}",
+                "prompt": "slow cinematic zoom",
+                "duration": "6s",
+                "resolution": "480p",
+            }
+        )
+        assert isinstance(video, VideoGenerationResult)
+        assert video.video_id, "animate must return a video_id"
+    finally:
+        if video and video.video_id:
+            with contextlib.suppress(Exception):
+                await client.delete_video(video.video_id)
+
+
+@pytest.mark.integration
+async def test_reference_video_new_method(client):
+    """reference_video({'references': [<id>], ...}) — the role-explicit
+    replacement for create_video(images=['ref:<id>']). Data flows
+    image_id -> reference_id -> references -> video."""
+    gen = await client.create_image(
+        {"prompt": "a friendly cartoon superhero mascot, plain white background", "min_success": 1}
+    )
+    image_id = next(i["image_id"] for i in gen.images if not i.get("moderated"))
+    ref = await client.create_reference(
+        {"images": [f"post:{image_id}"], "title": "itest-refvid", "category": "character"}
+    )
+    ref_id = ref["reference_id"]
+
+    video = None
+    try:
+        video = await client.reference_video(
+            {
+                "references": [ref_id],
+                "prompt": "the hero waves hello in a sunny park",
+                "resolution": "480p",
+                "duration": "6s",
+            }
+        )
+        assert isinstance(video, VideoGenerationResult)
+        assert video.video_id, "reference_video must return a video_id"
+        assert video.mode == "reference", f"expected mode='reference', got {video.mode!r}"
+    finally:
+        if video and video.video_id:
+            with contextlib.suppress(Exception):
+                await client.delete_video(video.video_id)
+        with contextlib.suppress(Exception):
+            await client.delete_reference(ref_id)
+
+
+# ---------------------------------------------------------------------------
 # Scenario: ancestry_find_source_image_from_video (post enumeration APIs)
 # ---------------------------------------------------------------------------
 @pytest.mark.integration

@@ -3372,12 +3372,24 @@ class GrokClient(ResponseParser):
               instead (REST path constructs the URL correctly).
         """
         import asyncio
+        import warnings
 
         from ._internal import parse_video_ndjson_response
         from .actions.extend_seed import enable_focus_emulation
         from .actions.network_monitor import CDPMonitor
         from .prompt_parser import classify_image_source
         from .schema import ANIMATE_KEYS, validate_params
+
+        # v0.20: animate_post drove the post-page 动画 button as a separate
+        # img2vid surface; animate() covers the same operation (and also
+        # accepts local frames) through the canonical video path.
+        warnings.warn(
+            "animate_post(...) is deprecated (removed in v0.21): use "
+            "animate({'frame': 'post:<id>', 'prompt': ...}). "
+            "See docs/API_v0.20_redesign.md.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
         p = validate_params(params, ANIMATE_KEYS)
         images = p.get("images") or []
@@ -5786,13 +5798,237 @@ class GrokClient(ResponseParser):
                 self._tab.remove_handler(cdp.network.ResponseReceived, on_resp)
                 self._tab.remove_handler(cdp.network.LoadingFinished, on_finished)
 
+    async def img2img(self, params: dict) -> ImageGenerationResult:
+        """Use when: making a NEW image FROM one existing image (img2img).
+
+        The single-source, role-explicit replacement for the old
+        ``create_image({"images": ["post:<id>"], ...})`` overload. Give it one
+        ``source`` and a ``prompt``; it returns a fresh image derived from that
+        source. A Grok-native source ('post:<id>' or a bare image_id) rides the
+        in-Grok imageToImage path — referenced by id server-side, NO
+        download/re-upload (low moderation). A local file path is uploaded.
+
+        Args:
+            params: Dict with keys from IMG2IMG_KEYS (see grok_web.schema).
+                Per-key descriptions below are generated from
+                ``grok_web.schema.PARAMS`` (SSOT).
+
+                <SCHEMA_ARGS>
+
+        Returns:
+            ImageGenerationResult with the derived image URLs.
+
+        Failure:
+            * ``source`` missing → GrokConfigError. For TWO+ sources use
+              :meth:`compose`; for text-only use :meth:`create_image`.
+            * A Grok source that is a chain-root image (has video children)
+              may be rejected by Grok's edit lineage validator — pass it to
+              :meth:`compose` instead (compose has no parent-post constraint).
+
+        Examples:
+            await client.img2img({
+                "source": "post:<hero_image_id>",
+                "prompt": "the same character sitting on a park bench",
+            })
+        """
+        from .schema import IMG2IMG_KEYS, validate_params
+
+        p = validate_params(params, IMG2IMG_KEYS)
+        source = p.get("source")
+        if not source:
+            raise GrokConfigError(
+                "img2img: 'source' is required (one 'post:<id>', a bare "
+                "image_id, or a local file path). For several sources use "
+                "compose({'sources': [...], ...}); for text-only use create_image."
+            )
+        inner = {"images": [source], "prompt": p.get("prompt", "")}
+        for k in ("aspect_ratio", "quality", "timeout"):
+            if k in p:
+                inner[k] = p[k]
+        return await self.create_image(inner, _internal=True)
+
+    async def compose(self, params: dict) -> ImageGenerationResult:
+        """Use when: combining TWO OR MORE Grok images into one new image.
+
+        The multi-source, role-explicit replacement for the old
+        ``create_image({"images": ["post:a", "post:b"], ...})`` overload. All
+        ``sources`` must be Grok-native ('post:<id>' or bare image_ids) — they
+        are composed in one in-Grok imageToImage gen, referenced by id (NO
+        re-upload, low moderation).
+
+        Args:
+            params: Dict with keys from COMPOSE_KEYS (see grok_web.schema).
+                Per-key descriptions below are generated from
+                ``grok_web.schema.PARAMS`` (SSOT).
+
+                <SCHEMA_ARGS>
+
+        Returns:
+            ImageGenerationResult with the composed image URLs.
+
+        Failure:
+            * Fewer than 2 ``sources`` → GrokConfigError (use :meth:`img2img`
+              for one source).
+            * A non-Grok (local path) source → GrokConfigError; compose is
+              in-Grok-only. Upload+compose is not a low-mod operation.
+            * Compose token is cold → GrokAPIError telling you to run any
+              ``create_video(...)`` once this session first, then retry.
+              Grok's compose endpoint needs a frontend-signed x-statsig-id
+              that only video gen mints this session.
+
+        Examples:
+            await client.compose({
+                "sources": ["<hero_a>", "<hero_b>"],
+                "prompt": "the two characters standing together in a park",
+            })
+        """
+        from .prompt_parser import classify_image_source as _classify
+        from .schema import COMPOSE_KEYS, validate_params
+
+        p = validate_params(params, COMPOSE_KEYS)
+        sources = list(p.get("sources") or [])
+        if len(sources) < 2:
+            raise GrokConfigError(
+                "compose: 'sources' needs 2+ Grok images. For one source use "
+                "img2img({'source': <id>, ...})."
+            )
+        for s in sources:
+            _k, _v = _classify(s)
+            if not (_k == "post" or (_k == "file" and _UUID_RE.match(_v))):
+                raise GrokConfigError(
+                    f"compose: {s!r} is not a Grok-native image — compose is "
+                    "in-Grok-only ('post:<id>' or bare image_id). Local files "
+                    "aren't supported here (upload+compose isn't low-mod)."
+                )
+        inner = {"images": sources, "prompt": p.get("prompt", "")}
+        for k in ("aspect_ratio", "quality", "timeout"):
+            if k in p:
+                inner[k] = p[k]
+        return await self.create_image(inner, _internal=True)
+
+    async def animate(self, params: dict) -> VideoGenerationResult:
+        """Use when: turning ONE image into a video (img2vid).
+
+        The role-explicit replacement for ``create_video({"images": [...]})``
+        (img2vid) and for :meth:`animate_post`. Give it one ``frame`` — a
+        Grok-native 'post:<id>' (or bare image_id) or a local file path — and
+        an optional motion ``prompt``.
+
+        Args:
+            params: Dict with keys from ANIMATE_IMAGE_KEYS (see grok_web.schema).
+                Per-key descriptions below are generated from
+                ``grok_web.schema.PARAMS`` (SSOT).
+
+                <SCHEMA_ARGS>
+
+        Returns:
+            VideoGenerationResult with video_id and metadata.
+
+        Failure:
+            * ``frame`` missing → GrokConfigError. For text-only use
+              :meth:`create_video`; for a saved Reference use
+              :meth:`reference_video`; to continue a video use
+              :meth:`extend_video`.
+            * Inherits create_video's transport/moderation behavior — pass
+              ``verify_final=True`` to confirm the post-render verdict.
+
+        Examples:
+            await client.animate({
+                "frame": "post:<image_id>",
+                "prompt": "slow cinematic zoom",
+                "duration": "6s",
+            })
+        """
+        from .schema import ANIMATE_IMAGE_KEYS, validate_params
+
+        p = validate_params(params, ANIMATE_IMAGE_KEYS)
+        frame = p.get("frame")
+        if not frame:
+            raise GrokConfigError(
+                "animate: 'frame' is required (a 'post:<id>', bare image_id, or "
+                "local file path — the image to animate). For text-only use "
+                "create_video; for a saved Reference use reference_video."
+            )
+        inner: dict = {"images": [frame], "prompt": p.get("prompt", "")}
+        for k in (
+            "resolution",
+            "duration",
+            "aspect_ratio",
+            "preset",
+            "timeout",
+            "wait_for_video",
+            "verify_final",
+        ):
+            if k in p:
+                inner[k] = p[k]
+        return await self.create_video(inner, _internal=True)
+
+    async def reference_video(self, params: dict) -> VideoGenerationResult:
+        """Use when: generating a video conditioned on saved Reference(s).
+
+        The role-explicit replacement for
+        ``create_video({"images": ["ref:<id>"], ...})``. A saved Reference
+        (from :meth:`create_reference`) keeps a character/subject consistent
+        across videos. Grok consumes References ONLY in video gen — there is
+        no reference->image path (for image-from-image use :meth:`img2img`).
+
+        Args:
+            params: Dict with keys from REFERENCE_VIDEO_KEYS (see grok_web.schema).
+                Per-key descriptions below are generated from
+                ``grok_web.schema.PARAMS`` (SSOT).
+
+                <SCHEMA_ARGS>
+
+        Returns:
+            VideoGenerationResult with video_id and metadata.
+
+        Failure:
+            * ``references`` empty → GrokConfigError. Mint one first with
+              ``create_reference({'images': ['post:<image_id>'], ...})``.
+
+        Examples:
+            ref = await client.create_reference({
+                "images": ["post:<hero_image_id>"], "title": "Hero",
+            })
+            await client.reference_video({
+                "references": [ref["reference_id"]],
+                "prompt": "the hero waves hello in a sunny park",
+                "duration": "6s",
+            })
+        """
+        from .schema import REFERENCE_VIDEO_KEYS, validate_params
+
+        p = validate_params(params, REFERENCE_VIDEO_KEYS)
+        references = list(p.get("references") or [])
+        if not references:
+            raise GrokConfigError(
+                "reference_video: 'references' is required (saved Reference "
+                "id(s) from create_reference). References are video-only."
+            )
+        inner: dict = {
+            "images": [f"ref:{r}" for r in references],
+            "prompt": p.get("prompt", ""),
+        }
+        for k in ("resolution", "duration", "aspect_ratio", "timeout"):
+            if k in p:
+                inner[k] = p[k]
+        return await self.create_video(inner, _internal=True)
+
     async def create_image(
         self,
         params: dict,
         *,
         progress_callback: "Callable[[int], Awaitable[bool]] | None" = None,
+        _internal: bool = False,
     ) -> ImageGenerationResult:
-        """Generate images from a text prompt (txt2img).
+        """Use when: generating images from a text prompt (txt2img).
+
+        v0.20: this is now txt2img ONLY. To make an image FROM existing
+        image(s), use the role-explicit methods instead:
+          * one source image  -> :meth:`img2img`
+          * several composed   -> :meth:`compose`
+        Passing ``images=`` here still works but is deprecated (removed v0.21)
+        and emits a DeprecationWarning. See docs/API_v0.20_redesign.md.
 
         Navigates to grok.com/imagine, selects Image mode, enters the prompt,
         and captures generated images via WebSocket. Scrolls for more if needed.
@@ -5849,6 +6085,23 @@ class GrokClient(ResponseParser):
 
         prompt = p.get("prompt", "")
         ref_specs: list[str] = list(p.get("images") or [])
+        # v0.20 orthogonal API: create_image is txt2img. Feeding source
+        # images through `images=` multiplexed img2img/compose into a
+        # text method; those now have single-purpose entry points. The
+        # overload still works (routes below) but warns. Suppressed when a
+        # role method (img2img/compose) is delegating here internally.
+        if ref_specs and not _internal:
+            import warnings
+
+            warnings.warn(
+                "create_image(images=...) is deprecated (removed in v0.21): "
+                "use img2img({'source': <id>, 'prompt': ...}) for one source "
+                "image, or compose({'sources': [<id>, ...], 'prompt': ...}) to "
+                "combine several. create_image is now txt2img only. "
+                "See docs/API_v0.20_redesign.md.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         # References are consumed by VIDEO generation only (Grok has no
         # reference→image path). Reject 'ref:<id>' here with a clear pointer
         # instead of silently ignoring it or emitting a video.
@@ -7747,8 +8000,15 @@ class GrokClient(ResponseParser):
     # Unified Video Generation API (dict-based, SSOT from schema.py)
     # =========================================================================
 
-    async def create_video(self, params: dict) -> VideoGenerationResult:
-        """Generate video from text, existing post, or uploaded images.
+    async def create_video(self, params: dict, *, _internal: bool = False) -> VideoGenerationResult:
+        """Use when: generating video from a text prompt (txt2vid).
+
+        v0.20: prefer the role-explicit methods for the non-text modes —
+          * image -> video        -> :meth:`animate` (frame=)
+          * saved Reference       -> :meth:`reference_video` (references=)
+          * continue a video      -> :meth:`extend_video` (video_id=)
+        Passing ``images=`` here still works (mode auto-detected below) but is
+        deprecated (removed v0.21) and warns. See docs/API_v0.20_redesign.md.
 
         Mode is auto-detected from params:
         - No images → txt2vid
@@ -7860,6 +8120,23 @@ class GrokClient(ResponseParser):
         p = validate_params(params, VIDEO_KEYS)
 
         images = p.get("images", [])
+        # v0.20 orthogonal API: create_video is txt2vid. The `images=` slot
+        # multiplexed four different operations by string prefix; each now
+        # has a single-purpose method. The overload still routes below but
+        # warns. Suppressed when animate/reference_video delegate here.
+        if images and not _internal:
+            import warnings
+
+            warnings.warn(
+                "create_video(images=...) is deprecated (removed in v0.21): "
+                "use animate({'frame': <id-or-path>, 'prompt': ...}) for "
+                "image->video, reference_video({'references': [<id>], ...}) for "
+                "a saved Reference, or extend_video({'video_id': <id>}) to "
+                "continue a video. create_video is now txt2vid only. "
+                "See docs/API_v0.20_redesign.md.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         prompt = p.get("prompt", "")
         # Video gen defaults to 600s (not the shared schema default of 300).
         # img2vid under NSFW/queue pressure regularly hits progress<100 at
@@ -8627,12 +8904,16 @@ class GrokClient(ResponseParser):
 
 def _splice_all_docstrings() -> None:
     from .schema import (
+        ANIMATE_IMAGE_KEYS,
+        COMPOSE_KEYS,
         DOWNLOAD_KEYS,
         EDIT_KEYS,
         EXTEND_KEYS,
         IMAGE_KEYS,
+        IMG2IMG_KEYS,
         PRECISE_EDIT_KEYS,
         REFERENCE_KEYS,
+        REFERENCE_VIDEO_KEYS,
         SELECT_POST_KEYS,
         UPLOAD_KEYS,
         VIDEO_KEYS,
@@ -8645,6 +8926,10 @@ def _splice_all_docstrings() -> None:
         ("extend_video", EXTEND_KEYS),
         ("edit_image", EDIT_KEYS),
         ("create_image", IMAGE_KEYS),
+        ("img2img", IMG2IMG_KEYS),
+        ("compose", COMPOSE_KEYS),
+        ("animate", ANIMATE_IMAGE_KEYS),
+        ("reference_video", REFERENCE_VIDEO_KEYS),
         ("upload_images", UPLOAD_KEYS),
         ("download_video", DOWNLOAD_KEYS),
         ("select_post", SELECT_POST_KEYS),

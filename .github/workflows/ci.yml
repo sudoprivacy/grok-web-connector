@@ -32,4 +32,4 @@ jobs:
 
       - name: Test
         run: |
-          pytest tests/test_workflows.py tests/integration/test_workflows.py -v --tb=short
+          pytest tests/ -v --tb=short
