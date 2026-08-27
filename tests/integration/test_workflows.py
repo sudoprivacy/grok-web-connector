@@ -850,10 +850,19 @@ async def test_list_generations_enumerates_own_media(client):
     size = await client.get_asset_file_size(top.url)
     assert size > 0, f"enumerated URL returned no size: {top.url}"
 
-    # Resolver round-trip: a download-style filename for an enumerated asset
-    # resolves back to that same item.
-    ext = "mp4" if top.media_type == "video" else "jpg"
-    hit = await client.find_generation_by_id(f"grok-{top.media_type}-{top.asset_id}.{ext}")
+    # Direct by-conversationId fetch: get_conversation_media resolves a
+    # conversation by id even when it's outside the windowed list (this is how a
+    # downloaded grok-video-<conversationId>.mp4 resolves). The enumerated item's
+    # own conversation_id must round-trip to include that item.
+    conv_media = await client.get_conversation_media(top.conversation_id)
+    assert any(m.asset_id == top.asset_id for m in conv_media), (
+        "get_conversation_media did not return the enumerated item"
+    )
+
+    # Resolver round-trip: size-match pins the exact asset within its conversation
+    # (a conversation may hold many generations). Uses conversationId + size —
+    # exactly the downloaded-file resolution path.
+    hit = await client.find_generation_by_id(top.conversation_id, size=size)
     assert hit is not None and hit.asset_id == top.asset_id
 
 

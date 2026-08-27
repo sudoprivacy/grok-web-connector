@@ -1383,10 +1383,13 @@ class GrokClient(ResponseParser):
         Failure:
             * A single conversation's ``/responses`` failing is skipped (best
               effort) rather than aborting the whole enumeration.
-            * Grok's conversation list may be capped server-side; if you have
-              more conversations than are returned in one page, some older
-              media may be missed (no cursor is exposed on this endpoint as of
-              2026-08). Raise ``max_conversations`` won't help past that cap.
+            * IMPORTANT — ``GET /rest/app-chat/conversations`` is WINDOWED to the
+              most recent page (~12 on the dev account) with NO cursor exposed as
+              of 2026-08, so this enumeration only sees recent conversations. To
+              resolve a SPECIFIC older generation (e.g. a downloaded
+              ``grok-video-<id>.mp4``), do NOT rely on this — fetch it directly by
+              its conversationId via :meth:`get_conversation_media` /
+              :meth:`find_generation_by_id`, which have no such window.
         """
         from ._internal import (
             APP_CHAT_CONVERSATIONS_ENDPOINT,
@@ -1422,30 +1425,112 @@ class GrokClient(ResponseParser):
             items = items[:limit]
         return [GenerationMedia(**it) for it in items]
 
-    async def find_generation_by_id(self, asset_id: str) -> "GenerationMedia | None":
-        """Use when: resolving a downloaded media file back to its source.
+    async def get_conversation_media(
+        self, conversation_id: str, media_type: str | None = None
+    ) -> list["GenerationMedia"]:
+        """Use when: you have a conversationId and want all media generated in it.
 
-        A ``grok-video-<uuid>.mp4`` download-filename id (or a bare id, or any
-        ``.../<id>.<ext>`` URL) 404s on ``/rest/media/post/get`` — those ids are
-        NOT on the legacy post surface. This enumerates the user's generations
-        (:meth:`list_generations`) and matches ``asset_id`` against each media
-        URL's filename stem.
+        The id in a downloaded ``grok-video-<id>.mp4`` filename is a
+        **conversationId** — NOT a post id (``/rest/media/post/get`` 404s it) and
+        NOT a single asset id. This fetches ``GET /rest/app-chat/conversations/
+        {id}/responses`` DIRECTLY by id and extracts every Grok-hosted media
+        asset. Crucially this works even for conversations that are NOT in the
+        windowed ``/conversations`` list (:meth:`list_generations` only sees the
+        most recent page; a by-id fetch has no such limit — verified live 2026-08
+        resolving downloads whose conversations were months old).
+
+        A conversation usually holds MANY generations (seen: 2–37 videos), so to
+        pick the exact video a specific file came from, size-match the local file
+        against the returned items (or use :meth:`find_generation_by_id` with
+        ``size=``).
 
         Args:
-            asset_id: A download filename (``grok-video-<uuid>.mp4``), a bare
-                id, or a media URL — normalized to the bare id for matching.
+            conversation_id: A conversationId, or anything it can be extracted
+                from — a ``grok-video-<id>.mp4`` filename, a bare id, or a URL.
+            media_type: Keep only ``'image'`` / ``'video'`` / ``'audio'``; None = all.
 
         Returns:
-            The matching GenerationMedia, or None if not found in the user's
-            enumerable generations (e.g. deleted, or beyond the conversation
-            list cap — see :meth:`list_generations` Failure).
+            list[GenerationMedia] (newest-first) with ``url``, ``media_type``,
+            ``asset_id``, ``conversation_id``, ``response_id``, ``created_at``.
+
+        Failure:
+            * Unknown / inaccessible conversationId -> GrokNotFoundError (404).
+        """
+        from ._internal import (
+            APP_CHAT_CONVERSATIONS_ENDPOINT,
+            extract_generation_media,
+            normalize_asset_id,
+        )
+
+        cid = normalize_asset_id(conversation_id)
+        resp = await self._api_request("GET", f"{APP_CHAT_CONVERSATIONS_ENDPOINT}/{cid}/responses")
+        items = extract_generation_media(resp, cid)
+        want = str(media_type).lower() if media_type else None
+        if want:
+            items = [it for it in items if it["media_type"] == want]
+        items.sort(key=lambda it: it.get("created_at") or "", reverse=True)
+        return [GenerationMedia(**it) for it in items]
+
+    async def find_generation_by_id(
+        self, asset_id: str, size: int | None = None
+    ) -> "GenerationMedia | None":
+        """Use when: resolving a downloaded media file back to its source.
+
+        A ``grok-video-<id>.mp4`` download-filename id (or bare id / URL) 404s on
+        ``/rest/media/post/get`` — because it is a **conversationId**, not a post
+        or asset id. Resolution strategy:
+
+        1. Fetch that conversation directly (:meth:`get_conversation_media`).
+        2. If ``size`` (the local file's byte length) is given, return the video
+           whose asset size EXACTLY matches — this pins the exact file even when
+           the conversation holds many generations (the reliable path; verified
+           live to exact-match every file in a real 22-download backlog).
+        3. Else if the conversation has exactly one video, return it.
+        4. Else fall back to matching ``asset_id`` against enumerable generations
+           (:meth:`list_generations`) — for when the id really is an asset id.
+
+        Args:
+            asset_id: Download filename / bare id / URL (a conversationId or an
+                asset id).
+            size: Optional local file size in bytes — pass it whenever the id is
+                a conversationId (the usual case) so the exact video is picked.
+
+        Returns:
+            The matching GenerationMedia, or None. When the id is a conversationId
+            with multiple videos and no ``size`` is given, returns None (the match
+            is ambiguous — call :meth:`get_conversation_media` and size-match).
         """
         from ._internal import normalize_asset_id
 
         target = normalize_asset_id(asset_id)
-        for media in await self.list_generations(limit=None):
-            if media.asset_id and normalize_asset_id(media.asset_id) == target:
-                return media
+
+        # (1) The id is usually a conversationId — fetch it directly.
+        try:
+            media = await self.get_conversation_media(target)
+        except GrokAPIError:
+            media = []
+        if media:
+            # The id was actually an asset id present in this conversation.
+            for m in media:
+                if m.asset_id and normalize_asset_id(m.asset_id) == target:
+                    return m
+            videos = [m for m in media if m.media_type == "video"] or media
+            # (2) size-match pins the exact video.
+            if size is not None:
+                for m in videos:
+                    try:
+                        if await self.get_asset_file_size(m.url) == size:
+                            return m
+                    except Exception:
+                        continue
+            # (3) unambiguous single video.
+            elif len(videos) == 1:
+                return videos[0]
+
+        # (4) Fall back to enumeration by asset id.
+        for m in await self.list_generations(limit=None):
+            if m.asset_id and normalize_asset_id(m.asset_id) == target:
+                return m
         return None
 
     async def get_post_details(self, post_id: str) -> PostDetails:

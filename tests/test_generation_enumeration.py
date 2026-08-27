@@ -191,10 +191,12 @@ class TestListGenerationsRouting:
         c._api_request = AsyncMock(side_effect=self._api_side_effect())
         assert len(_run(c.list_generations(limit=1))) == 1
 
-    def test_find_by_id_normalizes_download_filename(self):
+    def test_find_by_id_via_enumeration_fallback(self):
+        # conv-vid has a single video whose asset_id equals this id -> enumeration
+        # fallback matches it (the id happens to be an asset id, not a convId).
         c = _client()
         c._api_request = AsyncMock(side_effect=self._api_side_effect())
-        hit = _run(c.find_generation_by_id("grok-video-019f7a1e-a1c2-71a2-917b-866854bca7e2.mp4"))
+        hit = _run(c.find_generation_by_id("grok-image-019f7a1e-a1c2-71a2-917b-866854bca7e2.mp4"))
         assert hit is not None and hit.media_type == "video"
 
     def test_find_by_id_missing_returns_none(self):
@@ -219,3 +221,109 @@ class TestListGenerationsRouting:
         c._api_request = AsyncMock(side_effect=flaky)
         gens = _run(c.list_generations())
         assert len(gens) == 2  # still get conv-img's images despite conv-vid failing
+
+
+# A conversation fetched DIRECTLY by id (the download-filename id is a
+# conversationId) holding THREE videos with distinct asset ids/sizes — the real
+# shape: one filename id -> many generations, disambiguated by local file size.
+CONV_ID = "019f7a1e-a1c2-71a2-917b-866854bca7e2"
+MULTI_VIDEO = {
+    "responses": [
+        {
+            "responseId": f"r{i}",
+            "createTime": f"2026-08-0{i}T00:00:00Z",
+            "fileAttachmentsMetadata": [
+                {
+                    "fileMetadataId": aid,
+                    "fileMimeType": "video/mp4",
+                    "fileName": "generated_video.mp4",
+                    "fileUri": f"users/u/generated/{aid}/generated_video.mp4",
+                }
+            ],
+        }
+        for i, aid in enumerate(
+            [
+                "aaaa1111-0000-4000-8000-000000000001",
+                "bbbb2222-0000-4000-8000-000000000002",
+                "cccc3333-0000-4000-8000-000000000003",
+            ],
+            start=1,
+        )
+    ]
+}
+SIZE_BY_ASSET = {
+    "aaaa1111-0000-4000-8000-000000000001": 1000,
+    "bbbb2222-0000-4000-8000-000000000002": 2000,
+    "cccc3333-0000-4000-8000-000000000003": 3000,
+}
+
+
+class TestConversationResolver:
+    """The download-filename id is a conversationId — resolve it DIRECTLY by id
+    (works even when it's not in the windowed conversation list) + size-match."""
+
+    def _client_with_conv(self):
+        c = _client()
+
+        async def fake(method, endpoint, json_data=None):
+            if CONV_ID in endpoint and endpoint.endswith("/responses"):
+                return MULTI_VIDEO
+            if endpoint.endswith("/responses"):
+                return {"responses": []}
+            return {"conversations": []}  # empty windowed list — id not in it
+
+        c._api_request = AsyncMock(side_effect=fake)
+
+        async def size_of(url):
+            for aid, sz in SIZE_BY_ASSET.items():
+                if aid in url:
+                    return sz
+            return -1
+
+        c.get_asset_file_size = AsyncMock(side_effect=size_of)
+        return c
+
+    def test_get_conversation_media_direct_by_id(self):
+        c = self._client_with_conv()
+        media = _run(c.get_conversation_media(f"grok-video-{CONV_ID}.mp4", media_type="video"))
+        assert len(media) == 3
+        assert all(m.media_type == "video" for m in media)
+        assert all(m.conversation_id == CONV_ID for m in media)
+
+    def test_find_by_id_size_picks_exact_video(self):
+        c = self._client_with_conv()
+        hit = _run(c.find_generation_by_id(f"grok-video-{CONV_ID}.mp4", size=2000))
+        assert hit is not None
+        assert hit.asset_id == "bbbb2222-0000-4000-8000-000000000002"
+
+    def test_find_by_id_multi_video_no_size_is_ambiguous(self):
+        c = self._client_with_conv()
+        # 3 videos, no size -> cannot disambiguate -> None (use get_conversation_media)
+        assert _run(c.find_generation_by_id(CONV_ID)) is None
+
+    def test_find_by_id_single_video_returns_it(self):
+        c = _client()
+
+        async def fake(method, endpoint, json_data=None):
+            if endpoint.endswith("/responses"):
+                return VIDEO_RESPONSES  # single video
+            return {"conversations": []}
+
+        c._api_request = AsyncMock(side_effect=fake)
+        hit = _run(c.find_generation_by_id("some-conv-id"))
+        assert hit is not None and hit.media_type == "video"
+
+    def test_get_conversation_media_not_found_raises(self):
+        from grok_web.exceptions import GrokNotFoundError
+
+        c = _client()
+
+        async def fake(method, endpoint, json_data=None):
+            raise GrokNotFoundError("Resource not found")
+
+        c._api_request = AsyncMock(side_effect=fake)
+        try:
+            _run(c.get_conversation_media("missing"))
+            raise AssertionError("expected GrokNotFoundError")
+        except GrokNotFoundError:
+            pass
