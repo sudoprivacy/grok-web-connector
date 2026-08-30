@@ -286,6 +286,7 @@ class GrokClient(ResponseParser):
         extra_chrome_args: list[str] | None = None,
         user_data_dir: str | Path | None = None,
         close_chrome: bool = True,
+        transport: str = "cdp",
     ):
         """
         Initialize GrokClient.
@@ -381,6 +382,16 @@ class GrokClient(ResponseParser):
         # it alive for cross-session reuse (batch); a reused/attached Chrome is
         # never closed regardless of this flag.
         self._close_chrome = close_chrome
+        # transport="cdp" (default): launch/attach a managed automation Chrome.
+        # transport="extension": drive the user's REAL Chrome via the
+        # ai-dev-browser bridge extension (their profile/session/device-trust —
+        # the high-trust path that avoids the automation-profile anti-bot
+        # flagging behind BR#2). Single real browser: no BrowserWorkerPool
+        # parallelism, a dedicated (AI-badged) automation tab, no cookie
+        # injection (the real Chrome already carries the session).
+        self._transport = str(transport or "cdp").lower()
+        self._extension_mode = self._transport == "extension"
+        self._ext_tab_target_id = None
         self._profile = profile
         self._startup_timeout = startup_timeout
         self._extra_chrome_args = list(extra_chrome_args) if extra_chrome_args else None
@@ -593,6 +604,11 @@ class GrokClient(ResponseParser):
         # Ensure Chrome's stderr is redirected to DEVNULL (not PIPE).
         # Idempotent — installs once per process.
         _patch_ai_dev_browser_chrome_stderr()
+
+        # transport="extension": attach to the user's REAL Chrome via the
+        # ai-dev-browser bridge extension instead of launching a managed one.
+        if self._extension_mode:
+            return await self._aenter_extension()
 
         # Load cookies (deferred from __init__)
         if self._provided_cookies is not None:
@@ -868,7 +884,66 @@ class GrokClient(ResponseParser):
         self._initialized = True
         return self
 
+    async def _aenter_extension(self):
+        """Attach to the user's REAL Chrome via the ai-dev-browser bridge extension.
+
+        High-trust path (transport="extension"): drives the user's own
+        profile/session/device-trust — the antidote to the automation-profile
+        anti-bot flagging behind BR#2. Opens a DEDICATED, "AI"-badged automation
+        tab (the user's own tabs are never touched) and does NOT inject cookies
+        (the real Chrome already carries the session). Single real browser, so
+        no BrowserWorkerPool parallelism.
+        """
+        import asyncio
+        import contextlib
+
+        from ai_dev_browser.core.connection import connect_extension
+
+        try:
+            self._browser = await connect_extension()
+        except Exception as e:
+            raise GrokAPIError(
+                "transport='extension' could not attach to your real Chrome via "
+                "the ai-dev-browser bridge extension. Make sure Chrome is running "
+                "and the extension is loaded + enabled (chrome://extensions → "
+                "Developer mode → Load unpacked → the ai-dev-browser extension "
+                f"folder), then retry. Underlying error: {e}"
+            ) from e
+
+        # Never kill the user's real browser on exit; only close OUR tab.
+        self._reused_chrome = True
+        # Dedicated automation tab (extension "AI" badge) — browser.get() opens a
+        # NEW tab, so the user's active tab is untouched.
+        self._tab = await self._browser.get(f"{self.BASE_URL}/imagine")
+        self._ext_tab_target_id = getattr(getattr(self._tab, "_target", None), "target_id", None)
+
+        # Statsig snitch (needed for direct REST submits), same as the CDP path.
+        from .actions.direct_rest import StatsigSnitch
+
+        self._statsig_snitch = StatsigSnitch(self._tab)
+        with contextlib.suppress(Exception):
+            await self._statsig_snitch.install()
+
+        await asyncio.sleep(2 * self._ui_delay)  # let /imagine hydrate
+        self._initialized = True
+        return self
+
     async def __aexit__(self, exc_type, exc_val, exc_tb):
+        # Extension transport: close OUR automation tab (NEVER the user's real
+        # browser or their tabs), then skip all the managed-Chrome teardown.
+        # getattr guard: tests build clients via __new__ without __init__.
+        if getattr(self, "_extension_mode", False):
+            import contextlib
+
+            from ai_dev_browser import cdp
+
+            if self._browser is not None and getattr(self, "_ext_tab_target_id", None):
+                with contextlib.suppress(Exception):
+                    await self._browser.connection.send(
+                        cdp.target.close_target(target_id=self._ext_tab_target_id)
+                    )
+            self._initialized = False
+            return
         # Auto-save cookies on successful exit (no exception)
         # Use timeout to avoid hanging if Chrome was already killed
         if exc_type is None and self._initialized and self._browser:
@@ -6887,22 +6962,43 @@ class GrokClient(ResponseParser):
                 await asyncio.sleep(1 * d)
 
         if not prompt_filled_via_refs:
+            # Robust fill that works even when the tab is BACKGROUNDED (extension
+            # transport, or a non-foreground automation window):
+            # document.execCommand('insertText') silently no-ops on an unfocused
+            # document even WITH focus emulation, so type via CDP Input.insertText
+            # (synthetic, focus-independent) and verify + retry. execCommand is
+            # the fallback for the rare case the CDP path is unavailable.
             escaped_prompt = prompt.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
-            fill_result = await self._tab.evaluate(
-                f"""
-                (() => {{
-                    const ed = document.querySelector('.tiptap.ProseMirror');
-                    if (!ed) return 'not-found';
-                    ed.focus();
-                    document.execCommand('selectAll');
-                    document.execCommand('delete');
-                    document.execCommand('insertText', false, `{escaped_prompt}`);
-                    return 'ok';
-                }})()
-                """
-            )
-            if fill_result == "not-found":
-                raise GrokAPIError("Could not find prompt editor (ProseMirror)")
+            current = ""
+            for _attempt in range(4):
+                focused = await self._tab.evaluate(
+                    "(() => { const ed = document.querySelector('.tiptap.ProseMirror');"
+                    " if (!ed) return 'not-found'; ed.focus();"
+                    " document.execCommand('selectAll'); document.execCommand('delete');"
+                    " return 'ok'; })()"
+                )
+                if focused == "not-found":
+                    raise GrokAPIError("Could not find prompt editor (ProseMirror)")
+                try:
+                    await self._tab.send(cdp.input_.insert_text(text=prompt))
+                except Exception:
+                    await self._tab.evaluate(
+                        "(() => { const ed = document.querySelector('.tiptap.ProseMirror');"
+                        " if (ed) { ed.focus();"
+                        f" document.execCommand('insertText', false, `{escaped_prompt}`); }} }})()"
+                    )
+                await asyncio.sleep(0.3 * d)
+                current = await self._tab.evaluate(
+                    "((document.querySelector('.tiptap.ProseMirror')||{}).innerText||'').trim()"
+                )
+                if current:
+                    break
+                await asyncio.sleep(0.4 * d)
+            if not current:
+                raise GrokAPIError(
+                    "Prompt fill did not stick after retries — the editor stayed "
+                    "empty (backgrounded tab and/or a Grok UI re-mount race)."
+                )
             await asyncio.sleep(1 * d)
 
         # Step 4: Click the 提交 submit via real CDP mouse. The button's
@@ -6912,7 +7008,11 @@ class GrokClient(ResponseParser):
         submit_rect = await self._tab.evaluate(
             r"""
             JSON.stringify((() => {
-                const b = document.querySelector('button[aria-label="提交"]');
+                // Locale-robust: automation profile renders '提交', the user's
+                // real (English) profile renders 'Submit'; both are type=submit.
+                const b = document.querySelector('button[aria-label="提交"]')
+                       || document.querySelector('button[aria-label="Submit"]')
+                       || document.querySelector('button[type="submit"]');
                 if (!b) return null;
                 const r = b.getBoundingClientRect();
                 return {x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2)};
@@ -6923,7 +7023,7 @@ class GrokClient(ResponseParser):
 
         sr = _json.loads(submit_rect) if isinstance(submit_rect, str) else submit_rect
         if not sr:
-            raise GrokAPIError("Could not find 提交 submit button")
+            raise GrokAPIError("Could not find 提交/Submit submit button")
         for _ev, _btn, _cc in [
             ("mouseMoved", cdp.input_.MouseButton.NONE, 0),
             ("mousePressed", cdp.input_.MouseButton.LEFT, 1),
@@ -7043,7 +7143,9 @@ class GrokClient(ResponseParser):
             rect_raw = await self._tab.evaluate(
                 r"""
                 JSON.stringify((() => {
-                    const b = document.querySelector('button[aria-label="提交"]');
+                    const b = document.querySelector('button[aria-label="提交"]')
+                           || document.querySelector('button[aria-label="Submit"]')
+                           || document.querySelector('button[type="submit"]');
                     if (!b) return null;
                     const r = b.getBoundingClientRect();
                     return {x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2),
