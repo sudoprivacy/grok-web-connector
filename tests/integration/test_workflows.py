@@ -731,6 +731,23 @@ async def test_animate_new_method(client):
 
 
 @pytest.mark.integration
+async def test_can_animate_gates_img2vid(client):
+    """can_animate(post_id) reports whether the Make-Video button is present in
+    THIS profile — a read-only pre-flight so a batch doesn't 100%-fail into
+    GrokModerationError. On a healthy profile the known-good demo post returns
+    True (verified live 2026-08 it also returns True for a consumer's reported
+    'no-button' post — the button gap is profile-degradation-scoped, not a
+    universal connector-chrome trait). A 404 raises rather than returning False.
+    """
+    from grok_web import GrokAPIError
+
+    assert await client.can_animate(TEST_SOURCE_POST_ID) is True
+
+    with pytest.raises(GrokAPIError):
+        await client.can_animate("00000000-0000-4000-8000-000000000000")
+
+
+@pytest.mark.integration
 async def test_reference_video_new_method(client):
     """reference_video({'references': [<id>], ...}) — the role-explicit
     replacement for create_video(images=['ref:<id>']). Data flows

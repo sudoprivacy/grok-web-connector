@@ -60,21 +60,23 @@ class GrokModerationError(GrokAPIError):
     Video generation (and other media gen) normally streams back a
     ``streamingVideoGenerationResponse``. When Grok instead returns a plain
     chat reply (``result.userResponse`` with a ``message``, no media block),
-    the generation pipeline never engaged — the request was rejected
-    PRE-FLIGHT. Two known causes:
+    the generation pipeline never engaged. This describes the BEHAVIOR; the
+    cause is for the caller to diagnose in the UI. Observed causes include:
 
-    - **Content moderation** — the prompt / source frame was blocked before
-      the pipeline ran.
-    - **Unavailable / removed source** — img2vid from a ``post:<id>`` whose
-      source image is gone (orphan / expired). Grok can't attach the frame,
-      so the request degrades to a bare ``--mode=...`` chat message and comes
-      back as a chat reply.
+    - **Content moderation** — the prompt / source frame blocked pre-flight.
+    - **Profile/account-scoped restriction** — the same source that generates
+      fine in a user's normal browser can have its Make-Video ('制作视频')
+      button ABSENT in an automation browser profile (anti-bot / trust /
+      feature-flag state). Open the post URL in the UI to check.
+
+    (An earlier version asserted "unavailable/removed source" as the cause; a
+    consumer disproved that e2e — the source image loaded fine at full
+    resolution, only the button was missing in the connector's profile.)
 
     This is NOT a parser bug (the connector used to raise a confusing
     "Failed to parse video generation response" here). Retrying the SAME
-    source won't help; use a different / valid source, or drop the item.
-    The offending chat ``message`` is included in the error text and on
-    ``.chat_message`` for inspection.
+    source in the SAME profile is unlikely to help. The offending chat
+    ``message`` is on ``.chat_message`` for inspection.
     """
 
     def __init__(self, message: str, chat_message: str | None = None):

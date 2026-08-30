@@ -333,14 +333,20 @@ def parse_video_ndjson_response(
 
     if not video_result:
         if chat_message is not None:
-            # NOT a parser bug — Grok declined to generate and answered in chat.
+            # NOT a parser bug — Grok answered in chat mode; the video pipeline
+            # never ran. State the BEHAVIOR, not a guessed cause (a prior version
+            # asserted "source removed", which a consumer disproved e2e — the
+            # source loaded fine; the Make-Video button was just absent in the
+            # automation browser profile). Point the user to the UI to diagnose.
             raise GrokModerationError(
-                "Grok answered the video request in CHAT mode instead of "
-                "generating (no streamingVideoGenerationResponse). The request "
-                "was rejected pre-flight — either content moderation, or the "
-                "img2vid source frame is unavailable/removed (orphan/expired "
-                "post). This is NOT a parser bug; retrying the same source "
-                f"won't help. Grok's chat reply began: {chat_message[:200]!r}",
+                "Grok returned a chat-mode reply instead of streaming a video "
+                "(no streamingVideoGenerationResponse) — the video pipeline did "
+                "not run. This is NOT a parser bug. Possible causes: content "
+                "moderation, OR a profile/account-scoped restriction (the "
+                "'制作视频' / Make Video button can be absent in this browser "
+                "profile — open the post URL in the UI to check). Retrying the "
+                "same source in the same profile is unlikely to help. Grok's "
+                f"chat reply began: {chat_message[:200]!r}",
                 chat_message=chat_message,
             )
         preview = response_text[:500] if response_text else "(empty)"

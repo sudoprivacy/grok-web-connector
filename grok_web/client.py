@@ -3202,6 +3202,50 @@ class GrokClient(ResponseParser):
         if page_text and ("Page not found" in page_text or "404" in page_text):
             raise GrokAPIError(f"Post {post_id} not found (404)")
 
+    async def can_animate(self, post_id: str) -> bool:
+        """Use when: checking UPFRONT whether ``animate``/img2vid can run on a
+        post in THIS browser profile — before spending a batch that may 100% fail.
+
+        Loads the post page (read-only, no generation, no favorite) and reports
+        whether the inline '制作视频' / Make Video button is present. The button's
+        presence is profile/account-scoped: the SAME post can show it in a user's
+        normal browser but NOT in an automation profile (anti-bot / trust /
+        feature-flag state). When it's absent, :meth:`animate` will get a
+        chat-mode reply and raise :class:`GrokModerationError`, so gate on this
+        first::
+
+            if await client.can_animate(post_id):
+                await client.animate({"frame": f"post:{post_id}", ...})
+            else:
+                ...  # skip — the Make-Video button is absent in this profile
+
+        Returns:
+            True if the Make-Video button is present (animate should proceed),
+            False if it's absent (animate would fail chat-mode in this profile).
+
+        Failure:
+            * Post not found (404) → :class:`GrokAPIError` (distinct from a
+              present-but-no-button post, which returns ``False``).
+        """
+        import json as _json
+
+        await self._navigate_to_post_safe(post_id)
+        # 2026-07 labels: 制作视频 / Make Video (older: 动画 / Animate).
+        labels_json = _json.dumps(["制作视频", "Make Video", "动画", "Animate"])
+        raw = await self._tab.evaluate(
+            "((labels) => {"
+            "  const norm = s => (s || '').trim();"
+            "  const labelSet = new Set(labels);"
+            "  return Array.from(document.querySelectorAll('button')).some(b => {"
+            "    const r = b.getBoundingClientRect();"
+            "    if (!(r.width > 0 && r.height > 0)) return false;"
+            "    return labelSet.has(norm(b.getAttribute('aria-label')))"
+            "        || labelSet.has(norm(b.innerText).split('\\n')[0]);"
+            "  });"
+            f"}})({labels_json})"
+        )
+        return bool(raw)
+
     async def delete_video(self, video_id: str) -> bool:
         """Use when: removing a single child video post (2026-07 UI).
 
@@ -6117,11 +6161,13 @@ class GrokClient(ResponseParser):
             * Inherits create_video's transport/moderation behavior — pass
               ``verify_final=True`` to confirm the post-render verdict.
             * :class:`GrokModerationError` — Grok answered in CHAT mode instead
-              of generating (its reply led with the ``--mode=...`` tag). The
-              source frame was rejected PRE-FLIGHT: content moderation, or the
-              ``frame`` post's source image is unavailable/removed (an
-              orphan/expired ``post:<id>``). Not a bug — retrying the same
-              frame won't help; use a valid/available source.
+              of generating (no video streamed; its reply led with the
+              ``--mode=...`` tag). The video pipeline did not run. Causes:
+              content moderation, OR a profile/account-scoped restriction (the
+              '制作视频' / Make Video button can be absent in an automation
+              browser profile — open the post URL in the UI to check). Not a
+              parser bug; retrying the same source in the same profile is
+              unlikely to help. See :meth:`can_animate` to check upfront.
 
         Examples:
             await client.animate({
