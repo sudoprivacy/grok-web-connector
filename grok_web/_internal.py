@@ -13,7 +13,7 @@ import re
 from datetime import datetime
 from typing import Any
 
-from .exceptions import GrokAPIError, GrokRateLimitError
+from .exceptions import GrokAPIError, GrokModerationError, GrokRateLimitError
 from .models import (
     MODE_IMG2VID,
     MODE_TXT2VID,
@@ -280,6 +280,7 @@ def parse_video_ndjson_response(
 
     conversation_id = None
     video_result = None
+    chat_message: str | None = None  # set if Grok answered in chat mode (no video)
 
     for line in response_text.strip().split("\n"):
         if not line:
@@ -316,10 +317,32 @@ def parse_video_ndjson_response(
                 video_result = response["streamingVideoGenerationResponse"]
             elif "streamingVideoGenerationResponse" in result:
                 video_result = result["streamingVideoGenerationResponse"]
+
+            # 2026-08: when Grok REJECTS the request pre-flight (content
+            # moderation, or an img2vid source frame that's unavailable/removed
+            # — the reporter's orphan-image case), the video pipeline never
+            # engages and it replies in CHAT mode: result.userResponse with a
+            # plain message (often the bare "--mode=..." tag echoed back) and
+            # NO streamingVideoGenerationResponse. Capture it so we can raise a
+            # typed, actionable error instead of a confusing "parse failed".
+            user_response = result.get("userResponse")
+            if isinstance(user_response, dict) and user_response.get("message") is not None:
+                chat_message = user_response.get("message")
         except json.JSONDecodeError:
             continue
 
     if not video_result:
+        if chat_message is not None:
+            # NOT a parser bug — Grok declined to generate and answered in chat.
+            raise GrokModerationError(
+                "Grok answered the video request in CHAT mode instead of "
+                "generating (no streamingVideoGenerationResponse). The request "
+                "was rejected pre-flight — either content moderation, or the "
+                "img2vid source frame is unavailable/removed (orphan/expired "
+                "post). This is NOT a parser bug; retrying the same source "
+                f"won't help. Grok's chat reply began: {chat_message[:200]!r}",
+                chat_message=chat_message,
+            )
         preview = response_text[:500] if response_text else "(empty)"
         raise GrokAPIError(
             "Failed to parse video generation response. "

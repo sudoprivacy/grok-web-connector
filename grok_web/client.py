@@ -6116,6 +6116,12 @@ class GrokClient(ResponseParser):
               :meth:`extend_video`.
             * Inherits create_video's transport/moderation behavior — pass
               ``verify_final=True`` to confirm the post-render verdict.
+            * :class:`GrokModerationError` — Grok answered in CHAT mode instead
+              of generating (its reply led with the ``--mode=...`` tag). The
+              source frame was rejected PRE-FLIGHT: content moderation, or the
+              ``frame`` post's source image is unavailable/removed (an
+              orphan/expired ``post:<id>``). Not a bug — retrying the same
+              frame won't help; use a valid/available source.
 
         Examples:
             await client.animate({

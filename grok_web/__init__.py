@@ -22,6 +22,7 @@ from .exceptions import (
     GrokConfigError,
     GrokError,
     GrokGenerationFailedError,
+    GrokModerationError,
     GrokNotFoundError,
     GrokQuotaExceededError,
     GrokRateLimitError,
@@ -308,6 +309,7 @@ __all__ = [
     "GrokNotFoundError",
     "GrokConfigError",
     "GrokRateLimitError",
+    "GrokModerationError",
     "GrokQuotaExceededError",
     "GrokGenerationFailedError",
     # Auth utilities

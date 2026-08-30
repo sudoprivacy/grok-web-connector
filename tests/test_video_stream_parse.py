@@ -21,7 +21,7 @@ import pytest
 
 from grok_web._internal import parse_video_ndjson_response
 from grok_web.actions.network_monitor import CDPMonitor
-from grok_web.exceptions import GrokAPIError
+from grok_web.exceptions import GrokAPIError, GrokModerationError
 
 
 def _ndjson(*objs: dict) -> str:
@@ -76,6 +76,61 @@ class TestParseVideoNdjson:
         )
         with pytest.raises(GrokAPIError):
             parse_video_ndjson_response(body, parent_post_id="p1", statsig_id="s")
+
+    def test_chatmode_userresponse_raises_moderation(self):
+        """BR 2026-08: img2vid on a rejected/orphan source comes back in CHAT
+        mode (result.userResponse, no streamingVideoGenerationResponse). Must
+        raise the typed GrokModerationError with the chat message, NOT a
+        confusing generic parse error."""
+        body = _ndjson(
+            {"result": {"conversation": {"conversationId": "c1"}}},
+            {
+                "result": {
+                    "userResponse": {
+                        "responseId": "32427816-787c-4766-973f-614aade744ee",
+                        "message": "--mode=normal",
+                        "sender": "user",
+                    }
+                }
+            },
+        )
+        with pytest.raises(GrokModerationError) as exc:
+            parse_video_ndjson_response(body, parent_post_id="p1", statsig_id="s")
+        assert exc.value.chat_message == "--mode=normal"
+        # subclass of GrokAPIError so existing broad catches still work
+        assert isinstance(exc.value, GrokAPIError)
+
+    def test_moderated_video_result_still_returns(self):
+        """A real streamingVideoGenerationResponse with moderated=True is a
+        VALID result (moderated flag), NOT a chat-mode rejection — must return,
+        not raise."""
+        body = _ndjson(
+            {
+                "result": {
+                    "streamingVideoGenerationResponse": {
+                        "videoId": "vid-mod",
+                        "progress": 100,
+                        "moderated": True,
+                    }
+                }
+            },
+        )
+        r = parse_video_ndjson_response(body, parent_post_id="p1", statsig_id="s")
+        assert r.video_id == "vid-mod" and r.moderated is True
+
+    def test_video_result_wins_even_if_userresponse_present(self):
+        """A normal gen echoes the user's message (userResponse) AND streams the
+        video — the video result must win, no moderation error."""
+        body = _ndjson(
+            {"result": {"userResponse": {"responseId": "r0", "message": "hi --mode=custom"}}},
+            {
+                "result": {
+                    "streamingVideoGenerationResponse": {"videoId": "vid-ok", "progress": 100}
+                }
+            },
+        )
+        r = parse_video_ndjson_response(body, parent_post_id="p1", statsig_id="s")
+        assert r.video_id == "vid-ok"
 
 
 class TestCDPMonitorMethodFilter:
