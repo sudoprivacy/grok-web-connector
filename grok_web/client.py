@@ -286,6 +286,7 @@ class GrokClient(ResponseParser):
         extra_chrome_args: list[str] | None = None,
         user_data_dir: str | Path | None = None,
         close_chrome: bool = True,
+        transport: str = "cdp",
     ):
         """
         Initialize GrokClient.
@@ -381,6 +382,16 @@ class GrokClient(ResponseParser):
         # it alive for cross-session reuse (batch); a reused/attached Chrome is
         # never closed regardless of this flag.
         self._close_chrome = close_chrome
+        # transport="cdp" (default): launch/attach a managed automation Chrome.
+        # transport="extension": drive the user's REAL Chrome via the
+        # ai-dev-browser bridge extension (their profile/session/device-trust —
+        # the high-trust path that avoids the automation-profile anti-bot
+        # flagging behind BR#2). Single real browser: no BrowserWorkerPool
+        # parallelism, a dedicated (AI-badged) automation tab, no cookie
+        # injection (the real Chrome already carries the session).
+        self._transport = str(transport or "cdp").lower()
+        self._extension_mode = self._transport == "extension"
+        self._ext_tab_target_id = None
         self._profile = profile
         self._startup_timeout = startup_timeout
         self._extra_chrome_args = list(extra_chrome_args) if extra_chrome_args else None
@@ -593,6 +604,11 @@ class GrokClient(ResponseParser):
         # Ensure Chrome's stderr is redirected to DEVNULL (not PIPE).
         # Idempotent — installs once per process.
         _patch_ai_dev_browser_chrome_stderr()
+
+        # transport="extension": attach to the user's REAL Chrome via the
+        # ai-dev-browser bridge extension instead of launching a managed one.
+        if self._extension_mode:
+            return await self._aenter_extension()
 
         # Load cookies (deferred from __init__)
         if self._provided_cookies is not None:
@@ -868,7 +884,74 @@ class GrokClient(ResponseParser):
         self._initialized = True
         return self
 
+    async def _aenter_extension(self):
+        """Attach to the user's REAL Chrome via the ai-dev-browser bridge extension.
+
+        High-trust path (transport="extension"): drives the user's own
+        profile/session/device-trust — the antidote to the automation-profile
+        anti-bot flagging behind BR#2. Opens a DEDICATED, "AI"-badged automation
+        tab (the user's own tabs are never touched) and does NOT inject cookies
+        (the real Chrome already carries the session). Single real browser, so
+        no BrowserWorkerPool parallelism.
+        """
+        import asyncio
+        import contextlib
+
+        try:
+            from ai_dev_browser.core.connection import connect_extension
+        except ImportError as e:
+            raise GrokAPIError(
+                "transport='extension' needs ai-dev-browser >= 0.34 (the bridge "
+                "extension transport). Upgrade: pip install -U "
+                "'ai-dev-browser[cleanup]'. The default transport='cdp' works on "
+                f"older versions. ({e})"
+            ) from e
+
+        try:
+            self._browser = await connect_extension()
+        except Exception as e:
+            raise GrokAPIError(
+                "transport='extension' could not attach to your real Chrome via "
+                "the ai-dev-browser bridge extension. Make sure Chrome is running "
+                "and the extension is loaded + enabled (chrome://extensions → "
+                "Developer mode → Load unpacked → the ai-dev-browser extension "
+                f"folder), then retry. Underlying error: {e}"
+            ) from e
+
+        # Never kill the user's real browser on exit; only close OUR tab.
+        self._reused_chrome = True
+        # Dedicated automation tab (extension "AI" badge) — browser.get() opens a
+        # NEW tab, so the user's active tab is untouched.
+        self._tab = await self._browser.get(f"{self.BASE_URL}/imagine")
+        self._ext_tab_target_id = getattr(getattr(self._tab, "_target", None), "target_id", None)
+
+        # Statsig snitch (needed for direct REST submits), same as the CDP path.
+        from .actions.direct_rest import StatsigSnitch
+
+        self._statsig_snitch = StatsigSnitch(self._tab)
+        with contextlib.suppress(Exception):
+            await self._statsig_snitch.install()
+
+        await asyncio.sleep(2 * self._ui_delay)  # let /imagine hydrate
+        self._initialized = True
+        return self
+
     async def __aexit__(self, exc_type, exc_val, exc_tb):
+        # Extension transport: close OUR automation tab (NEVER the user's real
+        # browser or their tabs), then skip all the managed-Chrome teardown.
+        # getattr guard: tests build clients via __new__ without __init__.
+        if getattr(self, "_extension_mode", False):
+            import contextlib
+
+            from ai_dev_browser import cdp
+
+            if self._browser is not None and getattr(self, "_ext_tab_target_id", None):
+                with contextlib.suppress(Exception):
+                    await self._browser.connection.send(
+                        cdp.target.close_target(target_id=self._ext_tab_target_id)
+                    )
+            self._initialized = False
+            return
         # Auto-save cookies on successful exit (no exception)
         # Use timeout to avoid hanging if Chrome was already killed
         if exc_type is None and self._initialized and self._browser:
@@ -5109,25 +5192,9 @@ class GrokClient(ResponseParser):
             await asyncio.sleep(1 * d)
 
         if not prompt_filled_via_refs:
-            escaped_prompt = (
-                edit_prompt.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
-            )
-            fill_result = await self._tab.evaluate(
-                f"""
-                (() => {{
-                    const ed = document.querySelector('.tiptap.ProseMirror')
-                           || document.querySelector('[contenteditable="true"]');
-                    if (!ed) return 'no-editor';
-                    ed.focus();
-                    document.execCommand('selectAll');
-                    document.execCommand('delete');
-                    document.execCommand('insertText', false, `{escaped_prompt}`);
-                    return 'ok';
-                }})()
-                """
-            )
-            if fill_result == "no-editor":
-                raise GrokAPIError("Could not find prompt editor (ProseMirror)")
+            # Robust fill (see _fill_prompt_robust): focus-emul-before-fill so it
+            # works on a BACKGROUNDED tab (extension transport), + verify/retry.
+            await self._fill_prompt_robust(edit_prompt)
             await asyncio.sleep(1 * d)
 
         # Drop anything captured during page hydration (the source
@@ -6251,6 +6318,52 @@ class GrokClient(ResponseParser):
                 inner[k] = p[k]
         return await self.create_video(inner, _internal=True)
 
+    async def _fill_prompt_robust(self, text: str, *, attempts: int = 4) -> None:
+        """Fill the ProseMirror prompt editor reliably — even on a BACKGROUNDED
+        tab (extension transport / non-foreground automation window).
+
+        ``document.execCommand('insertText')`` silently no-ops when the document
+        reports no focus, so re-assert focus emulation IMMEDIATELY before the
+        fill (verified: ``document.hasFocus()`` flips True over the extension
+        bridge and the fill then lands — an earlier mode/aspect click can drop
+        the emulation), then VERIFY the text stuck and retry. Raises
+        :class:`GrokAPIError` if the editor is missing or the fill won't stick.
+        """
+        import asyncio
+        import contextlib
+
+        from .actions.extend_seed import enable_focus_emulation as _efe
+
+        d = self._ui_delay
+        escaped = text.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
+        fill_js = (
+            "(() => { const ed = document.querySelector('.tiptap.ProseMirror')"
+            " || document.querySelector('[contenteditable=\"true\"]');"
+            " if (!ed) return 'no-editor'; ed.focus();"
+            " document.execCommand('selectAll'); document.execCommand('delete');"
+            f" document.execCommand('insertText', false, `{escaped}`);"
+            " return ((ed.innerText||'').trim().length>0) ? 'ok' : 'empty'; })()"
+        )
+        read_js = (
+            "((document.querySelector('.tiptap.ProseMirror')"
+            "||document.querySelector('[contenteditable=\"true\"]')||{})"
+            ".innerText||'').trim()"
+        )
+        for _ in range(attempts):
+            with contextlib.suppress(Exception):
+                await _efe(self._tab)
+            res = await self._tab.evaluate(fill_js)
+            if res == "no-editor":
+                raise GrokAPIError("Could not find prompt editor (ProseMirror)")
+            await asyncio.sleep(0.25 * d)
+            if await self._tab.evaluate(read_js):
+                return
+            await asyncio.sleep(0.4 * d)
+        raise GrokAPIError(
+            "Prompt fill did not stick after retries — the editor stayed empty "
+            "(backgrounded tab lost document focus, or a Grok UI re-mount race)."
+        )
+
     async def create_image(
         self,
         params: dict,
@@ -6887,22 +7000,9 @@ class GrokClient(ResponseParser):
                 await asyncio.sleep(1 * d)
 
         if not prompt_filled_via_refs:
-            escaped_prompt = prompt.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
-            fill_result = await self._tab.evaluate(
-                f"""
-                (() => {{
-                    const ed = document.querySelector('.tiptap.ProseMirror');
-                    if (!ed) return 'not-found';
-                    ed.focus();
-                    document.execCommand('selectAll');
-                    document.execCommand('delete');
-                    document.execCommand('insertText', false, `{escaped_prompt}`);
-                    return 'ok';
-                }})()
-                """
-            )
-            if fill_result == "not-found":
-                raise GrokAPIError("Could not find prompt editor (ProseMirror)")
+            # Robust fill (focus-emul-before-fill + verify/retry) so it works on
+            # a BACKGROUNDED tab (extension transport / non-foreground window).
+            await self._fill_prompt_robust(prompt)
             await asyncio.sleep(1 * d)
 
         # Step 4: Click the 提交 submit via real CDP mouse. The button's
@@ -6912,7 +7012,11 @@ class GrokClient(ResponseParser):
         submit_rect = await self._tab.evaluate(
             r"""
             JSON.stringify((() => {
-                const b = document.querySelector('button[aria-label="提交"]');
+                // Locale-robust: automation profile renders '提交', the user's
+                // real (English) profile renders 'Submit'; both are type=submit.
+                const b = document.querySelector('button[aria-label="提交"]')
+                       || document.querySelector('button[aria-label="Submit"]')
+                       || document.querySelector('button[type="submit"]');
                 if (!b) return null;
                 const r = b.getBoundingClientRect();
                 return {x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2)};
@@ -6923,7 +7027,7 @@ class GrokClient(ResponseParser):
 
         sr = _json.loads(submit_rect) if isinstance(submit_rect, str) else submit_rect
         if not sr:
-            raise GrokAPIError("Could not find 提交 submit button")
+            raise GrokAPIError("Could not find 提交/Submit submit button")
         for _ev, _btn, _cc in [
             ("mouseMoved", cdp.input_.MouseButton.NONE, 0),
             ("mousePressed", cdp.input_.MouseButton.LEFT, 1),
@@ -6956,9 +7060,34 @@ class GrokClient(ResponseParser):
         captured_data["submit_ts_ns"] = _time_mod.perf_counter_ns()
         wait_first = 30
         start_first = asyncio.get_event_loop().time()
+        _limit_re = (
+            r"(weekly|daily|hourly)\s*limit\s*reached|limit reached|reset available|"
+            r"已达上限|次数已用完|额度已用完"
+        )
         while asyncio.get_event_loop().time() - start_first < wait_first:
             if len(captured_data["jobs"]) > 0:
                 break
+            # Grok's "Weekly limit reached / N resets available" alert is
+            # TRANSIENT (~seconds after submit), so catch it HERE — a
+            # rate-capped-but-SUCCESSFUL submit clears the editor and otherwise
+            # looks like an empty-fill bug 30s later (observed driving a real
+            # account near its weekly cap over the extension transport).
+            alert = await self._tab.evaluate(
+                "((reSrc) => { const re = new RegExp(reSrc, 'i');"
+                " const els = Array.from(document.querySelectorAll("
+                '\'[role="alert"],[role="status"],div,span,p\'));'
+                " for (const e of els) { const t = (e.innerText||'');"
+                "   if (t && t.length < 140 && re.test(t)) return t.replace(/\\s+/g,' ').slice(0,110); }"
+                " return ''; })(" + json_mod.dumps(_limit_re) + ")"
+            )
+            if alert:
+                from .exceptions import GrokQuotaExceededError
+
+                raise GrokQuotaExceededError(
+                    f"create_image: submit fired but Grok reports a generation "
+                    f"limit reached — the account is capped until it resets. "
+                    f"Do not retry until reset. Alert: {alert!r}"
+                )
             await asyncio.sleep(0.5)
         if len(captured_data["jobs"]) == 0:
             # Probe submit-button state first. Reporter pattern (2026-06,
@@ -7023,27 +7152,17 @@ class GrokClient(ResponseParser):
             yields a fresh ~4-image batch). In-page, NO reload. Returns True if
             the click fired, False if the submit button is absent/disabled.
             """
-            escaped = prompt.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
-            filled = await self._tab.evaluate(
-                f"""
-                (() => {{
-                    const ed = document.querySelector('.tiptap.ProseMirror');
-                    if (!ed) return 'not-found';
-                    ed.focus();
-                    document.execCommand('selectAll');
-                    document.execCommand('delete');
-                    document.execCommand('insertText', false, `{escaped}`);
-                    return 'ok';
-                }})()
-                """
-            )
-            if filled != "ok":
+            try:
+                await self._fill_prompt_robust(prompt)  # focus-emul + verify/retry
+            except GrokAPIError:
                 return False
             await asyncio.sleep(0.5 * d)
             rect_raw = await self._tab.evaluate(
                 r"""
                 JSON.stringify((() => {
-                    const b = document.querySelector('button[aria-label="提交"]');
+                    const b = document.querySelector('button[aria-label="提交"]')
+                           || document.querySelector('button[aria-label="Submit"]')
+                           || document.querySelector('button[type="submit"]');
                     if (!b) return null;
                     const r = b.getBoundingClientRect();
                     return {x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2),
@@ -7619,6 +7738,30 @@ class GrokClient(ResponseParser):
                 f"candidate_messages={candidate_messages!r}. "
                 f"Wait several minutes before retrying."
             )
+        # A SUCCESSFUL submit CLEARS the editor (the prompt was sent), so an
+        # empty editor can ALSO mean "submit worked but generation is gated" —
+        # e.g. Grok's "Weekly limit reached / You have N resets available"
+        # alert. Check that BEFORE blaming an empty fill, or a rate-limited-but-
+        # successful submit gets mis-typed as a prompt-fill bug (observed while
+        # driving a real account near its weekly cap over the extension
+        # transport). This alert may not be a submit-adjacent banner, so probe
+        # the page directly.
+        limit_alert = await self._tab.evaluate(
+            "(() => {"
+            " const re = /(weekly|daily|hourly)\\s*limit\\s*reached|limit reached|reset available|"
+            "已达上限|次数已用完|额度已用完|本周(生成)?已达上限/i;"
+            " const els = Array.from(document.querySelectorAll("
+            '\'[role="alert"],[role="status"],div,span,p\'));'
+            " for (const e of els) { const t = (e.innerText||'');"
+            "   if (t && t.length < 140 && re.test(t)) return t.replace(/\\s+/g,' ').slice(0,110); }"
+            " return ''; })()"
+        )
+        if limit_alert:
+            return GrokQuotaExceededError(
+                f"{action}: submit fired but Grok reports a generation limit "
+                f"reached — the account is capped until it resets. Stop "
+                f"generating; do not retry. Alert: {limit_alert!r}"
+            )
         # BEFORE blaming a throttle: an EMPTY prompt editor disables submit
         # exactly the same way. If the prompt never got typed in, this is a
         # UI-not-ready / prompt-fill failure (e.g. the 2026-08 Image 2.0
@@ -8054,12 +8197,19 @@ class GrokClient(ResponseParser):
 
         await asyncio.sleep(1 * d)
 
-        # Step 4: Click the submit button
-        submit_btn = await self._tab.select('button[aria-label="提交"]')
+        # Step 4: Click the submit button. Pick the locale-robust selector in ONE
+        # evaluate (automation profile = '提交', real English profile = 'Submit';
+        # both type=submit) so we don't burn a 10s select-timeout on a miss.
+        submit_sel = await self._tab.evaluate(
+            "(document.querySelector('button[aria-label=\"提交\"]') ? 'button[aria-label=\"提交\"]'"
+            " : document.querySelector('button[aria-label=\"Submit\"]') ? 'button[aria-label=\"Submit\"]'"
+            " : document.querySelector('button[type=\"submit\"]') ? 'button[type=\"submit\"]' : '')"
+        )
+        submit_btn = await self._tab.select(submit_sel) if submit_sel else None
         if submit_btn:
             await submit_btn.click()
         else:
-            raise GrokAPIError("Could not find submit button")
+            raise GrokAPIError("Could not find 提交/Submit submit button")
 
         # Step 5: Wait for URL to change to /imagine/post/{id}
         start_time = asyncio.get_event_loop().time()
