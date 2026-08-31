@@ -897,7 +897,15 @@ class GrokClient(ResponseParser):
         import asyncio
         import contextlib
 
-        from ai_dev_browser.core.connection import connect_extension
+        try:
+            from ai_dev_browser.core.connection import connect_extension
+        except ImportError as e:
+            raise GrokAPIError(
+                "transport='extension' needs ai-dev-browser >= 0.34 (the bridge "
+                "extension transport). Upgrade: pip install -U "
+                "'ai-dev-browser[cleanup]'. The default transport='cdp' works on "
+                f"older versions. ({e})"
+            ) from e
 
         try:
             self._browser = await connect_extension()
@@ -5184,25 +5192,9 @@ class GrokClient(ResponseParser):
             await asyncio.sleep(1 * d)
 
         if not prompt_filled_via_refs:
-            escaped_prompt = (
-                edit_prompt.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
-            )
-            fill_result = await self._tab.evaluate(
-                f"""
-                (() => {{
-                    const ed = document.querySelector('.tiptap.ProseMirror')
-                           || document.querySelector('[contenteditable="true"]');
-                    if (!ed) return 'no-editor';
-                    ed.focus();
-                    document.execCommand('selectAll');
-                    document.execCommand('delete');
-                    document.execCommand('insertText', false, `{escaped_prompt}`);
-                    return 'ok';
-                }})()
-                """
-            )
-            if fill_result == "no-editor":
-                raise GrokAPIError("Could not find prompt editor (ProseMirror)")
+            # Robust fill (see _fill_prompt_robust): focus-emul-before-fill so it
+            # works on a BACKGROUNDED tab (extension transport), + verify/retry.
+            await self._fill_prompt_robust(edit_prompt)
             await asyncio.sleep(1 * d)
 
         # Drop anything captured during page hydration (the source
@@ -6326,6 +6318,52 @@ class GrokClient(ResponseParser):
                 inner[k] = p[k]
         return await self.create_video(inner, _internal=True)
 
+    async def _fill_prompt_robust(self, text: str, *, attempts: int = 4) -> None:
+        """Fill the ProseMirror prompt editor reliably — even on a BACKGROUNDED
+        tab (extension transport / non-foreground automation window).
+
+        ``document.execCommand('insertText')`` silently no-ops when the document
+        reports no focus, so re-assert focus emulation IMMEDIATELY before the
+        fill (verified: ``document.hasFocus()`` flips True over the extension
+        bridge and the fill then lands — an earlier mode/aspect click can drop
+        the emulation), then VERIFY the text stuck and retry. Raises
+        :class:`GrokAPIError` if the editor is missing or the fill won't stick.
+        """
+        import asyncio
+        import contextlib
+
+        from .actions.extend_seed import enable_focus_emulation as _efe
+
+        d = self._ui_delay
+        escaped = text.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
+        fill_js = (
+            "(() => { const ed = document.querySelector('.tiptap.ProseMirror')"
+            " || document.querySelector('[contenteditable=\"true\"]');"
+            " if (!ed) return 'no-editor'; ed.focus();"
+            " document.execCommand('selectAll'); document.execCommand('delete');"
+            f" document.execCommand('insertText', false, `{escaped}`);"
+            " return ((ed.innerText||'').trim().length>0) ? 'ok' : 'empty'; })()"
+        )
+        read_js = (
+            "((document.querySelector('.tiptap.ProseMirror')"
+            "||document.querySelector('[contenteditable=\"true\"]')||{})"
+            ".innerText||'').trim()"
+        )
+        for _ in range(attempts):
+            with contextlib.suppress(Exception):
+                await _efe(self._tab)
+            res = await self._tab.evaluate(fill_js)
+            if res == "no-editor":
+                raise GrokAPIError("Could not find prompt editor (ProseMirror)")
+            await asyncio.sleep(0.25 * d)
+            if await self._tab.evaluate(read_js):
+                return
+            await asyncio.sleep(0.4 * d)
+        raise GrokAPIError(
+            "Prompt fill did not stick after retries — the editor stayed empty "
+            "(backgrounded tab lost document focus, or a Grok UI re-mount race)."
+        )
+
     async def create_image(
         self,
         params: dict,
@@ -6962,48 +7000,9 @@ class GrokClient(ResponseParser):
                 await asyncio.sleep(1 * d)
 
         if not prompt_filled_via_refs:
-            # Robust fill for BACKGROUNDED tabs (extension transport, or any
-            # non-foreground automation window): document.execCommand('insertText')
-            # no-ops on a tab whose document reports no focus — and intervening
-            # mode/aspect clicks can drop the earlier focus-emulation. Re-assert
-            # focus emulation right here (verified: document.hasFocus() then flips
-            # True over the extension bridge and execCommand fills ProseMirror),
-            # fill, then VERIFY the text stuck and retry — the editor going empty
-            # at submit was the whole bug.
-            import contextlib
-
-            from .actions.extend_seed import enable_focus_emulation as _efe
-
-            with contextlib.suppress(Exception):
-                await _efe(self._tab)
-            escaped_prompt = prompt.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
-            fill_js = (
-                "(() => { const ed = document.querySelector('.tiptap.ProseMirror');"
-                " if (!ed) return 'not-found'; ed.focus();"
-                " document.execCommand('selectAll'); document.execCommand('delete');"
-                f" document.execCommand('insertText', false, `{escaped_prompt}`);"
-                " return ((ed.innerText||'').trim().length>0) ? 'ok' : 'empty'; })()"
-            )
-            current = ""
-            for _attempt in range(4):
-                fill_result = await self._tab.evaluate(fill_js)
-                if fill_result == "not-found":
-                    raise GrokAPIError("Could not find prompt editor (ProseMirror)")
-                await asyncio.sleep(0.25 * d)
-                current = await self._tab.evaluate(
-                    "((document.querySelector('.tiptap.ProseMirror')||{}).innerText||'').trim()"
-                )
-                if current:
-                    break
-                with contextlib.suppress(Exception):
-                    await _efe(self._tab)  # re-assert before retry
-                await asyncio.sleep(0.4 * d)
-            if not current:
-                raise GrokAPIError(
-                    "Prompt fill did not stick after retries — the editor stayed "
-                    "empty (backgrounded tab lost document focus, or a Grok UI "
-                    "re-mount race)."
-                )
+            # Robust fill (focus-emul-before-fill + verify/retry) so it works on
+            # a BACKGROUNDED tab (extension transport / non-foreground window).
+            await self._fill_prompt_robust(prompt)
             await asyncio.sleep(1 * d)
 
         # Step 4: Click the 提交 submit via real CDP mouse. The button's
@@ -7153,21 +7152,9 @@ class GrokClient(ResponseParser):
             yields a fresh ~4-image batch). In-page, NO reload. Returns True if
             the click fired, False if the submit button is absent/disabled.
             """
-            escaped = prompt.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
-            filled = await self._tab.evaluate(
-                f"""
-                (() => {{
-                    const ed = document.querySelector('.tiptap.ProseMirror');
-                    if (!ed) return 'not-found';
-                    ed.focus();
-                    document.execCommand('selectAll');
-                    document.execCommand('delete');
-                    document.execCommand('insertText', false, `{escaped}`);
-                    return 'ok';
-                }})()
-                """
-            )
-            if filled != "ok":
+            try:
+                await self._fill_prompt_robust(prompt)  # focus-emul + verify/retry
+            except GrokAPIError:
                 return False
             await asyncio.sleep(0.5 * d)
             rect_raw = await self._tab.evaluate(
@@ -8210,12 +8197,19 @@ class GrokClient(ResponseParser):
 
         await asyncio.sleep(1 * d)
 
-        # Step 4: Click the submit button
-        submit_btn = await self._tab.select('button[aria-label="提交"]')
+        # Step 4: Click the submit button. Pick the locale-robust selector in ONE
+        # evaluate (automation profile = '提交', real English profile = 'Submit';
+        # both type=submit) so we don't burn a 10s select-timeout on a miss.
+        submit_sel = await self._tab.evaluate(
+            "(document.querySelector('button[aria-label=\"提交\"]') ? 'button[aria-label=\"提交\"]'"
+            " : document.querySelector('button[aria-label=\"Submit\"]') ? 'button[aria-label=\"Submit\"]'"
+            " : document.querySelector('button[type=\"submit\"]') ? 'button[type=\"submit\"]' : '')"
+        )
+        submit_btn = await self._tab.select(submit_sel) if submit_sel else None
         if submit_btn:
             await submit_btn.click()
         else:
-            raise GrokAPIError("Could not find submit button")
+            raise GrokAPIError("Could not find 提交/Submit submit button")
 
         # Step 5: Wait for URL to change to /imagine/post/{id}
         start_time = asyncio.get_event_loop().time()
