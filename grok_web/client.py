@@ -6962,42 +6962,47 @@ class GrokClient(ResponseParser):
                 await asyncio.sleep(1 * d)
 
         if not prompt_filled_via_refs:
-            # Robust fill that works even when the tab is BACKGROUNDED (extension
-            # transport, or a non-foreground automation window):
-            # document.execCommand('insertText') silently no-ops on an unfocused
-            # document even WITH focus emulation, so type via CDP Input.insertText
-            # (synthetic, focus-independent) and verify + retry. execCommand is
-            # the fallback for the rare case the CDP path is unavailable.
+            # Robust fill for BACKGROUNDED tabs (extension transport, or any
+            # non-foreground automation window): document.execCommand('insertText')
+            # no-ops on a tab whose document reports no focus — and intervening
+            # mode/aspect clicks can drop the earlier focus-emulation. Re-assert
+            # focus emulation right here (verified: document.hasFocus() then flips
+            # True over the extension bridge and execCommand fills ProseMirror),
+            # fill, then VERIFY the text stuck and retry — the editor going empty
+            # at submit was the whole bug.
+            import contextlib
+
+            from .actions.extend_seed import enable_focus_emulation as _efe
+
+            with contextlib.suppress(Exception):
+                await _efe(self._tab)
             escaped_prompt = prompt.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
+            fill_js = (
+                "(() => { const ed = document.querySelector('.tiptap.ProseMirror');"
+                " if (!ed) return 'not-found'; ed.focus();"
+                " document.execCommand('selectAll'); document.execCommand('delete');"
+                f" document.execCommand('insertText', false, `{escaped_prompt}`);"
+                " return ((ed.innerText||'').trim().length>0) ? 'ok' : 'empty'; })()"
+            )
             current = ""
             for _attempt in range(4):
-                focused = await self._tab.evaluate(
-                    "(() => { const ed = document.querySelector('.tiptap.ProseMirror');"
-                    " if (!ed) return 'not-found'; ed.focus();"
-                    " document.execCommand('selectAll'); document.execCommand('delete');"
-                    " return 'ok'; })()"
-                )
-                if focused == "not-found":
+                fill_result = await self._tab.evaluate(fill_js)
+                if fill_result == "not-found":
                     raise GrokAPIError("Could not find prompt editor (ProseMirror)")
-                try:
-                    await self._tab.send(cdp.input_.insert_text(text=prompt))
-                except Exception:
-                    await self._tab.evaluate(
-                        "(() => { const ed = document.querySelector('.tiptap.ProseMirror');"
-                        " if (ed) { ed.focus();"
-                        f" document.execCommand('insertText', false, `{escaped_prompt}`); }} }})()"
-                    )
-                await asyncio.sleep(0.3 * d)
+                await asyncio.sleep(0.25 * d)
                 current = await self._tab.evaluate(
                     "((document.querySelector('.tiptap.ProseMirror')||{}).innerText||'').trim()"
                 )
                 if current:
                     break
+                with contextlib.suppress(Exception):
+                    await _efe(self._tab)  # re-assert before retry
                 await asyncio.sleep(0.4 * d)
             if not current:
                 raise GrokAPIError(
                     "Prompt fill did not stick after retries — the editor stayed "
-                    "empty (backgrounded tab and/or a Grok UI re-mount race)."
+                    "empty (backgrounded tab lost document focus, or a Grok UI "
+                    "re-mount race)."
                 )
             await asyncio.sleep(1 * d)
 
@@ -7056,9 +7061,34 @@ class GrokClient(ResponseParser):
         captured_data["submit_ts_ns"] = _time_mod.perf_counter_ns()
         wait_first = 30
         start_first = asyncio.get_event_loop().time()
+        _limit_re = (
+            r"(weekly|daily|hourly)\s*limit\s*reached|limit reached|reset available|"
+            r"已达上限|次数已用完|额度已用完"
+        )
         while asyncio.get_event_loop().time() - start_first < wait_first:
             if len(captured_data["jobs"]) > 0:
                 break
+            # Grok's "Weekly limit reached / N resets available" alert is
+            # TRANSIENT (~seconds after submit), so catch it HERE — a
+            # rate-capped-but-SUCCESSFUL submit clears the editor and otherwise
+            # looks like an empty-fill bug 30s later (observed driving a real
+            # account near its weekly cap over the extension transport).
+            alert = await self._tab.evaluate(
+                "((reSrc) => { const re = new RegExp(reSrc, 'i');"
+                " const els = Array.from(document.querySelectorAll("
+                '\'[role="alert"],[role="status"],div,span,p\'));'
+                " for (const e of els) { const t = (e.innerText||'');"
+                "   if (t && t.length < 140 && re.test(t)) return t.replace(/\\s+/g,' ').slice(0,110); }"
+                " return ''; })(" + json_mod.dumps(_limit_re) + ")"
+            )
+            if alert:
+                from .exceptions import GrokQuotaExceededError
+
+                raise GrokQuotaExceededError(
+                    f"create_image: submit fired but Grok reports a generation "
+                    f"limit reached — the account is capped until it resets. "
+                    f"Do not retry until reset. Alert: {alert!r}"
+                )
             await asyncio.sleep(0.5)
         if len(captured_data["jobs"]) == 0:
             # Probe submit-button state first. Reporter pattern (2026-06,
@@ -7720,6 +7750,30 @@ class GrokClient(ResponseParser):
                 f"banners={banners!r}, "
                 f"candidate_messages={candidate_messages!r}. "
                 f"Wait several minutes before retrying."
+            )
+        # A SUCCESSFUL submit CLEARS the editor (the prompt was sent), so an
+        # empty editor can ALSO mean "submit worked but generation is gated" —
+        # e.g. Grok's "Weekly limit reached / You have N resets available"
+        # alert. Check that BEFORE blaming an empty fill, or a rate-limited-but-
+        # successful submit gets mis-typed as a prompt-fill bug (observed while
+        # driving a real account near its weekly cap over the extension
+        # transport). This alert may not be a submit-adjacent banner, so probe
+        # the page directly.
+        limit_alert = await self._tab.evaluate(
+            "(() => {"
+            " const re = /(weekly|daily|hourly)\\s*limit\\s*reached|limit reached|reset available|"
+            "已达上限|次数已用完|额度已用完|本周(生成)?已达上限/i;"
+            " const els = Array.from(document.querySelectorAll("
+            '\'[role="alert"],[role="status"],div,span,p\'));'
+            " for (const e of els) { const t = (e.innerText||'');"
+            "   if (t && t.length < 140 && re.test(t)) return t.replace(/\\s+/g,' ').slice(0,110); }"
+            " return ''; })()"
+        )
+        if limit_alert:
+            return GrokQuotaExceededError(
+                f"{action}: submit fired but Grok reports a generation limit "
+                f"reached — the account is capped until it resets. Stop "
+                f"generating; do not retry. Alert: {limit_alert!r}"
             )
         # BEFORE blaming a throttle: an EMPTY prompt editor disables submit
         # exactly the same way. If the prompt never got typed in, this is a
