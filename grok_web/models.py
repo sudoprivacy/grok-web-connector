@@ -135,6 +135,21 @@ class GenerationMedia(BaseModel):
     asset_id: str | None = Field(
         None, description="URL filename stem — matches the download-file id"
     )
+    size: int | None = Field(
+        None,
+        description=(
+            "Byte size of the base asset from Grok's metadata (sizeBytes) — "
+            "size-match WITHOUT a HEAD request. None if unknown (fallback path)."
+        ),
+    )
+    hd_url: str | None = Field(
+        None,
+        description=(
+            "1080p HD re-encode URL (videos), a DIFFERENT-bytes variant of the "
+            "base. Its size isn't in metadata — HEAD it to size-match an "
+            "'{id}_1080_hd.mp4' download. None if no HD variant."
+        ),
+    )
     conversation_id: str | None = Field(
         None, description="Owning app-chat conversationId (the enumeration key)"
     )

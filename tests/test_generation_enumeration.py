@@ -327,3 +327,105 @@ class TestConversationResolver:
             raise AssertionError("expected GrokNotFoundError")
         except GrokNotFoundError:
             pass
+
+
+# fileAttachmentAssetMetadata — the RICH per-asset record: assetId + sizeBytes
+# (byte size, NO HEAD) + key + hd1080Key (the 1080p re-encode, different bytes).
+RICH_VIDEO = {
+    "responses": [
+        {
+            "responseId": "rv",
+            "createTime": "2026-07-20T10:54:35Z",
+            "fileAttachmentAssetMetadata": [
+                {
+                    "assetId": "b5012415-e00a-49d9-b24b-0ca2db5a5c86",
+                    "mimeType": "video/mp4",
+                    "name": "generated_video.mp4",
+                    "sizeBytes": 4415334,
+                    "key": "users/u/generated/b5012415-e00a-49d9-b24b-0ca2db5a5c86/generated_video.mp4",
+                    "hd1080Key": "users/u/generated/b5012415-e00a-49d9-b24b-0ca2db5a5c86/generated_video_1080_hd.mp4",
+                    "auxKeys": {
+                        "1080_hd_video_key": "users/u/generated/b5012415-e00a-49d9-b24b-0ca2db5a5c86/generated_video_1080_hd.mp4"
+                    },
+                    "isDeleted": False,
+                }
+            ],
+            # base field with the SAME assetId -> must dedup to one item
+            "fileAttachmentsMetadata": [
+                {
+                    "fileMetadataId": "b5012415-e00a-49d9-b24b-0ca2db5a5c86",
+                    "fileMimeType": "video/mp4",
+                    "fileName": "generated_video.mp4",
+                    "fileUri": "users/u/generated/b5012415-e00a-49d9-b24b-0ca2db5a5c86/generated_video.mp4",
+                }
+            ],
+        }
+    ]
+}
+
+
+class TestRichAssetMetadata:
+    def test_size_and_hd_url_extracted(self):
+        items = extract_generation_media(RICH_VIDEO, "conv-r")
+        assert len(items) == 1  # rich + base dedup by assetId
+        it = items[0]
+        assert it["media_type"] == "video"
+        assert it["size"] == 4415334  # from sizeBytes — no HEAD
+        assert it["hd_url"] and it["hd_url"].endswith("generated_video_1080_hd.mp4")
+        assert it["hd_url"].startswith("https://assets.grok.com/")
+
+    def test_deleted_asset_skipped(self):
+        payload = {
+            "responses": [
+                {
+                    "responseId": "rd",
+                    "fileAttachmentAssetMetadata": [
+                        {
+                            "assetId": "x",
+                            "mimeType": "video/mp4",
+                            "name": "v.mp4",
+                            "key": "users/u/generated/x/v.mp4",
+                            "isDeleted": True,
+                        }
+                    ],
+                }
+            ]
+        }
+        assert extract_generation_media(payload, "c") == []
+
+    def test_model_carries_size_hd(self):
+        gm = GenerationMedia(**extract_generation_media(RICH_VIDEO, "c")[0])
+        assert gm.size == 4415334 and gm.hd_url and gm.media_type == "video"
+
+    def test_find_by_id_matches_metadata_size_NO_head(self):
+        c = _client()
+
+        async def fake(method, endpoint, json_data=None):
+            if endpoint.endswith("/responses"):
+                return RICH_VIDEO
+            return {"conversations": []}
+
+        c._api_request = AsyncMock(side_effect=fake)
+        head = AsyncMock(return_value=999999)
+        c.get_asset_file_size = head
+        hit = _run(c.find_generation_by_id("019f7a1e-a1c2-71a2-917b-866854bca7e2", size=4415334))
+        assert hit is not None and hit.asset_id == "b5012415-e00a-49d9-b24b-0ca2db5a5c86"
+        head.assert_not_awaited()  # matched via metadata sizeBytes, no HEAD
+
+    def test_find_by_id_matches_hd_variant_via_head(self):
+        c = _client()
+
+        async def fake(method, endpoint, json_data=None):
+            if endpoint.endswith("/responses"):
+                return RICH_VIDEO
+            return {"conversations": []}
+
+        c._api_request = AsyncMock(side_effect=fake)
+
+        async def head(url):
+            return 8888 if "1080_hd" in url else 4415334
+
+        c.get_asset_file_size = AsyncMock(side_effect=head)
+        # local file is the HD re-encode (8888 bytes) -> matches via hd_url HEAD
+        hit = _run(c.find_generation_by_id("conv-r", size=8888))
+        assert hit is not None and hit.hd_url and "1080_hd" in hit.hd_url

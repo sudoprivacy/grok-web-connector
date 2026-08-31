@@ -190,19 +190,21 @@ def classify_media_url(url: str) -> tuple[str | None, str | None]:
 def extract_generation_media(responses_payload, conversation_id):
     """Extract the user's generated media from a /responses payload.
 
-    Field-aware (the media a response carries is structured, not just loose
-    URLs): primary source is ``fileAttachmentsMetadata`` (each entry has
-    ``fileMetadataId`` = the asset/download id, ``fileMimeType`` = reliable
-    type, ``fileUri`` = relative CDN path); ``generatedImageUrls`` (relative
-    paths, may include videos) is folded in and classified by extension.
-    Dedup by asset_id. Returns list of dicts:
-    {url, media_type, asset_id, response_id, conversation_id, created_at}.
-    Pure/deterministic — unit-tested against captured payload samples.
+    Field-aware. The PRIMARY source is ``fileAttachmentAssetMetadata`` — the
+    richest per-asset record: ``assetId``, ``mimeType``, **``sizeBytes``** (the
+    byte size, so callers can size-match with NO HEAD request), ``key`` (relative
+    CDN path), ``width``/``height``, and ``hd1080Key`` / ``auxKeys
+    .1080_hd_video_key`` (the 1080p HD re-encode's path — a DIFFERENT-bytes
+    variant, size-matchable via its own HEAD). Falls back to
+    ``fileAttachmentsMetadata`` (base id + uri, no size) and ``generatedImageUrls``
+    for responses that lack the rich field. Dedup by asset_id. Returns dicts:
+    {url, media_type, asset_id, size, hd_url, response_id, conversation_id,
+    created_at}. Pure/deterministic — unit-tested against captured samples.
     """
     out: list[dict] = []
     seen: set[str] = set()
 
-    def _add(asset_id, media_type, url, rid, created):
+    def _add(asset_id, media_type, url, rid, created, *, size=None, hd_url=None):
         if not asset_id or not media_type or asset_id in seen:
             return
         seen.add(asset_id)
@@ -211,6 +213,8 @@ def extract_generation_media(responses_payload, conversation_id):
                 "url": url,
                 "media_type": media_type,
                 "asset_id": asset_id,
+                "size": size,
+                "hd_url": hd_url,
                 "response_id": rid,
                 "conversation_id": conversation_id,
                 "created_at": created,
@@ -226,13 +230,38 @@ def extract_generation_media(responses_payload, conversation_id):
         rid = resp.get("responseId")
         created = resp.get("createTime")
 
-        # Primary: fileAttachmentsMetadata carries mime + id + relative uri.
+        # Primary (richest): fileAttachmentAssetMetadata — assetId + sizeBytes +
+        # key + hd1080Key. Prefer this so callers get byte sizes without HEADs.
+        for meta in resp.get("fileAttachmentAssetMetadata") or []:
+            if not isinstance(meta, dict) or meta.get("isDeleted"):
+                continue
+            mtype = _mime_to_type(meta.get("mimeType"))
+            if not mtype:
+                mtype, _ = classify_media_url(meta.get("name") or meta.get("key") or "")
+            aux = meta.get("auxKeys") if isinstance(meta.get("auxKeys"), dict) else {}
+            hd_key = meta.get("hd1080Key") or aux.get("1080_hd_video_key")
+            size = meta.get("sizeBytes")
+            try:
+                size = int(size) if size is not None else None
+            except (TypeError, ValueError):
+                size = None
+            _add(
+                meta.get("assetId"),
+                mtype,
+                _asset_url(meta.get("key")),
+                rid,
+                created,
+                size=size,
+                hd_url=_asset_url(hd_key) if hd_key else None,
+            )
+
+        # Fallback: fileAttachmentsMetadata (base id + uri; no size) for older
+        # responses that lack the rich field.
         for meta in resp.get("fileAttachmentsMetadata") or []:
             if not isinstance(meta, dict):
                 continue
             mtype = _mime_to_type(meta.get("fileMimeType"))
             if not mtype:
-                # fall back to extension of the file name / uri
                 mtype, _ = classify_media_url(meta.get("fileName") or meta.get("fileUri") or "")
             _add(meta.get("fileMetadataId"), mtype, _asset_url(meta.get("fileUri")), rid, created)
 

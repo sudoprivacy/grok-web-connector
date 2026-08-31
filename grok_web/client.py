@@ -1534,7 +1534,11 @@ class GrokClient(ResponseParser):
 
         Returns:
             list[GenerationMedia] (newest-first) with ``url``, ``media_type``,
-            ``asset_id``, ``conversation_id``, ``response_id``, ``created_at``.
+            ``asset_id``, ``conversation_id``, ``response_id``, ``created_at``,
+            and — from Grok's rich asset metadata — ``size`` (byte size, so you
+            can size-match WITHOUT a HEAD request) and ``hd_url`` (the 1080p HD
+            re-encode for videos that have one; HEAD it to size-match an
+            ``{id}_1080_hd.mp4`` download).
 
         Failure:
             * Unknown / inaccessible conversationId -> GrokNotFoundError (404).
@@ -1600,12 +1604,26 @@ class GrokClient(ResponseParser):
             videos = [m for m in media if m.media_type == "video"] or media
             # (2) size-match pins the exact video.
             if size is not None:
+                # (2a) Metadata byte size — NO HEAD (Grok's sizeBytes).
                 for m in videos:
-                    try:
-                        if await self.get_asset_file_size(m.url) == size:
-                            return m
-                    except Exception:
-                        continue
+                    if m.size is not None and m.size == size:
+                        return m
+                # (2b) HD 1080 re-encode ('{id}_1080_hd.mp4' downloads) has
+                # different bytes and no metadata size — HEAD it. Also HEAD the
+                # base when metadata size was absent (fallback-extracted media).
+                for m in videos:
+                    if m.size is None:
+                        try:
+                            if await self.get_asset_file_size(m.url) == size:
+                                return m
+                        except Exception:
+                            pass
+                    if m.hd_url:
+                        try:
+                            if await self.get_asset_file_size(m.hd_url) == size:
+                                return m  # download is this generation's HD variant
+                        except Exception:
+                            pass
             # (3) unambiguous single video.
             elif len(videos) == 1:
                 return videos[0]
