@@ -118,6 +118,65 @@ class TestParseVideoNdjson:
         r = parse_video_ndjson_response(body, parent_post_id="p1", statsig_id="s")
         assert r.video_id == "vid-mod" and r.moderated is True
 
+    def test_is_root_user_uploaded_parsed(self):
+        """The 2026-09 'uploaded-source' stricter-mod signal: a moderated video
+        result carrying isRootUserUploaded=True must surface BOTH flags. Shape
+        live-captured 2026-09 (post c775a882 extend -> moderated video
+        b0082090, DOM banner 'Generations from uploaded photos have extra
+        safeguards'). This is the reliable hard-stop, distinct from the noisy
+        bare moderated=True."""
+        body = _ndjson(
+            {
+                "result": {
+                    "streamingVideoGenerationResponse": {
+                        "videoId": "vid-uploaded-root",
+                        "progress": 100,
+                        "moderated": True,
+                        "isRootUserUploaded": True,
+                        "resolutionName": "480p",
+                    }
+                }
+            },
+        )
+        r = parse_video_ndjson_response(body, parent_post_id="p1", statsig_id="s")
+        assert r.video_id == "vid-uploaded-root"
+        assert r.moderated is True
+        assert r.is_root_user_uploaded is True
+
+    def test_is_root_user_uploaded_defaults_false(self):
+        """Absent isRootUserUploaded → False (back-compat: an ordinary moderated
+        result is the NOISY case, not a hard stop)."""
+        body = _ndjson(
+            {
+                "result": {
+                    "streamingVideoGenerationResponse": {
+                        "videoId": "vid-ordinary",
+                        "progress": 100,
+                        "moderated": True,
+                    }
+                }
+            },
+        )
+        r = parse_video_ndjson_response(body, parent_post_id="p1", statsig_id="s")
+        assert r.moderated is True
+        assert r.is_root_user_uploaded is False
+
+    def test_clean_result_is_not_uploaded_root(self):
+        """A clean, non-moderated gen leaves both flags False."""
+        body = _ndjson(
+            {
+                "result": {
+                    "streamingVideoGenerationResponse": {
+                        "videoId": "vid-clean",
+                        "progress": 100,
+                    }
+                }
+            },
+        )
+        r = parse_video_ndjson_response(body, parent_post_id="p1", statsig_id="s")
+        assert r.moderated is False
+        assert r.is_root_user_uploaded is False
+
     def test_video_result_wins_even_if_userresponse_present(self):
         """A normal gen echoes the user's message (userResponse) AND streams the
         video — the video result must win, no moderation error."""

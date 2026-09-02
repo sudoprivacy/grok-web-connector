@@ -393,6 +393,7 @@ def parse_video_ndjson_response(
         source_post_id=parent_post_id,
         parent_post_id=video_result.get("parentPostId", parent_post_id),
         moderated=video_result.get("moderated", False),
+        is_root_user_uploaded=video_result.get("isRootUserUploaded", False),
         progress=video_result.get("progress", 0),
         mode=video_result.get("mode", "normal"),
         model_name=video_result.get("modelName"),

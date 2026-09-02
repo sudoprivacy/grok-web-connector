@@ -4318,6 +4318,7 @@ class GrokClient(ResponseParser):
             source_video_id=video_id,
             parent_post_id=gen_result.parent_post_id or video_id,
             moderated=gen_result.moderated,
+            is_root_user_uploaded=gen_result.is_root_user_uploaded,
             progress=gen_result.progress,
             mode=gen_result.mode,
             model_name=gen_result.model_name,
@@ -6358,6 +6359,14 @@ class GrokClient(ResponseParser):
             "(() => { const ed = document.querySelector('.tiptap.ProseMirror')"
             " || document.querySelector('[contenteditable=\"true\"]');"
             " if (!ed) return 'no-editor'; ed.focus();"
+            # Pin the selection INSIDE the editor before execCommand. On some
+            # composers (e.g. the post-page video composer) document.activeElement
+            # is a dropdown wrapper, so a bare execCommand targets the wrong node
+            # and insertText silently no-ops. A Range collapsed into the editor
+            # forces the selection there so insertText lands in ProseMirror.
+            " try { const rg = document.createRange(); rg.selectNodeContents(ed);"
+            " rg.collapse(false); const sel = window.getSelection();"
+            " sel.removeAllRanges(); sel.addRange(rg); } catch (e) {}"
             " document.execCommand('selectAll'); document.execCommand('delete');"
             f" document.execCommand('insertText', false, `{escaped}`);"
             " return ((ed.innerText||'').trim().length>0) ? 'ok' : 'empty'; })()"
@@ -8803,6 +8812,7 @@ class GrokClient(ResponseParser):
                     source_post_id=extend_res.source_video_id,
                     parent_post_id=extend_res.parent_post_id,
                     moderated=extend_res.moderated,
+                    is_root_user_uploaded=extend_res.is_root_user_uploaded,
                     progress=extend_res.progress,
                     mode=extend_res.mode,
                     model_name=extend_res.model_name,
@@ -9062,7 +9072,9 @@ class GrokClient(ResponseParser):
 
             # 1. Click 制作视频 (Make Video) → open submenu. 2026-07 renamed
             # this inline entry from 动画 / Animate; keep old labels as
-            # fallbacks for UI drift.
+            # fallbacks for UI drift. The submenu (添加提示 / 火辣 / 快速动画化)
+            # renders in English as Add Prompt / Spicy / Quick Animate — those
+            # variants are already carried in `submenu`.
             await self._click_inline_post_button("制作视频", "Make Video", "动画", "Animate")
             await asyncio.sleep(1.0 * self._ui_delay)
 
@@ -9071,7 +9083,7 @@ class GrokClient(ResponseParser):
 
             if use_composer:
                 # 3. Composer mounted — set duration / resolution / aspect
-                # / prompt + click 生成视频.
+                # / prompt + click the composer's generate button.
                 await asyncio.sleep(1.5 * self._ui_delay)
 
                 # Duration: 6 / 10. Default 10 is no-op.
@@ -9103,25 +9115,25 @@ class GrokClient(ResponseParser):
                             "options); leaving Grok default."
                         )
                     else:
-                        await self._click_inline_post_button("宽高比", "Aspect ratio")
+                        await self._click_inline_post_button(
+                            "宽高比", "Aspect Ratio", "Aspect ratio"
+                        )
                         await asyncio.sleep(0.5 * self._ui_delay)
                         await self._click_menuitem(aspect_ratio)
                         await asyncio.sleep(0.3 * self._ui_delay)
 
-                # Prompt — robust fill (focus-emul) so it lands on a
-                # BACKGROUNDED tab (extension transport); plain execCommand
-                # no-ops there and the composer's generate button never enables.
+                # Prompt — robust fill (focus-emul + selection-pinned) so it
+                # lands on a BACKGROUNDED tab (extension transport) and the
+                # composer's generate button enables.
                 if adjustment_prompt:
                     await self._fill_prompt_robust(adjustment_prompt)
                     await asyncio.sleep(1 * self._ui_delay)
 
-                # Submit. NOTE (2026-09): on the ENGLISH post-page composer the
-                # generate button isn't labeled 生成视频/Generate Video and a
-                # naive "Make Video" fallback hits the wrong instance (re-opens
-                # the submenu, no POST). The Quick-Animate path (no composer)
-                # works over the extension transport; the custom-prompt composer
-                # generate-button on the English UI is still TODO.
-                await self._click_inline_post_button("生成视频", "Generate Video")
+                # Submit. The composer's generate button is 生成视频 on the zh
+                # UI and "Make video" (lowercase 'v') on the 2026-09 English UI
+                # — the latter is DISTINCT from the capital "Make Video" sidebar
+                # action button, so the case-sensitive match won't collide.
+                await self._click_inline_post_button("生成视频", "Make video", "Generate Video")
 
             if not await monitor.wait_for_request(timeout=10):
                 raise GrokAPIError(

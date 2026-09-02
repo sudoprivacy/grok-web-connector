@@ -443,13 +443,23 @@ async def fill_prompt(tab, prompt: str) -> None:
 
 
 async def click_generate(tab) -> None:
-    """Click the 生成视频 button to submit the extend request."""
+    """Click the generate button to submit the extend request.
+
+    Locale-aware: the zh UI labels it ``生成视频``; the 2026-09 English UI
+    labels the extend composer's generate button ``Make video`` (lowercase
+    'v' — DISTINCT from the capital ``Make Video`` sidebar action button, so
+    the exact case-sensitive match won't collide). Prefer an ENABLED match.
+    """
     rect = await _eval_json(
         tab,
         r"""
         (() => {
-            const b = Array.from(document.querySelectorAll('button'))
-                .find(x => (x.getAttribute('aria-label')||'') === '生成视频');
+            const labels = new Set(['生成视频', 'Make video']);
+            const cands = Array.from(document.querySelectorAll('button'))
+                .filter(x => labels.has((x.getAttribute('aria-label')||'')));
+            const enabled = cands.find(
+                x => !(x.disabled || x.getAttribute('aria-disabled') === 'true'));
+            const b = enabled || cands[0];
             if (!b) return null;
             const r = b.getBoundingClientRect();
             return {x: r.x|0, y: r.y|0, w: r.width|0, h: r.height|0};
@@ -457,7 +467,9 @@ async def click_generate(tab) -> None:
         """,
     )
     if not rect:
-        raise GrokAPIError("click_generate: 生成视频 button not found")
+        raise GrokAPIError(
+            "click_generate: generate button not found (looked for '生成视频' / 'Make video')"
+        )
     cx = rect["x"] + rect["w"] // 2
     cy = rect["y"] + rect["h"] // 2
     await _cdp_mouse(tab, "mouseMoved", cx, cy)

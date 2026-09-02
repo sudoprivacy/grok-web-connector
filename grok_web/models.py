@@ -556,7 +556,27 @@ class VideoGenerationResult(BaseModel):
             "post-render moderation pass whose verdict is NOT in this "
             "field. To catch post-render moderation, pass "
             "verify_final=True to create_video() or call "
-            "client.check_video_moderated(video_id) afterwards."
+            "client.check_video_moderated(video_id) afterwards. Also NOTE: "
+            "Grok raises this field NOISILY (many false positives); a bare "
+            "moderated=True is a weak signal. See is_root_user_uploaded for "
+            "the reliable hard-stop case."
+        ),
+    )
+    is_root_user_uploaded: bool = Field(
+        False,
+        description=(
+            "True when Grok classifies the ROOT of this video's chain as a "
+            "user-uploaded source. That puts EVERY generation off this source "
+            "on a STRICTER 'uploaded-photo' moderation path (UI banner: "
+            "'Generations from uploaded photos have extra safeguards to "
+            "prevent inappropriate content'). Combined with moderated=True "
+            "this is a RELIABLE, SOURCE-scoped HARD STOP: unlike a bare "
+            "moderated=True (noisy, many false positives), retrying the same "
+            "source won't help — the whole chain is on the strict path. Grok "
+            "sometimes sets this even when you uploaded NOTHING (it can "
+            "misclassify an in-Grok root as uploaded); the strict-moderation "
+            "behavior applies regardless. Sourced from "
+            "streamingVideoGenerationResponse.isRootUserUploaded."
         ),
     )
     progress: int = Field(100, description="Generation progress (100 = complete)")
@@ -690,6 +710,16 @@ class VideoExtendResult(BaseModel):
         ),
     )
     moderated: bool = Field(False, description="True if content was flagged by moderation")
+    is_root_user_uploaded: bool = Field(
+        False,
+        description=(
+            "True when Grok classifies the ROOT of this chain as a "
+            "user-uploaded source → the STRICTER 'uploaded-photo' mod path. "
+            "Combined with moderated=True this is a reliable, source-scoped "
+            "HARD STOP (retrying the same source won't help). Grok may set "
+            "it even with no real upload. See VideoGenerationResult."
+        ),
+    )
     progress: int = Field(100, description="Generation progress (100 = complete)")
     mode: str = Field("extend", description="Generation mode")
     model_name: str | None = Field(None, description="Model used")

@@ -44,6 +44,7 @@ import pytest
 
 from grok_web import (
     BrowserWorkerPool,
+    GrokClient,
     ImageGenerationResult,
     PostDetails,
     VideoGenerationResult,
@@ -86,6 +87,28 @@ async def client():
     """Yield a real GrokClient for integration tests."""
     async with get_client() as c:
         yield c
+
+
+@pytest.fixture
+async def extension_client():
+    """Yield a GrokClient over the EXTENSION transport (drives the user's real
+    Chrome via the bundled bridge extension).
+
+    Skipped when the bridge isn't reachable — needs ai-dev-browser >= 0.34 AND
+    a running Chrome with the bridge extension loaded. Never launches its own
+    Chrome, so it can't be exercised on headless CI; it's the transport the
+    2026-09 English composer-direct video flow was verified on.
+    """
+    client = GrokClient(transport="extension")
+    try:
+        entered = await client.__aenter__()
+    except Exception as e:  # ImportError (adb<0.34) or no bridge/Chrome
+        pytest.skip(f"extension transport unavailable: {e}")
+    try:
+        yield entered
+    finally:
+        with contextlib.suppress(Exception):
+            await client.__aexit__(None, None, None)
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +175,51 @@ async def test_img2vid_roundtrip(client):
     finally:
         if result.video_id:
             await client.delete_video(result.video_id)
+
+
+# ---------------------------------------------------------------------------
+# Scenario: extension transport — 2026-09 English composer-direct img2vid
+# ---------------------------------------------------------------------------
+@pytest.mark.integration
+async def test_extension_composer_img2vid(extension_client):
+    """transport='extension': custom-prompt img2vid via the 2026-09 English
+    composer-direct flow.
+
+    Real journey: pick a source image -> animate it WITH a prompt -> Grok
+    returns a video whose uploaded-source mod signal is populated -> verify
+    linkage / clean up. Regression guard for (a) the English composer generate
+    button ('Make video', lowercase — distinct from the capital sidebar 'Make
+    Video'), (b) the selection-pinned _fill_prompt_robust fill on a
+    backgrounded tab, and (c) the is_root_user_uploaded mod-signal plumbing. On
+    the real English Chrome, create_video(post:) routes through select_post +
+    generate_video_from_current, hitting the composer-direct branch.
+    """
+    c = extension_client
+    result = await c.create_video(
+        {
+            "images": [f"post:{TEST_SOURCE_POST_ID}"],
+            "prompt": "slow cinematic zoom",
+            "resolution": "480p",
+            "duration": "6s",
+        }
+    )
+    assert isinstance(result, VideoGenerationResult)
+    assert result.video_id, "composer-direct img2vid must return a video_id"
+    # The 2026-09 uploaded-source signal is always populated (bool); it is only
+    # a reliable hard stop when paired with moderated=True.
+    assert isinstance(result.is_root_user_uploaded, bool)
+
+    try:
+        if not result.moderated and not result.is_root_user_uploaded:
+            parent = await c.get_post_details(TEST_SOURCE_POST_ID)
+            child_ids = {ch.id for ch in parent.children}
+            assert result.video_id in child_ids, (
+                f"video {result.video_id} should appear under {TEST_SOURCE_POST_ID}"
+            )
+    finally:
+        if result.video_id and not result.moderated:
+            with contextlib.suppress(Exception):
+                await c.delete_video(result.video_id)
 
 
 # ---------------------------------------------------------------------------
