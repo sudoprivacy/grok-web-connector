@@ -9108,33 +9108,19 @@ class GrokClient(ResponseParser):
                         await self._click_menuitem(aspect_ratio)
                         await asyncio.sleep(0.3 * self._ui_delay)
 
-                # Prompt
+                # Prompt — robust fill (focus-emul) so it lands on a
+                # BACKGROUNDED tab (extension transport); plain execCommand
+                # no-ops there and the composer's generate button never enables.
                 if adjustment_prompt:
-                    escaped = (
-                        adjustment_prompt.replace("\\", "\\\\")
-                        .replace("`", "\\`")
-                        .replace("$", "\\$")
-                    )
-                    fill = await self._tab.evaluate(
-                        "(() => {"
-                        "  const ed = document.querySelector('.tiptap.ProseMirror')"
-                        "         || document.querySelector('[contenteditable=\"true\"]');"
-                        "  if (!ed) return 'no-editor';"
-                        "  ed.focus();"
-                        "  document.execCommand('selectAll');"
-                        "  document.execCommand('delete');"
-                        f"  document.execCommand('insertText', false, `{escaped}`);"
-                        "  return 'ok';"
-                        "})()"
-                    )
-                    if fill == "no-editor":
-                        raise GrokAPIError(
-                            "generate_video_from_current: composer editor "
-                            "not found after 添加提示 click."
-                        )
+                    await self._fill_prompt_robust(adjustment_prompt)
                     await asyncio.sleep(1 * self._ui_delay)
 
-                # Submit
+                # Submit. NOTE (2026-09): on the ENGLISH post-page composer the
+                # generate button isn't labeled 生成视频/Generate Video and a
+                # naive "Make Video" fallback hits the wrong instance (re-opens
+                # the submenu, no POST). The Quick-Animate path (no composer)
+                # works over the extension transport; the custom-prompt composer
+                # generate-button on the English UI is still TODO.
                 await self._click_inline_post_button("生成视频", "Generate Video")
 
             if not await monitor.wait_for_request(timeout=10):
